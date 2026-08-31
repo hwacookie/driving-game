@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://MapRenderer.cs" id="1_map"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_map")
+
+[node name="Http" type="HTTPRequest" parent="."]
+
+[node name="Cam" type="Camera2D" parent="."]
+position_smoothing_enabled = false
