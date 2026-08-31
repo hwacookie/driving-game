@@ -8,3 +8,6 @@ obj/
 .vs/
 *.user
 export.cfg
+
+## VS Code
+.vscode/
