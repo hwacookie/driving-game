@@ -290,22 +290,37 @@ public partial class MapRenderer : Node2D
 
         // --- Elevated decks (bridges, level >= 1): drawn ABOVE the
         // ground roads AND above ground-level cars (z 20+), so a car
-        // driving under a bridge disappears behind the deck. The deck
-        // uses the same road colour; its edge is a heavier 4 px concrete
-        // line instead of the 2 px white paved edge.
+        // driving under a bridge disappears behind the deck. The deck is
+        // concrete incl. a 1 m sidewalk per side; the asphalt carriageway
+        // (elevated_roadways) sits on top of it; the white boundary line
+        // (elevated_edge_rings) follows the same 15 cm inset rule as the
+        // ground roads.
+        var sidewalk = new Color(0.63f, 0.63f, 0.65f);
         if (root.TryGetProperty("elevated_roads", out var er))
             foreach (var r in er.EnumerateArray())
             {
-                AddPolygon(Pts(r.GetProperty("exterior")), roadColor, 20);
+                AddPolygon(Pts(r.GetProperty("exterior")), sidewalk, 20);
                 if (r.TryGetProperty("holes", out var eholes))
                     foreach (var h in eholes.EnumerateArray())
                         AddPolygon(Pts(h), bg, 21);
+            }
+        if (root.TryGetProperty("elevated_roadways", out var erw))
+            foreach (var r in erw.EnumerateArray())
+            {
+                AddPolygon(Pts(r.GetProperty("exterior")), roadColor, 20);
+                if (r.TryGetProperty("holes", out var erholes))
+                    foreach (var h in erholes.EnumerateArray())
+                        AddPolygon(Pts(h), bg, 21);
+            }
+        if (root.TryGetProperty("elevated_edge_rings", out var eer))
+            foreach (var ring in eer.EnumerateArray())
+            {
                 var edge = new Line2D
                 {
-                    Points = Pts(r.GetProperty("exterior")).ToArray(),
+                    Points = Pts(ring).ToArray(),
                     Closed = true,
-                    DefaultColor = new Color(0.42f, 0.42f, 0.47f),
-                    Width = 4f / _cam.Zoom.X,
+                    DefaultColor = white,
+                    Width = 2f / _cam.Zoom.X,   // _Process keeps it at 2 px
                     ZIndex = 22,
                 };
                 _world.AddChild(edge);
@@ -660,11 +675,11 @@ public partial class MapRenderer : Node2D
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
 
         // Paved edge stays exactly 2 screen px wide (pygame parity);
-        // bridge edges 4 px.
+        // bridge edges the same.
         foreach (var l in _edgeLines)
             l.Width = 2f / s;
         foreach (var l in _bridgeEdges)
-            l.Width = 4f / s;
+            l.Width = 2f / s;
 
         // Minimap only changes when the camera moves.
         if (_minimap != null &&
