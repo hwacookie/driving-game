@@ -1,6 +1,7 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 
 /// <summary>
@@ -16,6 +17,8 @@ using System.Text.Json;
 public partial class MapRenderer : Node2D
 {
     const string MapUrl = "http://127.0.0.1:5000/map";
+    const string StateUrl = "http://127.0.0.1:5000/state";
+    const float Ppm = 2f;   // config.PIXELS_PER_METER (/state is in world pixels)
 
     static Vector2 W(float x, float y) => new(x, -y);
 
@@ -39,6 +42,7 @@ public partial class MapRenderer : Node2D
     private Rect2 _bounds;                  // world bounds in metres
     private readonly HashSet<Key> _keys = new();
     private string _screenshotPath;
+    private float _shotDelay = 0.5f;
     private bool _testPan;
     private Vector2? _overrideCenter;
     private float? _overrideZoom;
@@ -78,6 +82,32 @@ public partial class MapRenderer : Node2D
     private readonly List<Line2D> _edgeLines = new();
     private readonly List<Line2D> _bridgeEdges = new();   // level-1 decks
 
+    // --- M2: car tracking (multi-car ready) ----------------------------
+    // Render this far BEHIND the newest sample (interpolation buffer):
+    // we always have a full sample pair to lerp between, so network jitter
+    // never shows up as a snap; 100 ms is imperceptible in top-down view.
+    const float RenderDelaySec = 0.10f;
+    const float CarLengthM = 4.5f, CarWidthM = 1.8f;   // config.CAR_*
+
+    class CarSample
+    {
+        public double Time;      // sim time (s) from /state
+        public float X, Y;       // METRES (converted on parse)
+        public float HeadingDeg; // 0 = north, clockwise (sim convention)
+        public float SpeedKmh;
+        public int Level;
+    }
+
+    private HttpRequest _stateHttp;
+    private bool _stateInFlight;
+    private readonly Dictionary<long, List<CarSample>> _carBuf = new();
+    private readonly Dictionary<long, Node2D> _carNodes = new();
+    private long? _followUid;      // camera bound to this car (null = free)
+    private bool _autoFollow = true;   // until the user takes manual control
+    private double _lastMaxTime = double.NegativeInfinity;
+    private Label _speedLabel;
+    private string _lastSpeedText = "";
+
     public override void _Ready()
     {
         _http = GetNode<HttpRequest>("Http");
@@ -91,6 +121,21 @@ public partial class MapRenderer : Node2D
         _http.RequestCompleted += OnMapResponse;
         FetchMap();
 
+        // M2: poll /state at ~60 Hz (at most one request in flight).
+        _stateHttp = new HttpRequest();
+        AddChild(_stateHttp);
+        _stateHttp.RequestCompleted += OnStateResponse;
+        var pollTimer = new Timer { WaitTime = 1f / 60f, Autostart = true };
+        AddChild(pollTimer);
+        pollTimer.Timeout += () =>
+        {
+            if (!_stateInFlight)
+            {
+                _stateInFlight = true;
+                _stateHttp.Request(StateUrl);
+            }
+        };
+
         // User args after "--": --screenshot <path> saves the viewport a
         // moment after the map is built (parity check vs pygame) and then
         // QUITS — screenshot runs are self-terminating, so nothing has to
@@ -102,6 +147,8 @@ public partial class MapRenderer : Node2D
         {
             if (args[i] == "--screenshot")
                 _screenshotPath = args[i + 1];
+            else if (args[i] == "--delay" && i + 1 < args.Length)
+                _shotDelay = float.Parse(args[i + 1]);
             else if (args[i] == "--center" && i + 3 < args.Length)
             {
                 _overrideCenter = W(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
@@ -157,6 +204,7 @@ public partial class MapRenderer : Node2D
         _fadedStatic.Clear();
         _fadedDyn.Clear();
         _lastLinePx = _lastDotPx = -1;
+        ClearCars();
 
         var bg = new Color(34 / 255f, 120 / 255f, 34 / 255f);
         if (root.TryGetProperty("bg_color", out var bgEl))
@@ -371,6 +419,15 @@ public partial class MapRenderer : Node2D
             _zoomLabel.AddThemeFontSizeOverride("font_size", 20);
             _zoomLabel.Position = new Vector2(8, 8); // pygame: (8, 8)
             layer.AddChild(_zoomLabel);
+
+            // Speed readout under the minimap: bound car (or first car).
+            _speedLabel = new Label();
+            _speedLabel.AddThemeStyleboxOverride("normal", sb);
+            _speedLabel.AddThemeColorOverride("font_color",
+                new Color(220 / 255f, 220 / 255f, 220 / 255f));
+            _speedLabel.AddThemeFontSizeOverride("font_size", 20);
+            _speedLabel.Visible = false;
+            layer.AddChild(_speedLabel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
         _lastCamPos = _cam.GlobalPosition;
@@ -381,7 +438,7 @@ public partial class MapRenderer : Node2D
         GD.Print($"Map ready: bounds {_bounds}, zoom {zoom:F3}");
 
         if (_screenshotPath != null && !_testPan)
-            GetTree().CreateTimer(0.5).Timeout += () => SaveShot(_screenshotPath);
+            GetTree().CreateTimer(_shotDelay).Timeout += () => SaveShot(_screenshotPath);
     }
 
     // ------------------------------------------- zoom-dependent (px floor)
@@ -588,6 +645,28 @@ public partial class MapRenderer : Node2D
                 _keys.Remove(k.Keycode);
             if (k.Pressed && k.Keycode == Key.Escape)
                 GetTree().Quit();
+            if (k.Pressed && !k.Echo)
+            {
+                // Any pan intent releases the camera from the car.
+                if (k.Keycode is Key.A or Key.D or Key.W or Key.S or
+                    Key.Left or Key.Right or Key.Up or Key.Down)
+                { _followUid = null; _autoFollow = false; }
+                else if (k.Keycode == Key.Tab)   // cycle camera binding
+                {
+                    if (_carNodes.Count > 0)
+                    {
+                        var uids = _carNodes.Keys.OrderBy(u => u).ToArray();
+                        int i = _followUid.HasValue
+                            ? Array.IndexOf(uids, _followUid.Value) : -1;
+                        _followUid = uids[(i + 1) % uids.Length];
+                    }
+                }
+                else if (k.Keycode == Key.F)     // toggle follow
+                {
+                    if (_followUid.HasValue) { _followUid = null; _autoFollow = false; }
+                    else if (_carNodes.Count > 0) _followUid = _carNodes.Keys.Min();
+                }
+            }
         }
         else if (e is InputEventMouseButton mb)
         {
@@ -599,6 +678,7 @@ public partial class MapRenderer : Node2D
             {
                 // Drag the map with the left button (same as pygame).
                 _dragging = mb.Pressed;
+                if (mb.Pressed) { _followUid = null; _autoFollow = false; }
                 _dragStartMouse = mb.Position;
                 _dragStartCam = _cam.GlobalPosition;
             }
@@ -632,6 +712,7 @@ public partial class MapRenderer : Node2D
                 // Content follows the fingers (natural scrolling).
                 // Godot flips the raw macOS delta in processPanEvent, so
                 // the camera moves in +Delta direction.
+                if (px != Vector2.Zero) { _followUid = null; _autoFollow = false; }
                 _cam.GlobalPosition += px / _cam.Zoom.X;
             }
         }
@@ -672,6 +753,9 @@ public partial class MapRenderer : Node2D
         if (dir != Vector2.Zero)
             _cam.GlobalPosition += dir.Normalized() * 600f / _cam.Zoom.X * (float)delta;
 
+        // M2: interpolate cars from the /state buffer + camera follow.
+        UpdateCars();
+
         // Rebuild markings/dots only when the pixel floor changes.
         RebuildDynamic();
 
@@ -700,6 +784,199 @@ public partial class MapRenderer : Node2D
         }
     }
 
+    // ------------------------------------------------- M2: car tracking
+
+    private void OnStateResponse(long requestId, long responseCode,
+                                 string[] headers, byte[] body)
+    {
+        _stateInFlight = false;
+        if (responseCode != 200) return;   // keep last state; timer retries
+        try
+        {
+            var root = JsonDocument.Parse(body).RootElement;
+            double t = root.GetProperty("time").GetDouble();
+            // Time went backwards => the sim restarted: wipe everything.
+            if (t < _lastMaxTime - 0.5) ClearCars();
+            _lastMaxTime = Math.Max(_lastMaxTime, t);
+
+            var seen = new HashSet<long>();
+            void Add(long uid, float xPx, float yPx, float hdg,
+                     float kmh, int level)
+            {
+                seen.Add(uid);
+                if (!_carBuf.TryGetValue(uid, out var buf))
+                    _carBuf[uid] = buf = new List<CarSample>();
+                while (buf.Count > 2 && buf[0].Time < t - 1.0) buf.RemoveAt(0);
+                buf.Add(new CarSample
+                {
+                    Time = t, X = xPx / Ppm, Y = yPx / Ppm,
+                    HeadingDeg = hdg, SpeedKmh = kmh, Level = level,
+                });
+            }
+
+            if (root.TryGetProperty("cars", out var cars))   // future multi-car shape
+                foreach (var c in cars.EnumerateArray())
+                    Add(c.GetProperty("car_uid").GetInt64(),
+                        c.GetProperty("x").GetSingle(), c.GetProperty("y").GetSingle(),
+                        c.GetProperty("heading").GetSingle(),
+                        c.GetProperty("speed_kmh").GetSingle(),
+                        c.GetProperty("level").GetInt32());
+            else if (root.TryGetProperty("has_car", out var hc) && hc.GetBoolean())
+                Add(root.GetProperty("car_uid").GetInt64(),
+                    root.GetProperty("x").GetSingle(), root.GetProperty("y").GetSingle(),
+                    root.GetProperty("heading").GetSingle(),
+                    root.GetProperty("speed_kmh").GetSingle(),
+                    root.GetProperty("level").GetInt32());
+
+            // Cars missing from this response are gone.
+            foreach (var uid in _carBuf.Keys.Where(u => !seen.Contains(u)).ToArray())
+                RemoveCar(uid);
+        }
+        catch (System.Exception e)
+        {
+            GD.PrintErr($"GET /state: bad payload: {e.Message}");
+        }
+    }
+
+    void RemoveCar(long uid)
+    {
+        _carBuf.Remove(uid);
+        if (_carNodes.TryGetValue(uid, out var n))
+        { n.QueueFree(); _carNodes.Remove(uid); }
+        if (_followUid == uid) _followUid = null;
+    }
+
+    void ClearCars()
+    {
+        foreach (var uid in _carBuf.Keys.ToArray()) RemoveCar(uid);
+        _lastMaxTime = double.NegativeInfinity;
+    }
+
+    Node2D MakeCarNode(long uid)
+    {
+        // Nose at local +x; rotation_degrees = heading - 90 (heading: 0 =
+        // north, clockwise, sim y-up -> Godot y-down flip).
+        var root = new Node2D { Name = $"car_{uid}" };
+        float hl = CarLengthM / 2f, hw = CarWidthM / 2f;
+        root.AddChild(new Polygon2D
+        {
+            Color = new Color(0.78f, 0.14f, 0.14f),
+            Polygon = new[]
+            {
+                new Vector2(hl - 0.5f, -hw), new Vector2(hl, -hw + 0.35f),
+                new Vector2(hl, hw - 0.35f), new Vector2(hl - 0.5f, hw),
+                new Vector2(-hl + 0.35f, hw), new Vector2(-hl, hw - 0.3f),
+                new Vector2(-hl, -hw + 0.3f), new Vector2(-hl + 0.35f, -hw),
+            },
+        });
+        root.AddChild(new Polygon2D
+        {
+            Color = new Color(0.16f, 0.22f, 0.30f),   // windshield
+            Polygon = new[]
+            {
+                new Vector2(1.05f, -0.62f), new Vector2(1.7f, -0.48f),
+                new Vector2(1.7f, 0.48f), new Vector2(1.05f, 0.62f),
+            },
+        });
+        _world.AddChild(root);
+        return root;
+    }
+
+    void UpdateCars()
+    {
+        if (_carBuf.Count == 0) { FollowCamera(); return; }
+        float rt = (float)_lastMaxTime - RenderDelaySec;
+
+        long? firstUid = null; float firstKmh = 0f;
+        foreach (var kv in _carBuf)
+        {
+            var buf = kv.Value;
+            if (buf.Count == 0) continue;
+
+            Vector2 pos; float hdg, kmh; int level;
+            var last = buf[^1];
+            if (buf.Count < 2 || rt <= buf[0].Time || rt >= last.Time)
+            {
+                // Not enough history to bracket: freeze on the newest.
+                pos = W(last.X, last.Y); hdg = last.HeadingDeg;
+                kmh = last.SpeedKmh; level = last.Level;
+            }
+            else
+            {
+                int i = buf.Count - 2;
+                while (i > 0 && buf[i + 1].Time <= rt) i--;
+                var a = buf[i];
+                var b = buf[i + 1];
+                float f = (float)((rt - a.Time) / (b.Time - a.Time));
+                pos = W(Mathf.Lerp(a.X, b.X, f), Mathf.Lerp(a.Y, b.Y, f));
+                hdg = LerpAngleDeg(a.HeadingDeg, b.HeadingDeg, f);
+                kmh = Mathf.Lerp(a.SpeedKmh, b.SpeedKmh, f);
+                level = b.Level;
+            }
+
+            if (!_carNodes.TryGetValue(kv.Key, out var node))
+                _carNodes[kv.Key] = node = MakeCarNode(kv.Key);
+            node.GlobalPosition = pos;
+            node.RotationDegrees = hdg - 90f;
+            // Above its own deck, below any higher level (M2 occlusion).
+            node.ZIndex = 10 + 20 * level;
+
+            if (firstUid == null) { firstUid = kv.Key; firstKmh = kmh; }
+        }
+
+        FollowCamera();
+
+        // Minimap dots: every car, the bound one gets a yellow ring.
+        if (_minimap != null)
+        {
+            _minimap.Cars.Clear();
+            foreach (var kv in _carNodes)
+                _minimap.Cars.Add((new Vector2(kv.Value.GlobalPosition.X,
+                                               -kv.Value.GlobalPosition.Y),
+                                   kv.Key == _followUid));
+            _minimap.QueueRedraw();
+        }
+
+        // Speed readout under the minimap: bound car (or first car).
+        if (_speedLabel != null)
+        {
+            long? pick = _followUid ?? firstUid;
+            bool show = pick.HasValue;
+            string txt = show ? $"#{pick}  {firstKmh:F0} km/h" : "";
+            if (show || _lastSpeedText != "")
+            {
+                _speedLabel.Visible = show;
+                if (txt != _lastSpeedText)
+                {
+                    _lastSpeedText = txt;
+                    _speedLabel.Text = txt;
+                    var vp = GetViewport().GetVisibleRect();
+                    _speedLabel.Position = new Vector2(
+                        vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin,
+                        MinimapNode.Margin + MinimapNode.BoxSize + 6f);
+                }
+            }
+        }
+    }
+
+    /// <summary>Hard-lock the camera onto the bound car (auto-follows the
+    /// first car until the user takes manual control; Tab/F rebind).</summary>
+    void FollowCamera()
+    {
+        if (_followUid == null && _autoFollow && _carNodes.Count > 0)
+            _followUid = _carNodes.Keys.Min();
+        if (_followUid.HasValue &&
+            _carNodes.TryGetValue(_followUid.Value, out var fc))
+            _cam.GlobalPosition = fc.GlobalPosition;
+    }
+
+    static float LerpAngleDeg(float a, float b, float f)
+    {
+        float d = (b - a + 540f) % 360f;
+        if (d > 180f) d -= 360f;
+        return a + d * f;
+    }
+
     void SaveShot(string path)
     {
         var img = GetViewport().GetTexture().GetImage();
@@ -718,8 +995,8 @@ public partial class MapRenderer : Node2D
 /// </summary>
 public partial class MinimapNode : Node2D
 {
-    const int Size = 360;   // big enough for the whole track to stay readable
-    const int Margin = 15;
+    public const int BoxSize = 360;  // big enough for the whole track to stay readable
+    public const int Margin = 15;
     static readonly Color Bg = new(20 / 255f, 60 / 255f, 20 / 255f);       // MINIMAP_BG
     static readonly Color Border = new(80 / 255f, 80 / 255f, 80 / 255f);  // MINIMAP_BORDER
     static readonly Color CarColor = new(1f, 0f, 0f);                     // MINIMAP_CAR_COLOR
@@ -730,8 +1007,9 @@ public partial class MinimapNode : Node2D
     Color _road;
     Camera2D _cam;
 
-    public Vector2 CarPosSim;  // set by M2 (car tracking)
-    public bool HasCar;
+    // M2: all live cars in SIM coords; the second flag marks the car the
+    // camera is bound to (drawn with a yellow ring).
+    public List<(Vector2 Pos, bool Followed)> Cars = new();
 
     public void Setup(List<(Vector2 A, Vector2 B, float W)> segs,
                       Rect2 bounds, Color road, Camera2D cam)
@@ -743,15 +1021,15 @@ public partial class MinimapNode : Node2D
     {
         if (_segs == null || _cam == null) return;
         var vp = GetViewport().GetVisibleRect().Size;
-        float mmx = vp.X - Size - Margin, mmy = Margin;
-        var box = new Rect2(mmx, mmy, Size, Size);
+        float mmx = vp.X - BoxSize - Margin, mmy = Margin;
+        var box = new Rect2(mmx, mmy, BoxSize, BoxSize);
         DrawRect(box, Bg);
 
-        float sx = Size / _bounds.Size.X;
-        float sy = Size / _bounds.Size.Y;
+        float sx = BoxSize / _bounds.Size.X;
+        float sy = BoxSize / _bounds.Size.Y;
         Vector2 Mm(Vector2 p) => new(
             mmx + (p.X - _bounds.Position.X) * sx,
-            mmy + Size - (p.Y - _bounds.Position.Y) * sy);
+            mmy + BoxSize - (p.Y - _bounds.Position.Y) * sy);
 
         // Every road must stay visible: draw each segment with a 1 px floor
         // (wider roads keep their true width when it exceeds 1 px).
@@ -761,8 +1039,13 @@ public partial class MinimapNode : Node2D
             DrawLine(Mm(a), Mm(b), _road, lw);
         }
 
-        if (HasCar)
-            DrawCircle(Mm(CarPosSim), 3f, CarColor);
+        foreach (var (p, followed) in Cars)
+        {
+            var cp = Mm(p);
+            DrawCircle(cp, followed ? 4.5f : 3f, CarColor);
+            if (followed)
+                DrawCircle(cp, 6.5f, new Color(1f, 1f, 0f), false, 2f);
+        }
 
         // Yellow viewport rectangle (2 px outline). No clip API in C#, so
         // clamp it to the box — at low zoom it alone can exceed the minimap.
@@ -771,7 +1054,7 @@ public partial class MinimapNode : Node2D
         Vector2 camSim = new(c.X, -c.Y);             // sim coords
         float wpx = vp.X / z * sx, hpx = vp.Y / z * sy;
         float left = mmx + (camSim.X - vp.X / 2f / z - _bounds.Position.X) * sx;
-        float top = mmy + Size - (camSim.Y + vp.Y / 2f / z - _bounds.Position.Y) * sy;
+        float top = mmy + BoxSize - (camSim.Y + vp.Y / 2f / z - _bounds.Position.Y) * sy;
         var vpr = new Rect2(left, top, wpx, hpx).Intersection(box);
         if (vpr.Size != Vector2.Zero)
             DrawRect(vpr, new Color(1f, 1f, 0f), false, 2f);
