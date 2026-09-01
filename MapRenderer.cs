@@ -295,8 +295,8 @@ public partial class MapRenderer : Node2D
         // driving under a bridge disappears behind the deck. The deck is
         // concrete incl. a 1 m sidewalk per side; the asphalt carriageway
         // (elevated_roadways) sits on top of it; the white boundary line
-        // (elevated_edge_rings) follows the same 15 cm inset rule as the
-        // ground roads.
+        // (elevated_edge_lines, OPEN - no transverse cap at the deck
+        // ends) follows the same 15 cm inset rule as the ground roads.
         var sidewalk = new Color(0.63f, 0.63f, 0.65f);
         if (root.TryGetProperty("elevated_roads", out var er))
             foreach (var r in er.EnumerateArray())
@@ -314,13 +314,13 @@ public partial class MapRenderer : Node2D
                     foreach (var h in erholes.EnumerateArray())
                         AddPolygon(Pts(h), bg, 21);
             }
-        if (root.TryGetProperty("elevated_edge_rings", out var eer))
-            foreach (var ring in eer.EnumerateArray())
+        if (root.TryGetProperty("elevated_edge_lines", out var eer))
+            foreach (var line in eer.EnumerateArray())
             {
                 var edge = new Line2D
                 {
-                    Points = Pts(ring).ToArray(),
-                    Closed = true,
+                    Points = Pts(line).ToArray(),
+                    Closed = false,
                     DefaultColor = white,
                     Width = EdgeLineWidthM,     // physical, no 1 px floor
                     ZIndex = 22,
