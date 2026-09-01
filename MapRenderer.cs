@@ -569,9 +569,9 @@ public partial class MapRenderer : Node2D
     // Edge line width in METRES: same as the lane centreline. No pixel
     // floor - it scales purely with zoom (user decision).
     const float EdgeLineWidthM = 0.15f;
-    // Edge lines are hidden entirely below this zoom (3 px/m = 1.5x in
+    // Edge lines are hidden entirely below this zoom (6 px/m = 3x in
     // the label) instead of fading out as sub-pixel noise (user decision).
-    const float EdgeLineMinZoom = 3.0f;
+    const float EdgeLineMinZoom = 6.0f;
     const float ZoomStep = 1.15f; // config.ZOOM_STEP
 
     bool _dragging;
