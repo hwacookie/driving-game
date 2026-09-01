@@ -569,6 +569,9 @@ public partial class MapRenderer : Node2D
     // Edge line width in METRES: same as the lane centreline. No pixel
     // floor - it scales purely with zoom (user decision).
     const float EdgeLineWidthM = 0.15f;
+    // Edge lines are hidden entirely below this zoom (3 px/m = 1.5x in
+    // the label) instead of fading out as sub-pixel noise (user decision).
+    const float EdgeLineMinZoom = 3.0f;
     const float ZoomStep = 1.15f; // config.ZOOM_STEP
 
     bool _dragging;
@@ -674,6 +677,13 @@ public partial class MapRenderer : Node2D
 
         // Apply pygame's low-zoom fade (cheap: a handful of modulates).
         float s = _cam.Zoom.X;
+
+        // Edge lines: hard cut-off below 1.5x instead of sub-pixel fade.
+        bool edgeVisible = s >= EdgeLineMinZoom;
+        foreach (var l in _edgeLines)
+            l.Visible = edgeVisible;
+        foreach (var l in _bridgeEdges)
+            l.Visible = edgeVisible;
         foreach (var kv in _fadedStatic)
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
         foreach (var kv in _fadedDyn)
