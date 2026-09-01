@@ -563,7 +563,7 @@ public partial class MapRenderer : Node2D
 
     // Parity with pygame: config.MIN_ZOOM/MAX_ZOOM × PPPM=2 → 0.24–32 px/m.
     const float ZoomMin = 0.24f;
-    const float ZoomMax = 32f;
+    const float ZoomMax = 64f;   // = 32x in the label (pygame units)
     const float ZoomStep = 1.15f; // config.ZOOM_STEP
 
     bool _dragging;
