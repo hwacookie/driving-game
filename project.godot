@@ -19,12 +19,19 @@ config/icon="res://icon.svg"
 
 window/size/viewport_width=1600
 window/size/viewport_height=900
-window/stretch/mode="canvas_items"
-window/stretch/aspect="expand"
+; stretch MUST stay disabled: screen-space overlays (minimap, zoom label)
+; are laid out from GetVisibleRect(), which must equal the real window size.
+window/stretch/mode="disabled"
 
 [dotnet]
 
 project/assembly_name="DrivingGame"
+
+[input_devices]
+
+; Keep OFF: two-finger trackpad movement arrives as InputEventPanGesture
+; (used for map panning). Wheel emulation would additionally emit
+; vertical-only wheel events from the same gesture.
 
 [physics]
 

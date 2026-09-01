@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Text.Json;
 
@@ -54,7 +55,26 @@ public partial class MapRenderer : Node2D
     // ~1 px (alpha = 255 * clamp((dash_px - 1) / 3, 0, 1)). The marking
     // meshes and the arrow/P-mark polygons remember which dash length
     // drives their fade; _Process applies it via modulate (no rebuild).
-    private readonly List<(CanvasItem ci, float refM)> _faded = new();
+    // Fade refs split in two: static (arrows/P marks, built once) and
+    // dynamic (marking meshes — freed on every RebuildDynamic, so the list
+    // must be rebuilt with them; holding stale refs throws ObjectDisposed).
+    private readonly List<(CanvasItem ci, float refM)> _fadedStatic = new();
+    private readonly List<(CanvasItem ci, float refM)> _fadedDyn = new();
+
+    // Minimap (pygame parity: config.MINIMAP_*): screen-space overlay on a
+    // CanvasLayer, redrawn whenever the camera moves.
+    private MinimapNode _minimap;
+    private Label _zoomLabel;
+    private Vector2 _lastCamPos = new(float.NaN, float.NaN);
+    private float _lastCamZoom = float.NaN;
+    // Minimap road network: raw segments in sim coords (x east, y north)
+    // with physical width — the minimap draws each as a line with a 1 px
+    // floor so every road stays visible at any map scale.
+    private readonly List<(Vector2 A, Vector2 B, float W)> _mmSegs = new();
+
+    // Paved-edge outline: fixed 2 screen px white line (pygame parity), so
+    // the world-space width must track the zoom every frame.
+    private readonly List<Line2D> _edgeLines = new();
 
     public override void _Ready()
     {
@@ -132,7 +152,8 @@ public partial class MapRenderer : Node2D
                 child.QueueFree();
         _markings.Clear();
         _junctionCenters.Clear();
-        _faded.Clear();
+        _fadedStatic.Clear();
+        _fadedDyn.Clear();
         _lastLinePx = _lastDotPx = -1;
 
         var bg = new Color(34 / 255f, 120 / 255f, 34 / 255f);
@@ -163,6 +184,14 @@ public partial class MapRenderer : Node2D
                     foreach (var h in holes.EnumerateArray())
                         AddPolygon(Pts(h), bg, 1);
             }
+
+        // Minimap segments (sim coords, metres).
+        _mmSegs.Clear();
+        if (root.TryGetProperty("segments", out var segsEl))
+            foreach (var s in segsEl.EnumerateArray())
+                _mmSegs.Add((new Vector2(s[0].GetSingle(), s[1].GetSingle()),
+                             new Vector2(s[2].GetSingle(), s[3].GetSingle()),
+                             s[4].GetSingle()));
 
         // --- Dash patterns from the sim (single source of truth).
         _cDash = 3f; _cGap = 3f; _lDash = 2f; _lGap = 4f; _pDash = 1f; _pGap = 1f;
@@ -225,7 +254,26 @@ public partial class MapRenderer : Node2D
             if (root.TryGetProperty(kv.Item1, out var arr))
                 foreach (var poly in arr.EnumerateArray())
                     if (AddPolygon(Pts(poly), white, 2) is { } p)
-                        _faded.Add((p, kv.Item2));
+                        _fadedStatic.Add((p, kv.Item2));
+
+        // --- Paved-edge outline (z 3, above markings — pygame draws it
+        // after the road tiles): one closed Line2D per unioned ring.
+        foreach (var l in _edgeLines) l.QueueFree();
+        _edgeLines.Clear();
+        if (root.TryGetProperty("paved_edge_rings", out var pe))
+            foreach (var ring in pe.EnumerateArray())
+            {
+                var line = new Line2D
+                {
+                    Points = Pts(ring).ToArray(),
+                    Closed = true,
+                    DefaultColor = white,
+                    Width = 2f / _cam.Zoom.X,   // _Process keeps it at 2 px
+                    ZIndex = 3,
+                };
+                _world.AddChild(line);
+                _edgeLines.Add(line);
+            }
 
         // --- Junction dots: physical radius with a 1 px screen floor
         // (pygame: max(1, round(r*pppm*zoom)) px) — rebuilt on zoom change.
@@ -246,6 +294,36 @@ public partial class MapRenderer : Node2D
         _cam.Zoom = new Vector2(zoom, zoom);
         _cam.GlobalPosition = center;
         RebuildDynamic();
+
+        // Screen-space overlays: minimap (top right) + zoom indicator
+        // (top left, pygame parity: renderer.draw_zoom_indicator).
+        if (_minimap == null)
+        {
+            var layer = new CanvasLayer { Layer = 10 };
+            AddChild(layer);
+            _minimap = new MinimapNode();
+            layer.AddChild(_minimap);
+
+            var sb = new StyleBoxFlat
+            {
+                BgColor = new Color(20 / 255f, 20 / 255f, 20 / 255f, 180f / 255f),
+                ContentMarginLeft = 7, ContentMarginRight = 7,
+                ContentMarginTop = 6, ContentMarginBottom = 6,
+            };
+            _zoomLabel = new Label();
+            _zoomLabel.AddThemeStyleboxOverride("normal", sb);
+            _zoomLabel.AddThemeColorOverride("font_color",
+                new Color(220 / 255f, 220 / 255f, 220 / 255f));
+            _zoomLabel.AddThemeFontSizeOverride("font_size", 20);
+            _zoomLabel.Position = new Vector2(8, 8); // pygame: (8, 8)
+            layer.AddChild(_zoomLabel);
+        }
+        _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
+        _lastCamPos = _cam.GlobalPosition;
+        _lastCamZoom = zoom;
+        UpdateZoomLabel();
+        _minimap.QueueRedraw();
+
         GD.Print($"Map ready: bounds {_bounds}, zoom {zoom:F3}");
 
         if (_screenshotPath != null && !_testPan)
@@ -258,30 +336,42 @@ public partial class MapRenderer : Node2D
     /// whole screen pixels (max(1, ...) px). The world-space meshes cannot
     /// express that directly, so whenever the pixel size changes we rebuild
     /// the marking + dot layers at width = max(physical, 1/zoom) metres.</summary>
+    private float _lastRebuildS = 0f;
+
     private void RebuildDynamic()
     {
         float s = _cam.Zoom.X;                       // px per metre
         int linePx = Mathf.Max(1, (int)(0.15f * s)); // pygame: max(1, int(0.15*pppm*zoom))
         int dotPx = Mathf.Max(1, (int)Mathf.Round(_dotRadiusM * s));
-        if (linePx == _lastLinePx && dotPx == _lastDotPx) return;
+        // The 1 px floor is stored in METRES (linePx / s at build time), so
+        // the on-screen width drifts with zoom between integer changes.
+        // Pygame recomputes the pixel width every frame; we rebuild whenever
+        // the drift exceeds ~8 % of a pixel (invisible) — e.g. the whole
+        // range 0.24..6.7 px/m sits in bucket linePx=1 and would otherwise
+        // freeze at the fit-zoom width (~2.3 m wide slabs).
+        bool drifted = _lastRebuildS > 0f && Mathf.Abs(s - _lastRebuildS) / s > 0.08f;
+        if (linePx == _lastLinePx && dotPx == _lastDotPx && !drifted) return;
         _lastLinePx = linePx;
         _lastDotPx = dotPx;
+        _lastRebuildS = s;
 
         foreach (var child in _markLayer.GetChildren())
             child.QueueFree();
         foreach (var child in _dotLayer.GetChildren())
             child.QueueFree();
+        _fadedDyn.Clear();
 
         float wDashM = linePx / s;
-        // Keyed by (width, fade ref) so each pattern group gets its own
-        // material + pygame-fade reference.
-        var verts = new Dictionary<(float w, float refM), List<Vector3>>();
+        // Keyed by (width, fade ref, COLOR) so each pattern group gets its
+        // own mesh + pygame-fade reference. Color must be in the key -
+        // without it all markings merge into one white mesh.
+        var verts = new Dictionary<(float w, float refM, Color c), List<Vector3>>();
         void Quad(Color c, float w, float refM, Vector2 a, Vector2 b)
         {
-            if (!verts.TryGetValue((w, refM), out var list))
+            if (!verts.TryGetValue((w, refM, c), out var list))
             {
                 list = new List<Vector3>();
-                verts[(w, refM)] = list;
+                verts[(w, refM, c)] = list;
             }
             Vector2 d = b - a;
             float len = d.Length();
@@ -316,12 +406,13 @@ public partial class MapRenderer : Node2D
         {
             var mesh = new ImmediateMesh();
             mesh.SurfaceBegin(Mesh.PrimitiveType.Triangles);
+            mesh.SurfaceSetColor(kv.Key.c);
             foreach (var v in kv.Value)
                 mesh.SurfaceAddVertex(v);
             mesh.SurfaceEnd();
             var mi = new MeshInstance2D { Mesh = mesh, ZIndex = 2 };
             _markLayer.AddChild(mi);
-            _faded.Add((mi, kv.Key.refM));
+            _fadedDyn.Add((mi, kv.Key.refM));
         }
 
         float rM = dotPx / s;
@@ -348,6 +439,16 @@ public partial class MapRenderer : Node2D
         var list = new List<Vector2>(arr.GetArrayLength());
         foreach (var p in arr.EnumerateArray())
             list.Add(W(p[0].GetSingle(), p[1].GetSingle()));
+        return list;
+    }
+
+    /// <summary>Same as Pts but WITHOUT the y-flip: sim coords (x east,
+    /// y north) for screen-space consumers like the minimap.</summary>
+    static List<Vector2> SimPts(JsonElement arr)
+    {
+        var list = new List<Vector2>(arr.GetArrayLength());
+        foreach (var p in arr.EnumerateArray())
+            list.Add(new Vector2(p[0].GetSingle(), p[1].GetSingle()));
         return list;
     }
 
@@ -400,6 +501,14 @@ public partial class MapRenderer : Node2D
 
     // ---------------------------------------------------------------- camera
 
+    // Parity with pygame: config.MIN_ZOOM/MAX_ZOOM × PPPM=2 → 0.24–32 px/m.
+    const float ZoomMin = 0.24f;
+    const float ZoomMax = 32f;
+    const float ZoomStep = 1.15f; // config.ZOOM_STEP
+
+    bool _dragging;
+    Vector2 _dragStartMouse, _dragStartCam;
+
     public override void _Input(InputEvent e)
     {
         if (e is InputEventKey k)
@@ -412,17 +521,76 @@ public partial class MapRenderer : Node2D
             if (k.Pressed && k.Keycode == Key.Escape)
                 GetTree().Quit();
         }
-        if (e is InputEventMouseButton mb && mb.Pressed)
+        else if (e is InputEventMouseButton mb)
         {
-            if (mb.ButtonIndex == MouseButton.WheelUp) ZoomBy(1.1f);
-            else if (mb.ButtonIndex == MouseButton.WheelDown) ZoomBy(1f / 1.1f);
+            if (mb.ButtonIndex == MouseButton.WheelUp && mb.Pressed)
+                ZoomBy(ZoomStep, mb.Position);
+            else if (mb.ButtonIndex == MouseButton.WheelDown && mb.Pressed)
+                ZoomBy(1f / ZoomStep, mb.Position);
+            else if (mb.ButtonIndex == MouseButton.Left)
+            {
+                // Drag the map with the left button (same as pygame).
+                _dragging = mb.Pressed;
+                _dragStartMouse = mb.Position;
+                _dragStartCam = _cam.GlobalPosition;
+            }
+        }
+        else if (e is InputEventMouseMotion mm && _dragging)
+        {
+            // Grab behavior: the world point under the cursor stays put.
+            // (screen and Godot world both have +y down, so minus on both axes)
+            var d = mm.Position - _dragStartMouse;
+            _cam.GlobalPosition = new Vector2(
+                _dragStartCam.X - d.X / _cam.Zoom.X,
+                _dragStartCam.Y - d.Y / _cam.Zoom.Y);
+        }
+        else if (e is InputEventMagnifyGesture mag) // two-finger trackpad pinch
+            ZoomBy(mag.Factor, mag.Position);
+        else if (e is InputEventPanGesture pg) // two-finger trackpad movement
+        {
+            // The display server scales raw trackpad deltas by 0.03; Godot's
+            // own GUI compensates with a x32 multiplier -> screen pixels.
+            var px = pg.Delta * 32f;
+            if (pg.CtrlPressed || pg.MetaPressed)
+            {
+                // Ctrl/Cmd + two-finger scroll = zoom (reliable alternative
+                // to pinch, which AppKit only classifies as magnify when the
+                // fingers spread immediately without sliding). Finger down
+                // (= wheel-toward-you parity) zooms in: Delta.Y < 0 then.
+                ZoomBy(Mathf.Exp(-px.Y / 600f), pg.Position);
+            }
+            else
+            {
+                // Content follows the fingers (natural scrolling).
+                // Godot flips the raw macOS delta in processPanEvent, so
+                // the camera moves in +Delta direction.
+                _cam.GlobalPosition += px / _cam.Zoom.X;
+            }
         }
     }
 
-    void ZoomBy(float f)
+    /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
+    /// <summary>Top-left readout, pygame parity: 'zoom N.Nx (X m wide)'.
+    /// The number is in PYGAME zoom units (px/m divided by PPPM=2), so the
+    /// same view shows the same value in both frontends.</summary>
+    void UpdateZoomLabel()
     {
-        var z = _cam.Zoom * f;
-        _cam.Zoom = z.Clamp(new Vector2(0.05f, 0.05f), new Vector2(10f, 10f));
+        if (_zoomLabel == null) return;
+        float g = _cam.Zoom.X;                       // px per metre
+        float zPygame = g / 2f;                      // PPPM = 2
+        float viewWm = GetViewport().GetVisibleRect().Size.X / g;
+        _zoomLabel.Text = $"zoom {zPygame:F1}x  ({viewWm:F0} m wide)";
+    }
+
+    void ZoomBy(float f, Vector2? at = null)
+    {
+        float z0 = _cam.Zoom.X;
+        float z1 = Mathf.Clamp(z0 * f, ZoomMin, ZoomMax);
+        if (Mathf.IsEqualApprox(z1, z0)) return;
+        var vp = GetViewport().GetVisibleRect().Size;
+        Vector2 s = at ?? vp / 2f;
+        _cam.GlobalPosition += (s - vp / 2f) * (1f / z0 - 1f / z1);
+        _cam.Zoom = new Vector2(z1, z1);
     }
 
     public override void _Process(double delta)
@@ -441,8 +609,24 @@ public partial class MapRenderer : Node2D
 
         // Apply pygame's low-zoom fade (cheap: a handful of modulates).
         float s = _cam.Zoom.X;
-        foreach (var kv in _faded)
+        foreach (var kv in _fadedStatic)
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
+        foreach (var kv in _fadedDyn)
+            kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
+
+        // Paved edge stays exactly 2 screen px wide (pygame parity).
+        foreach (var l in _edgeLines)
+            l.Width = 2f / s;
+
+        // Minimap only changes when the camera moves.
+        if (_minimap != null &&
+            (_cam.GlobalPosition != _lastCamPos || _cam.Zoom.X != _lastCamZoom))
+        {
+            _lastCamPos = _cam.GlobalPosition;
+            _lastCamZoom = s;
+            UpdateZoomLabel();
+            _minimap.QueueRedraw();
+        }
     }
 
     void SaveShot(string path)
@@ -453,4 +637,75 @@ public partial class MapRenderer : Node2D
         // Screenshot runs are one-shot: quit cleanly (no external kill).
         GetTree().Quit();
     }
+}
+
+/// <summary>
+/// Top-right overview map, pygame parity (renderer.draw_minimap): 180 px
+/// box, dark-green background, gray road network, red car dot (M2), yellow
+/// viewport rectangle. Lives on a CanvasLayer so it ignores the camera.
+/// All input is in SIM coords (x east, y north); the y-flip happens here.
+/// </summary>
+public partial class MinimapNode : Node2D
+{
+    const int Size = 360;   // big enough for the whole track to stay readable
+    const int Margin = 15;
+    static readonly Color Bg = new(20 / 255f, 60 / 255f, 20 / 255f);       // MINIMAP_BG
+    static readonly Color Border = new(80 / 255f, 80 / 255f, 80 / 255f);  // MINIMAP_BORDER
+    static readonly Color CarColor = new(1f, 0f, 0f);                     // MINIMAP_CAR_COLOR
+
+
+    List<(Vector2 A, Vector2 B, float W)> _segs;
+    Rect2 _bounds;      // sim coords: position = (xmin, ymin), size = extent
+    Color _road;
+    Camera2D _cam;
+
+    public Vector2 CarPosSim;  // set by M2 (car tracking)
+    public bool HasCar;
+
+    public void Setup(List<(Vector2 A, Vector2 B, float W)> segs,
+                      Rect2 bounds, Color road, Camera2D cam)
+    {
+        _segs = segs; _bounds = bounds; _road = road; _cam = cam;
+    }
+
+    public override void _Draw()
+    {
+        if (_segs == null || _cam == null) return;
+        var vp = GetViewport().GetVisibleRect().Size;
+        float mmx = vp.X - Size - Margin, mmy = Margin;
+        var box = new Rect2(mmx, mmy, Size, Size);
+        DrawRect(box, Bg);
+
+        float sx = Size / _bounds.Size.X;
+        float sy = Size / _bounds.Size.Y;
+        Vector2 Mm(Vector2 p) => new(
+            mmx + (p.X - _bounds.Position.X) * sx,
+            mmy + Size - (p.Y - _bounds.Position.Y) * sy);
+
+        // Every road must stay visible: draw each segment with a 1 px floor
+        // (wider roads keep their true width when it exceeds 1 px).
+        foreach (var (a, b, w) in _segs)
+        {
+            float lw = Mathf.Max(1f, w * Math.Min(sx, sy));
+            DrawLine(Mm(a), Mm(b), _road, lw);
+        }
+
+        if (HasCar)
+            DrawCircle(Mm(CarPosSim), 3f, CarColor);
+
+        // Yellow viewport rectangle (2 px outline). No clip API in C#, so
+        // clamp it to the box — at low zoom it alone can exceed the minimap.
+        float z = _cam.Zoom.X;
+        var c = _cam.GlobalPosition;                 // Godot world (y down)
+        Vector2 camSim = new(c.X, -c.Y);             // sim coords
+        float wpx = vp.X / z * sx, hpx = vp.Y / z * sy;
+        float left = mmx + (camSim.X - vp.X / 2f / z - _bounds.Position.X) * sx;
+        float top = mmy + Size - (camSim.Y + vp.Y / 2f / z - _bounds.Position.Y) * sy;
+        var vpr = new Rect2(left, top, wpx, hpx).Intersection(box);
+        if (vpr.Size != Vector2.Zero)
+            DrawRect(vpr, new Color(1f, 1f, 0f), false, 2f);
+
+        DrawRect(box, Border, false, 2f);
+    }
+
 }
