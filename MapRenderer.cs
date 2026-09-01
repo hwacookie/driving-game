@@ -1,6 +1,7 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 
@@ -43,6 +44,10 @@ public partial class MapRenderer : Node2D
     private readonly HashSet<Key> _keys = new();
     private string _screenshotPath;
     private float _shotDelay = 0.5f;
+    // Dev hook: --motionlog <file> writes "ms x y" per car per frame so
+    // rendering smoothness can be measured (delta variance = stutter).
+    private string _motionLogPath;
+    private StreamWriter _motionLog;
     private bool _testPan;
     private Vector2? _overrideCenter;
     private float? _overrideZoom;
@@ -87,7 +92,10 @@ public partial class MapRenderer : Node2D
     // we always have a full sample pair to lerp between, so network jitter
     // never shows up as a snap; 100 ms is imperceptible in top-down view.
     const float RenderDelaySec = 0.10f;
-    const float CarLengthM = 4.5f, CarWidthM = 1.8f;   // config.CAR_*
+    const float CarLengthM = 4.4f, CarWidthM = 1.8f;   // config.CAR_*
+    const float RearAxleOffsetM = 1.276f;  // config.REAR_AXLE_OFFSET_M
+    const float SpriteWheelbaseM = 2.64f;  // config.SPRITE_WHEELBASE_M
+    const float TireOutboardM = 0.648f;    // config.TIRE_OUTBOARD_M
 
     class CarSample
     {
@@ -98,19 +106,101 @@ public partial class MapRenderer : Node2D
         public int Level;
     }
 
-    private HttpRequest _stateHttp;
-    private bool _stateInFlight;
+    // DOUBLE pipeline: two HTTPRequest nodes, each response triggers the
+    // next request on the OTHER node. A single node can only hold one
+    // request in flight and a round trip takes exactly one frame (p50 =
+    // 17 ms), so samples landed every other frame; with depth 2 there is
+    // always a request in flight while the previous response is processed
+    // -> a new sample every render frame.
+    private HttpRequest _stateHttpA, _stateHttpB;
+    private bool _busyA, _busyB;   // GodotSharp 4.7 has no status query
+    private ulong _reqMsA, _reqMsB;
+
+    void RequestState(HttpRequest node)
+    {
+        bool busy = ReferenceEquals(node, _stateHttpA) ? _busyA : _busyB;
+        if (busy) return;   // that node already has a request in flight
+        var now = Time.GetTicksMsec();
+        if (ReferenceEquals(node, _stateHttpA)) { _busyA = true; _reqMsA = now; }
+        else { _busyB = true; _reqMsB = now; }
+        node.Request(StateUrl);
+    }
     private readonly Dictionary<long, List<CarSample>> _carBuf = new();
     private readonly Dictionary<long, Node2D> _carNodes = new();
     private long? _followUid;      // camera bound to this car (null = free)
     private bool _autoFollow = true;   // until the user takes manual control
     private double _lastMaxTime = double.NegativeInfinity;
+    // Wall-clock driven render target: rt advances with REAL time between
+    // packet arrivals (clamped to received data) instead of jumping forward
+    // whenever a /state response lands - that jump/freeze pattern was the
+    // stutter. The 100 ms delay guarantees ~6 samples of history behind
+    // the target to interpolate from (classic netcode buffer).
+    // Smooth sim-time estimate: advances every frame at an estimated
+    // sim-rate that is updated ONCE PER SECOND from a 1 s window. Fast
+    // arrival jitter (bursts, empty frames) never touches it - chasing
+    // the instantaneous newest-sample error made the target oscillate
+    // (jump after bursts, decelerate after gaps). Only sustained drift
+    // (sim slower/faster than real time) corrects the rate.
+    private double _simNow = double.NegativeInfinity;
+    private double _lastFrameWall = 0;
+    private double _rateRefSim = -1;     // newest sample at last rate update
+    private double _rateRefWall = 0;
+    private double _simRate = 1.0;       // sim seconds per wall second
+    private float _renderTarget = float.NegativeInfinity;
+    private bool _rtClamped;             // render target waiting for data
+    // Camera samples for the same interpolation (world px + zoom).
+    private readonly List<(double T, float X, float Y, float Zoom)> _camBuf
+        = new();
     private Label _speedLabel;
     private string _lastSpeedText = "";
+    private Label _testLabel;          // "5/21" from POST /label (via /state)
+    private string _lastTestText = null;
+
+    // Follow mode mirrors the SIM's own camera (pygame parity: same lerp
+    // follow, snap on teleport, zoom level - all computed in the sim).
+    private float _simCamX, _simCamY;   // world pixels
+    private float _simCamZoom;          // pygame multiplier (x Ppm -> px/m)
+    private bool _simCamValid;
+    // Manual camera input pauses the mirror temporarily (pygame: follow
+    // resumes as soon as the drag ends) instead of releasing it forever.
+    private ulong _lastManualMs = 0;
+    private float _localZoom = -1f;     // wheel/pinch override while following
+
+    // Blinker state per car (from /state), for the corner lights.
+    private readonly Dictionary<long, (bool L, bool R, bool H)> _blinkers = new();
+    // Corner light nodes per car (Variant can't hold object arrays, so no
+    // SetMeta - plain dictionaries).
+    private readonly Dictionary<long, Polygon2D[]> _blinkL = new();
+    private readonly Dictionary<long, Polygon2D[]> _blinkR = new();
+
+    // Breadcrumb trail (rear-axle points in metres + heading deg) and the
+    // four wheel-track Line2Ds derived from it.
+    // Breadcrumbs are a pure visual: recorded CLIENT-side from the samples
+    // we already receive (no /state payload). Gated on sim time so freezes
+    // record nothing; cleared on teleport (big position jump).
+    private const int TrailMaxPoints = 500;
+    private const float TrailIntervalSec = 0.1f;
+    private readonly Dictionary<long, List<(float X, float Y, float Hdg)>> _trails
+        = new();
+    private readonly Dictionary<long, double> _lastTrailTime = new();
+    private Node2D[] _trailLines = new Node2D[4];
+    private (float X, float Y, float Hdg)? _lastTrailTail;
+    private float _lastTrailZoom = -1f;
+
+    // Test flags (green start / red end pennants), world metres + heading.
+    private (float X, float Y, float Hdg)? _flagGreen, _flagRed;
+    private readonly List<CanvasItem> _flagNodes = new();
+    private (float, float, float)? _lastFlagG, _lastFlagR;
 
     public override void _Ready()
     {
         _http = GetNode<HttpRequest>("Http");
+        // use_threads: without it, Godot's HTTPRequest does ONE socket read
+        // per rendered frame (godotengine/godot#120425) - every request then
+        // costs several frames (~85-210 ms measured on this machine for a
+        // localhost reply that takes 0.4 ms from Python). Threaded mode
+        // drains the socket at OS speed; callbacks still fire on main.
+        _http.UseThreads = true;
         _cam = GetNode<Camera2D>("Cam");
         _world = new Node2D { Name = "World" };
         AddChild(_world);
@@ -121,20 +211,27 @@ public partial class MapRenderer : Node2D
         _http.RequestCompleted += OnMapResponse;
         FetchMap();
 
-        // M2: poll /state at ~60 Hz (at most one request in flight).
-        _stateHttp = new HttpRequest();
-        AddChild(_stateHttp);
-        _stateHttp.RequestCompleted += OnStateResponse;
-        var pollTimer = new Timer { WaitTime = 1f / 60f, Autostart = true };
-        AddChild(pollTimer);
-        pollTimer.Timeout += () =>
-        {
-            if (!_stateInFlight)
-            {
-                _stateInFlight = true;
-                _stateHttp.Request(StateUrl);
-            }
-        };
+        // /state polling (pipelined, see below):
+        // UseThreads: without it, Godot's HTTPRequest does ONE socket read
+        // per rendered frame (godotengine/godot#120425) - every request then
+        // costs several frames (~85-210 ms measured on this machine for a
+        // localhost reply that takes 0.4 ms from Python). Threaded mode
+        // drains the socket at OS speed; callbacks still fire on main.
+        //
+        // PIPLINED polling: the next request goes out IMMEDIATELY when a
+        // response lands (no timer alignment). A 60 Hz timer + one-request-
+        // in-flight guard left 2-10 frame gaps whenever a round trip took
+        // two frames (p50 latency == one frame), and each gap showed up as
+        // freeze-then-catch-up stutter.
+        _stateHttpA = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+        _stateHttpB = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+        AddChild(_stateHttpA);
+        AddChild(_stateHttpB);
+        _stateHttpA.RequestCompleted += (id, code, hdr, body) =>
+            OnStateResponse(code, body, _stateHttpB);
+        _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
+            OnStateResponse(code, body, _stateHttpA);
+        RequestState(_stateHttpA);
 
         // User args after "--": --screenshot <path> saves the viewport a
         // moment after the map is built (parity check vs pygame) and then
@@ -158,7 +255,17 @@ public partial class MapRenderer : Node2D
                 _overrideZoom = float.Parse(args[i + 1]);
             else if (args[i] == "--test-pan")
                 _testPan = true;
+            else if (args[i] == "--motionlog")
+                _motionLogPath = args[i + 1];
         }
+
+        if (_motionLogPath != null)
+            _motionLog = new StreamWriter(_motionLogPath, append: false);
+
+        // pygame renders locked to 60 fps; an uncapped Godot loop (113 fps
+        // on this machine) has 4-20 ms frame pacing which reads as micro-
+        // stutter. Cap to the sim's own rate.
+        Engine.MaxFps = 60;
 
         if (_testPan && _screenshotPath != null)
         {
@@ -204,6 +311,14 @@ public partial class MapRenderer : Node2D
         _fadedStatic.Clear();
         _fadedDyn.Clear();
         _lastLinePx = _lastDotPx = -1;
+        // The child sweep above also kills trail lines / flag nodes created
+        // before the map arrived (state polls start immediately) - drop the
+        // dangling references and force a rebuild on the next frame.
+        _trailLines = new Node2D[4];
+        _lastTrailTail = null;
+        _flagNodes.Clear();
+        _lastFlagG = null;
+        _lastFlagR = null;
         ClearCars();
 
         var bg = new Color(34 / 255f, 120 / 255f, 34 / 255f);
@@ -428,6 +543,16 @@ public partial class MapRenderer : Node2D
             _speedLabel.AddThemeFontSizeOverride("font_size", 20);
             _speedLabel.Visible = false;
             layer.AddChild(_speedLabel);
+
+            // Test number label (pygame parity: yellow text on dark panel,
+            // under the minimap; set by the e2e suite via POST /label).
+            _testLabel = new Label();
+            _testLabel.AddThemeStyleboxOverride("normal", sb);
+            _testLabel.AddThemeColorOverride("font_color",
+                new Color(1f, 1f, 0f));
+            _testLabel.AddThemeFontSizeOverride("font_size", 24);
+            _testLabel.Visible = false;
+            layer.AddChild(_testLabel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
         _lastCamPos = _cam.GlobalPosition;
@@ -643,14 +768,15 @@ public partial class MapRenderer : Node2D
                 _keys.Add(k.Keycode);
             else
                 _keys.Remove(k.Keycode);
-            if (k.Pressed && k.Keycode == Key.Escape)
-                GetTree().Quit();
+            // (No ESC-quit: in pygame ESC means freeze, users press it
+            // reflexively - closing the window is how you quit.)
             if (k.Pressed && !k.Echo)
             {
-                // Any pan intent releases the camera from the car.
+                // Pan keys pause the mirror temporarily (pygame parity: it
+                // resumes once the input stops) - F releases for real.
                 if (k.Keycode is Key.A or Key.D or Key.W or Key.S or
                     Key.Left or Key.Right or Key.Up or Key.Down)
-                { _followUid = null; _autoFollow = false; }
+                    _lastManualMs = Time.GetTicksMsec();
                 else if (k.Keycode == Key.Tab)   // cycle camera binding
                 {
                     if (_carNodes.Count > 0)
@@ -678,7 +804,7 @@ public partial class MapRenderer : Node2D
             {
                 // Drag the map with the left button (same as pygame).
                 _dragging = mb.Pressed;
-                if (mb.Pressed) { _followUid = null; _autoFollow = false; }
+                if (mb.Pressed) _lastManualMs = Time.GetTicksMsec();
                 _dragStartMouse = mb.Position;
                 _dragStartCam = _cam.GlobalPosition;
             }
@@ -691,6 +817,7 @@ public partial class MapRenderer : Node2D
             _cam.GlobalPosition = new Vector2(
                 _dragStartCam.X - d.X / _cam.Zoom.X,
                 _dragStartCam.Y - d.Y / _cam.Zoom.Y);
+            _lastManualMs = Time.GetTicksMsec();
         }
         else if (e is InputEventMagnifyGesture mag) // two-finger trackpad pinch
             ZoomBy(mag.Factor, mag.Position);
@@ -712,7 +839,7 @@ public partial class MapRenderer : Node2D
                 // Content follows the fingers (natural scrolling).
                 // Godot flips the raw macOS delta in processPanEvent, so
                 // the camera moves in +Delta direction.
-                if (px != Vector2.Zero) { _followUid = null; _autoFollow = false; }
+                if (px != Vector2.Zero) _lastManualMs = Time.GetTicksMsec();
                 _cam.GlobalPosition += px / _cam.Zoom.X;
             }
         }
@@ -740,6 +867,9 @@ public partial class MapRenderer : Node2D
         Vector2 s = at ?? vp / 2f;
         _cam.GlobalPosition += (s - vp / 2f) * (1f / z0 - 1f / z1);
         _cam.Zoom = new Vector2(z1, z1);
+        // While following, the mirror must keep THIS zoom (pygame: wheel
+        // zoom changes the shared camera and follow continues).
+        if (_followUid.HasValue) { _localZoom = z1; _lastManualMs = Time.GetTicksMsec(); }
     }
 
     public override void _Process(double delta)
@@ -751,10 +881,22 @@ public partial class MapRenderer : Node2D
         if (_keys.Contains(Key.W) || _keys.Contains(Key.Up)) dir.Y -= 1;
         if (_keys.Contains(Key.S) || _keys.Contains(Key.Down)) dir.Y += 1;
         if (dir != Vector2.Zero)
+        {
             _cam.GlobalPosition += dir.Normalized() * 600f / _cam.Zoom.X * (float)delta;
+            _lastManualMs = Time.GetTicksMsec();
+        }
 
         // M2: interpolate cars from the /state buffer + camera follow.
         UpdateCars();
+
+        if (_motionLog != null)
+            foreach (var kv in _carNodes)
+                _motionLog.WriteLine($"{Time.GetTicksMsec()} {kv.Key} " +
+                    $"{kv.Value.GlobalPosition.X:F2} {kv.Value.GlobalPosition.Y:F2} " +
+                    $"{_simNow:F3} {(_rtClamped ? 1 : 0)} {_renderTarget:F4}");
+
+        // Breadcrumb trails + test flags (rebuild on data/zoom change).
+        UpdateOverlays();
 
         // Rebuild markings/dots only when the pixel floor changes.
         RebuildDynamic();
@@ -786,18 +928,41 @@ public partial class MapRenderer : Node2D
 
     // ------------------------------------------------- M2: car tracking
 
-    private void OnStateResponse(long requestId, long responseCode,
-                                 string[] headers, byte[] body)
+    private void OnStateResponse(long responseCode, byte[] body,
+                                 HttpRequest next)
     {
-        _stateInFlight = false;
-        if (responseCode != 200) return;   // keep last state; timer retries
+        // The node that just completed is the OTHER one (next = its partner).
+        if (ReferenceEquals(next, _stateHttpB)) _busyA = false; else _busyB = false;
+        if (_motionLog != null)
+            _motionLog.WriteLine($"RESP " +
+                $"{Time.GetTicksMsec() - (ReferenceEquals(next, _stateHttpB) ? _reqMsA : _reqMsB)}ms");
+        if (responseCode == 200)
+            RequestState(next);   // double pipeline: next request immediately
+        else
+            // Failure/timeout: back off briefly (no tight retry loop while
+            // the sim is down), then continue the pipeline.
+            GetTree().CreateTimer(0.1).Timeout += () => RequestState(next);
+        if (responseCode != 200) return;   // keep last state
         try
         {
             var root = JsonDocument.Parse(body).RootElement;
             double t = root.GetProperty("time").GetDouble();
             // Time went backwards => the sim restarted: wipe everything.
             if (t < _lastMaxTime - 0.5) ClearCars();
+            double prevMax = _lastMaxTime;
             _lastMaxTime = Math.Max(_lastMaxTime, t);
+
+            // Snap only on the very first arrival or a big discontinuity
+            // (restart/teleport).
+            bool newFrame = t > prevMax;
+            if (newFrame &&
+                (_simNow == double.NegativeInfinity || Math.Abs(t - _simNow) > 1.0))
+            {
+                _simNow = t;
+                _rateRefSim = t;
+                _rateRefWall = Time.GetTicksMsec() / 1000.0;
+                _simRate = 1.0;
+            }
 
             var seen = new HashSet<long>();
             void Add(long uid, float xPx, float yPx, float hdg,
@@ -807,11 +972,39 @@ public partial class MapRenderer : Node2D
                 if (!_carBuf.TryGetValue(uid, out var buf))
                     _carBuf[uid] = buf = new List<CarSample>();
                 while (buf.Count > 2 && buf[0].Time < t - 1.0) buf.RemoveAt(0);
+                // Skip duplicate timestamps: when the sim loop runs slower
+                // than 60 Hz, several polls see the SAME frame (time =
+                // frame/60). A zero-dt pair would make the interpolation
+                // divide by zero -> NaN rotation (sprite spins wildly).
+                if (buf.Count > 0 && buf[^1].Time >= t) return;
                 buf.Add(new CarSample
                 {
                     Time = t, X = xPx / Ppm, Y = yPx / Ppm,
                     HeadingDeg = hdg, SpeedKmh = kmh, Level = level,
                 });
+                RecordTrail(uid, t, xPx / Ppm, yPx / Ppm, hdg);
+                if (_motionLog != null)
+                    _motionLog.WriteLine($"SAMP {t:F3} {xPx / Ppm:F2} {yPx / Ppm:F2}");
+            }
+
+            void RecordTrail(long uid, double t, float xm, float ym, float hdg)
+            {
+                if (!_trails.TryGetValue(uid, out var list))
+                {
+                    list = new List<(float, float, float)>(TrailMaxPoints);
+                    _trails[uid] = list;
+                    _lastTrailTime[uid] = t - TrailIntervalSec;  // record now
+                }
+                if (t < _lastTrailTime[uid] + TrailIntervalSec - 1e-4) return;
+                if (list.Count > 0)
+                {
+                    var (lx, ly, _) = list[^1];
+                    float dx = xm - lx, dy = ym - ly;
+                    if (dx * dx + dy * dy > 20f * 20f) list.Clear();  // teleport
+                }
+                list.Add((xm, ym, hdg));
+                while (list.Count > TrailMaxPoints) list.RemoveAt(0);
+                _lastTrailTime[uid] = t;
             }
 
             if (root.TryGetProperty("cars", out var cars))   // future multi-car shape
@@ -828,6 +1021,44 @@ public partial class MapRenderer : Node2D
                     root.GetProperty("speed_kmh").GetSingle(),
                     root.GetProperty("level").GetInt32());
 
+            // Sim camera: follow mode mirrors it exactly (pygame parity -
+            // the lerp follow, snap-on-teleport and zoom live in the sim).
+            if (root.TryGetProperty("camera_x", out var cx) &&
+                root.TryGetProperty("camera_y", out var cy) &&
+                root.TryGetProperty("camera_zoom", out var cz))
+            {
+                _simCamX = cx.GetSingle();
+                _simCamY = cy.GetSingle();
+                _simCamZoom = cz.GetSingle();
+                _simCamValid = true;
+                if (newFrame)
+                {
+                    _camBuf.Add((t, _simCamX, _simCamY, _simCamZoom));
+                    while (_camBuf.Count > 2 && _camBuf[0].T < t - 1.0)
+                        _camBuf.RemoveAt(0);
+                }
+            }
+
+            // Blinker state (single-car form; the future cars-array shape
+            // would read it per car).
+            if (!root.TryGetProperty("cars", out _) &&
+                root.TryGetProperty("car_uid", out var bu))
+            {
+                bool bl = root.TryGetProperty("blinker_left", out var b0) && b0.GetBoolean();
+                bool br = root.TryGetProperty("blinker_right", out var b1) && b1.GetBoolean();
+                bool hz = root.TryGetProperty("hazard", out var b2) && b2.GetBoolean();
+                _blinkers[bu.GetInt64()] = (bl, br, hz);
+            }
+
+            // HUD test label ("5/21") - string or null.
+            if (root.TryGetProperty("hud_label", out var hl))
+                _lastTestText = hl.ValueKind == JsonValueKind.String
+                    ? hl.GetString() : null;
+
+            // Test flags (green start / red end pennants).
+            _flagGreen = ParseFlag(root, "green");
+            _flagRed = ParseFlag(root, "red");
+
             // Cars missing from this response are gone.
             foreach (var uid in _carBuf.Keys.Where(u => !seen.Contains(u)).ToArray())
                 RemoveCar(uid);
@@ -838,9 +1069,24 @@ public partial class MapRenderer : Node2D
         }
     }
 
+    static (float X, float Y, float Hdg)? ParseFlag(JsonElement root, string key)
+    {
+        if (!root.TryGetProperty("flags", out var fl) ||
+            fl.ValueKind != JsonValueKind.Object || !fl.TryGetProperty(key, out var f))
+            return null;
+        if (f.ValueKind != JsonValueKind.Array || f.GetArrayLength() < 3) return null;
+        var a = f.EnumerateArray().ToArray();
+        return (a[0].GetSingle() / Ppm, a[1].GetSingle() / Ppm, a[2].GetSingle());
+    }
+
     void RemoveCar(long uid)
     {
         _carBuf.Remove(uid);
+        _trails.Remove(uid);
+        _lastTrailTime.Remove(uid);
+        _blinkers.Remove(uid);
+        _blinkL.Remove(uid);
+        _blinkR.Remove(uid);
         if (_carNodes.TryGetValue(uid, out var n))
         { n.QueueFree(); _carNodes.Remove(uid); }
         if (_followUid == uid) _followUid = null;
@@ -850,42 +1096,93 @@ public partial class MapRenderer : Node2D
     {
         foreach (var uid in _carBuf.Keys.ToArray()) RemoveCar(uid);
         _lastMaxTime = double.NegativeInfinity;
+        _simNow = double.NegativeInfinity;
+        _rateRefSim = -1;
+        _simRate = 1.0;
+        _camBuf.Clear();
+        _renderTarget = float.NegativeInfinity;
     }
 
     Node2D MakeCarNode(long uid)
     {
-        // Nose at local +x; rotation_degrees = heading - 90 (heading: 0 =
-        // north, clockwise, sim y-up -> Godot y-down flip).
+        // Same sprite as pygame (assets/car_64x128.png): nose points UP
+        // (north), so rotation_degrees = heading directly. The node sits
+        // on the REAR AXLE (/state x/y); the sprite is centred on the BODY
+        // centre, RearAxleOffsetM ahead of it.
         var root = new Node2D { Name = $"car_{uid}" };
-        float hl = CarLengthM / 2f, hw = CarWidthM / 2f;
-        root.AddChild(new Polygon2D
+        // The 64x128 px texture is stretched to the car's physical size
+        // (pygame: transform.scale to CAR_WIDTH x CAR_LENGTH in world px).
+        // Nose = texture top; with rotation_degrees = heading the nose
+        // points along travel (verified pixel-wise against pygame).
+        root.AddChild(new Sprite2D
         {
-            Color = new Color(0.78f, 0.14f, 0.14f),
-            Polygon = new[]
-            {
-                new Vector2(hl - 0.5f, -hw), new Vector2(hl, -hw + 0.35f),
-                new Vector2(hl, hw - 0.35f), new Vector2(hl - 0.5f, hw),
-                new Vector2(-hl + 0.35f, hw), new Vector2(-hl, hw - 0.3f),
-                new Vector2(-hl, -hw + 0.3f), new Vector2(-hl + 0.35f, -hw),
-            },
+            Texture = GD.Load<Texture2D>("res://assets/car_64x128.png"),
+            Scale = new Vector2(CarWidthM / 64f, CarLengthM / 128f),
+            Position = new Vector2(0, -RearAxleOffsetM),
         });
-        root.AddChild(new Polygon2D
+        // Blinker corner lights (pygame parity): one at each body corner,
+        // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
+        // centre; orange, 0.5 s blink period.
+        float fore = CarLengthM / 2f * 0.85f;
+        float lat = CarWidthM / 2f * 0.75f;
+        var blinkerL = new Polygon2D[2];
+        var blinkerR = new Polygon2D[2];
+        for (int i = 0; i < 2; i++)
         {
-            Color = new Color(0.16f, 0.22f, 0.30f),   // windshield
-            Polygon = new[]
-            {
-                new Vector2(1.05f, -0.62f), new Vector2(1.7f, -0.48f),
-                new Vector2(1.7f, 0.48f), new Vector2(1.05f, 0.62f),
-            },
-        });
+            float y = -fore * (i == 0 ? 1f : -1f) - RearAxleOffsetM;
+            blinkerL[i] = MakeBlinker(new Vector2(-lat, y));
+            blinkerR[i] = MakeBlinker(new Vector2(lat, y));
+        }
+        root.AddChild(blinkerL[0]); root.AddChild(blinkerL[1]);
+        root.AddChild(blinkerR[0]); root.AddChild(blinkerR[1]);
+        _blinkL[uid] = blinkerL;
+        _blinkR[uid] = blinkerR;
         _world.AddChild(root);
         return root;
+    }
+
+    static Polygon2D MakeBlinker(Vector2 pos)
+    {
+        // Unit-radius 8-gon; scaled per frame to the pygame radius.
+        var pts = new Vector2[8];
+        for (int i = 0; i < 8; i++)
+        {
+            float a = Mathf.Tau * i / 8f;
+            pts[i] = pos + new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+        }
+        return new Polygon2D
+        {
+            Color = new Color(1f, 0.706f, 0f),   // (255,180,0)
+            Polygon = pts,
+        };
     }
 
     void UpdateCars()
     {
         if (_carBuf.Count == 0) { FollowCamera(); return; }
-        float rt = (float)_lastMaxTime - RenderDelaySec;
+        // Advance at the slowly-updated sim rate. The rate itself is
+        // refreshed once per second from a 1 s window, so bursty arrivals
+        // (2 samples in one frame, then 3 empty ones) cannot wiggle it.
+        double nowWall = Time.GetTicksMsec() / 1000.0;
+        if (_simNow > double.NegativeInfinity)
+        {
+            if (nowWall - _rateRefWall >= 1.0 && _rateRefSim > 0)
+            {
+                double r = (_lastMaxTime - _rateRefSim) / (nowWall - _rateRefWall);
+                if (r > 0.05 && r < 2.0) _simRate = r;   // else keep old
+                _rateRefSim = _lastMaxTime;
+                _rateRefWall = nowWall;
+            }
+            _simNow += Math.Max(0, nowWall - _lastFrameWall)
+                       * Mathf.Clamp(_simRate, 0.0, 1.5);
+        }
+        _lastFrameWall = nowWall;
+        // Render target: the smooth estimate minus the delay buffer.
+        // (No hard clamp to the newest sample - that re-introduced the
+        // step; the >200 ms extrapolation cap below bounds starvation.)
+        float rt = (float)(_simNow - RenderDelaySec);
+        _rtClamped = rt >= _lastMaxTime;
+        _renderTarget = rt;
 
         long? firstUid = null; float firstKmh = 0f;
         foreach (var kv in _carBuf)
@@ -895,31 +1192,72 @@ public partial class MapRenderer : Node2D
 
             Vector2 pos; float hdg, kmh; int level;
             var last = buf[^1];
-            if (buf.Count < 2 || rt <= buf[0].Time || rt >= last.Time)
+            if (buf.Count < 2 || rt <= buf[0].Time)
             {
                 // Not enough history to bracket: freeze on the newest.
+                pos = W(last.X, last.Y); hdg = last.HeadingDeg;
+                kmh = last.SpeedKmh; level = last.Level;
+            }
+            else if (rt >= last.Time && rt - last.Time > 0.2)
+            {
+                // Target ran >200 ms ahead of all data (starvation): hold.
                 pos = W(last.X, last.Y); hdg = last.HeadingDeg;
                 kmh = last.SpeedKmh; level = last.Level;
             }
             else
             {
                 int i = buf.Count - 2;
-                while (i > 0 && buf[i + 1].Time <= rt) i--;
+                // Walk back until a.Time <= rt (the old check on buf[i+1]
+                // stopped one step late when sample gaps are uneven, giving
+                // f < 0 extrapolation).
+                while (i > 0 && buf[i].Time > rt) i--;
                 var a = buf[i];
                 var b = buf[i + 1];
-                float f = (float)((rt - a.Time) / (b.Time - a.Time));
-                pos = W(Mathf.Lerp(a.X, b.X, f), Mathf.Lerp(a.Y, b.Y, f));
-                hdg = LerpAngleDeg(a.HeadingDeg, b.HeadingDeg, f);
-                kmh = Mathf.Lerp(a.SpeedKmh, b.SpeedKmh, f);
-                level = b.Level;
+                double dt = b.Time - a.Time;
+                if (dt <= 0)
+                {
+                    // Defensive: identical timestamps must never divide.
+                    pos = W(b.X, b.Y); hdg = b.HeadingDeg;
+                    kmh = b.SpeedKmh; level = b.Level;
+                }
+                else
+                {
+                    // f in [0,1] = interpolation; f > 1 (rt past the newest
+                    // sample) = EXTRAPOLATION / dead reckoning. Freezing on
+                    // the newest sample while waiting for the next one made
+                    // the car stutter at the effective sample rate (~30 Hz:
+                    // move-freeze-move); extrapolating keeps motion smooth
+                    // and the PLL's capped pull re-syncs gently when the
+                    // next sample lands.
+                    float f = (float)((rt - a.Time) / dt);
+                    pos = W(Mathf.Lerp(a.X, b.X, f), Mathf.Lerp(a.Y, b.Y, f));
+                    hdg = LerpAngleDeg(a.HeadingDeg, b.HeadingDeg, f);
+                    kmh = Mathf.Lerp(a.SpeedKmh, b.SpeedKmh, f);
+                    level = b.Level;
+                }
             }
 
             if (!_carNodes.TryGetValue(kv.Key, out var node))
                 _carNodes[kv.Key] = node = MakeCarNode(kv.Key);
             node.GlobalPosition = pos;
-            node.RotationDegrees = hdg - 90f;
+            // Sprite nose points up (north) -> rotation = heading directly.
+            node.RotationDegrees = hdg;
             // Above its own deck, below any higher level (M2 occlusion).
             node.ZIndex = 10 + 20 * level;
+
+            // Blinker corner lights: pygame's 0.5 s period, radius clamped.
+            if (_blinkers.TryGetValue(kv.Key, out var bk))
+            {
+                bool on = Time.GetTicksMsec() % 500 <= 250;
+                float rPx = Mathf.Clamp(_cam.Zoom.X * 0.4f, 2f, 7f);
+                var sc = new Vector2(rPx / _cam.Zoom.X, rPx / _cam.Zoom.X);
+                if (_blinkL.TryGetValue(kv.Key, out var bl))
+                    foreach (var b in bl)
+                        { b.Visible = on && (bk.L || bk.H); b.Scale = sc; }
+                if (_blinkR.TryGetValue(kv.Key, out var br))
+                    foreach (var b in br)
+                        { b.Visible = on && (bk.R || bk.H); b.Scale = sc; }
+            }
 
             if (firstUid == null) { firstUid = kv.Key; firstKmh = kmh; }
         }
@@ -935,6 +1273,22 @@ public partial class MapRenderer : Node2D
                                                -kv.Value.GlobalPosition.Y),
                                    kv.Key == _followUid));
             _minimap.QueueRedraw();
+        }
+
+        // Test number under the speed readout (pygame parity).
+        if (_testLabel != null && _lastTestText != null)
+        {
+            bool show = _lastTestText.Length > 0;
+            _testLabel.Visible = show;
+            if (show && _lastTestText != _testLabel.Text)
+            {
+                _testLabel.Text = _lastTestText;
+                var vp = GetViewport().GetVisibleRect();
+                _testLabel.Position = new Vector2(
+                    vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin,
+                    MinimapNode.Margin + MinimapNode.BoxSize + 6f
+                    + _speedLabel.Size.Y + 6f);
+            }
         }
 
         // Speed readout under the minimap: bound car (or first car).
@@ -959,26 +1313,203 @@ public partial class MapRenderer : Node2D
         }
     }
 
-    /// <summary>Hard-lock the camera onto the bound car (auto-follows the
-    /// first car until the user takes manual control; Tab/F rebind).</summary>
+    /// <summary>Follow mode mirrors the SIM's own camera (pygame parity:
+    /// same lerp follow, snap on teleport, zoom level). Free after any
+    /// manual pan/zoom; Tab/F rebind.</summary>
     void FollowCamera()
     {
         if (_followUid == null && _autoFollow && _carNodes.Count > 0)
             _followUid = _carNodes.Keys.Min();
-        if (_followUid.HasValue &&
-            _carNodes.TryGetValue(_followUid.Value, out var fc))
-            _cam.GlobalPosition = fc.GlobalPosition;
+        // Manual input pauses the mirror for 500 ms (pygame: follow
+        // resumes as soon as the drag ends).
+        bool holding = Time.GetTicksMsec() - _lastManualMs < 500;
+        if (_followUid.HasValue && _simCamValid && !holding)
+        {
+            // Interpolate the camera like the car (same render target):
+            // copying the newest packet value made the view step with
+            // every /state response.
+            float cxp, cyp, czm;
+            var cb = _camBuf;
+            if (cb.Count >= 2 && _renderTarget > cb[0].T &&
+                _renderTarget < cb[^1].T + 0.2)
+            {
+                int i = cb.Count - 2;
+                while (i > 0 && cb[i].T > _renderTarget) i--;
+                var a = cb[i]; var b = cb[i + 1];
+                float f = (float)((_renderTarget - a.T) / (b.T - a.T));
+                // f > 1 = extrapolate (same as the car: no freeze-stutter)
+                cxp = Mathf.Lerp(a.X, b.X, f);
+                cyp = Mathf.Lerp(a.Y, b.Y, f);
+                czm = Mathf.Lerp(a.Zoom, b.Zoom, f);
+            }
+            else { cxp = _simCamX; cyp = _simCamY; czm = _simCamZoom; }
+            _cam.GlobalPosition = new Vector2(cxp / Ppm, -cyp / Ppm);
+            float z = _localZoom > 0
+                ? Mathf.Clamp(_localZoom, ZoomMin, ZoomMax)
+                : Mathf.Clamp(czm * Ppm, ZoomMin, ZoomMax);
+            _cam.Zoom = new Vector2(z, z);
+        }
     }
 
     static float LerpAngleDeg(float a, float b, float f)
     {
-        float d = (b - a + 540f) % 360f;
-        if (d > 180f) d -= 360f;
+        // Shortest signed delta in (-180, 180]. The "- 180" is essential:
+        // (b-a+540) % 360 alone maps a small positive diff to ~+180,
+        // which made the sprite spin wildly whenever f != 0 (it only
+        // looked right at uniform 60 Hz samples where f happened to be 0).
+        float d = (b - a + 540f) % 360f - 180f;
         return a + d * f;
+    }
+
+    // --- Breadcrumb trails + test flags (pygame parity) ---
+
+    void UpdateOverlays()
+    {
+        // Detect new points via the TAIL, not the count: once the trail
+        // hits its 500-point cap the count never changes again while the
+        // oldest point slides out - a count check would freeze the lines.
+        var trail = ActiveTrail();
+        (float X, float Y, float Hdg)? tail = null;
+        if (trail != null && trail.Count > 0) tail = trail[^1];
+        float z = _cam.Zoom.X;
+        bool drift = _lastTrailZoom > 0 &&
+                     Math.Abs(z - _lastTrailZoom) / _lastTrailZoom > 0.08f;
+        if (tail != _lastTrailTail || drift)
+        {
+            RebuildTrails();
+            _lastTrailTail = tail;
+            _lastTrailZoom = z;
+        }
+        // Trails follow the owning car's level (hidden under bridges too),
+        // one BELOW the car so the sprite paints above its breadcrumbs.
+        int lvl = 0;
+        foreach (var buf in _carBuf.Values) { lvl = buf[^1].Level; break; }
+        foreach (var l in _trailLines)
+            if (l != null) l.ZIndex = 9 + 20 * lvl;
+
+        bool flagChanged = _flagGreen != _lastFlagG || _flagRed != _lastFlagR;
+        if (flagChanged || drift)
+        {
+            RebuildFlags();
+            _lastFlagG = _flagGreen;
+            _lastFlagR = _flagRed;
+        }
+    }
+
+    List<(float X, float Y, float Hdg)> ActiveTrail()
+        => _followUid > 0 && _trails.TryGetValue(_followUid.Value, out var l)
+           ? l : null;
+
+    void RebuildTrails()
+    {
+        // Wheel tracks from rear-axle points: front tyres one wheelbase
+        // ahead, each pair TIRE_OUTBOARD_M outboard (pygame draw_trail).
+        var trail = ActiveTrail();
+        Vector2[][] tracks = null;
+        if (trail != null && trail.Count > 1)
+        {
+            // The car renders at latest_time - RenderDelaySec (100 ms), but
+            // the trail's newest point is "now" - without dropping it the
+            // trail tip pokes out AHEAD of the delayed sprite. One point is
+            // exactly one 0.1 s recording interval, matching the delay.
+            int nPts = trail.Count - 1;
+            var lists = new List<Vector2>[4];
+            for (int i = 0; i < 4; i++) lists[i] = new List<Vector2>(nPts);
+            for (int pi = 0; pi < nPts; pi++)
+            {
+                var (x, y, h) = trail[pi];
+                float rad = Mathf.DegToRad(h);
+                float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward
+                float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
+                lists[0].Add(W(x + SpriteWheelbaseM * fx - TireOutboardM * rx,
+                               y + SpriteWheelbaseM * fy - TireOutboardM * ry));
+                lists[1].Add(W(x + SpriteWheelbaseM * fx + TireOutboardM * rx,
+                               y + SpriteWheelbaseM * fy + TireOutboardM * ry));
+                lists[2].Add(W(x - TireOutboardM * rx, y - TireOutboardM * ry));
+                lists[3].Add(W(x + TireOutboardM * rx, y + TireOutboardM * ry));
+            }
+            tracks = new Vector2[4][];
+            for (int i = 0; i < 4; i++) tracks[i] = lists[i].ToArray();
+        }
+
+        var colors = new[]
+        {
+            new Color(1f, 0.314f, 0.314f),    // FL red     (255,80,80)
+            new Color(0.314f, 1f, 0.314f),    // FR green   (80,255,80)
+            new Color(0.314f, 0.549f, 1f),    // RL blue    (80,140,255)
+            new Color(1f, 0.863f, 0f),        // RR yellow  (255,220,0)
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            var line = _trailLines[i] as Line2D;
+            if (tracks == null)
+            {
+                if (line != null && GodotObject.IsInstanceValid(line)) line.QueueFree();
+                _trailLines[i] = null;
+                continue;
+            }
+            if (line == null || !GodotObject.IsInstanceValid(line))
+            {
+                line = new Line2D
+                {
+                    DefaultColor = colors[i],
+                    Closed = false,
+                };
+                _world.AddChild(line);
+                _trailLines[i] = line;
+            }
+            // Update in place (the trail grows ~10x/s; recreating the node
+            // every time double-frees it - QueueFree is deferred).
+            line.Points = tracks[i];
+            line.Width = 2f / _cam.Zoom.X;   // pygame: fixed 2 screen px
+        }
+    }
+
+    void RebuildFlags()
+    {
+        foreach (var n in _flagNodes)
+            if (GodotObject.IsInstanceValid(n)) n.QueueFree();
+        _flagNodes.Clear();
+        DrawFlag(_flagGreen, new Color(0f, 0.784f, 0.314f),     // (0,200,80)
+                             new Color(0f, 0.353f, 0.157f));    // (0,90,40)
+        DrawFlag(_flagRed, new Color(0.902f, 0.196f, 0.196f),   // (230,50,50)
+                            new Color(0.471f, 0.078f, 0.078f)); // (120,20,20)
+    }
+
+    void DrawFlag((float X, float Y, float Hdg)? f, Color fill, Color outline)
+    {
+        if (f == null) return;
+        var (x, y, h) = f.Value;
+        float rad = Mathf.DegToRad(h);
+        float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward
+        float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
+        Vector2 b = W(x + rx * 3f, y + ry * 3f);           // base centre (3 m off)
+        var p1 = W(x + rx * 3f - fx * 1.3f, y + ry * 3f - fy * 1.3f);
+        var p2 = W(x + rx * 3f + fx * 1.3f, y + ry * 3f + fy * 1.3f);
+        var ap = W(x + rx * 5.2f, y + ry * 5.2f);          // apex (2.2 m further)
+        var poly = new Polygon2D
+        {
+            Color = fill,
+            Polygon = new[] { b, p1, p2, ap },
+            ZIndex = 3,
+        };
+        var line = new Line2D
+        {
+            Points = new[] { b, p1, p2, ap },
+            DefaultColor = outline,
+            Width = 2f / _cam.Zoom.X,   // pygame: fixed 2 screen px
+            Closed = true,
+            ZIndex = 3,
+        };
+        _world.AddChild(poly);
+        _world.AddChild(line);
+        _flagNodes.Add(poly);
+        _flagNodes.Add(line);
     }
 
     void SaveShot(string path)
     {
+        _motionLog?.Dispose();
         var img = GetViewport().GetTexture().GetImage();
         Error err = img.SavePng(path);
         GD.Print(err == Error.Ok ? $"Screenshot saved: {path}" : $"SavePng failed: {err}");

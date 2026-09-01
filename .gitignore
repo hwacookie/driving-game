@@ -11,3 +11,6 @@ export.cfg
 
 ## VS Code
 .vscode/
+
+## Godot SDK-bump backups
+*.csproj.old
