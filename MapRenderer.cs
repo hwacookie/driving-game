@@ -28,6 +28,7 @@ public partial class MapRenderer : Node2D
         public float WidthM;        // physical width (Breitstrich check)
         public bool Solid;
         public float FadeRefM;      // dash length driving pygame's low-zoom fade
+        public bool Elevated;       // drawn above bridge decks (z 21)
     }
 
     private HttpRequest _http;
@@ -217,6 +218,15 @@ public partial class MapRenderer : Node2D
                                                  Color = white, WidthM = 0.15f,
                                                  FadeRefM = _cDash });
 
+        // Elevated centrelines: the ground-level ones under a bridge deck
+        // are covered by it (z 2 < 20), so the sim exports the deck's own
+        // centreline to be drawn ABOVE the deck.
+        if (root.TryGetProperty("elevated_centerlines", out var ecl))
+            foreach (var line in ecl.EnumerateArray())
+                _markings.Add(new MarkingLine { Pts = Pts(line), DashM = _cDash, GapM = _cGap,
+                                                 Color = white, WidthM = 0.15f,
+                                                 FadeRefM = _cDash, Elevated = true });
+
         // Lane markings (RQ 31 styles from the sim).
         if (root.TryGetProperty("lane_markings", out var lm))
             foreach (var mark in lm.EnumerateArray())
@@ -392,13 +402,13 @@ public partial class MapRenderer : Node2D
         // Keyed by (width, fade ref, COLOR) so each pattern group gets its
         // own mesh + pygame-fade reference. Color must be in the key -
         // without it all markings merge into one white mesh.
-        var verts = new Dictionary<(float w, float refM, Color c), List<Vector3>>();
-        void Quad(Color c, float w, float refM, Vector2 a, Vector2 b)
+        var verts = new Dictionary<(float w, float refM, Color c, bool elev), List<Vector3>>();
+        void Quad(Color c, float w, float refM, Vector2 a, Vector2 b, bool elev)
         {
-            if (!verts.TryGetValue((w, refM, c), out var list))
+            if (!verts.TryGetValue((w, refM, c, elev), out var list))
             {
                 list = new List<Vector3>();
-                verts[(w, refM, c)] = list;
+                verts[(w, refM, c, elev)] = list;
             }
             Vector2 d = b - a;
             float len = d.Length();
@@ -422,11 +432,17 @@ public partial class MapRenderer : Node2D
                     ? Mathf.Max(2, 2 * linePx) / s
                     : wDashM;
                 for (int i = 0; i < line.Pts.Count - 1; i++)
-                    Quad(line.Color, w, line.FadeRefM, line.Pts[i], line.Pts[i + 1]);
+                    Quad(line.Color, w, line.FadeRefM, line.Pts[i], line.Pts[i + 1],
+                         line.Elevated);
             }
             else if (line.DashM > 0f)
-                AddDashes(Quad, line.Color, wDashM, line.FadeRefM,
-                          line.Pts, line.DashM, line.GapM);
+                AddDashes(line.Elevated
+                    ? (Color c, float w, float r, Vector2 a, Vector2 b) =>
+                        Quad(c, w, r, a, b, true)
+                    : (Color c, float w, float r, Vector2 a, Vector2 b) =>
+                        Quad(c, w, r, a, b, false),
+                    line.Color, wDashM, line.FadeRefM,
+                    line.Pts, line.DashM, line.GapM);
         }
 
         foreach (var kv in verts)
@@ -437,7 +453,9 @@ public partial class MapRenderer : Node2D
             foreach (var v in kv.Value)
                 mesh.SurfaceAddVertex(v);
             mesh.SurfaceEnd();
-            var mi = new MeshInstance2D { Mesh = mesh, ZIndex = 2 };
+            // Elevated markings sit above the bridge decks (z 20-22).
+            var mi = new MeshInstance2D { Mesh = mesh,
+                                          ZIndex = kv.Key.elev ? 21 : 2 };
             _markLayer.AddChild(mi);
             _fadedDyn.Add((mi, kv.Key.refM));
         }
