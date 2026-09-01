@@ -75,6 +75,7 @@ public partial class MapRenderer : Node2D
     // Paved-edge outline: fixed 2 screen px white line (pygame parity), so
     // the world-space width must track the zoom every frame.
     private readonly List<Line2D> _edgeLines = new();
+    private readonly List<Line2D> _bridgeEdges = new();   // level-1 decks
 
     public override void _Ready()
     {
@@ -260,6 +261,8 @@ public partial class MapRenderer : Node2D
         // after the road tiles): one closed Line2D per unioned ring.
         foreach (var l in _edgeLines) l.QueueFree();
         _edgeLines.Clear();
+        foreach (var l in _bridgeEdges) l.QueueFree();
+        _bridgeEdges.Clear();
         if (root.TryGetProperty("paved_edge_rings", out var pe))
             foreach (var ring in pe.EnumerateArray())
             {
@@ -273,6 +276,30 @@ public partial class MapRenderer : Node2D
                 };
                 _world.AddChild(line);
                 _edgeLines.Add(line);
+            }
+
+        // --- Elevated decks (bridges, level >= 1): drawn ABOVE the
+        // ground roads AND above ground-level cars (z 20+), so a car
+        // driving under a bridge disappears behind the deck. The deck
+        // uses the same road colour; its edge is a heavier 4 px concrete
+        // line instead of the 2 px white paved edge.
+        if (root.TryGetProperty("elevated_roads", out var er))
+            foreach (var r in er.EnumerateArray())
+            {
+                AddPolygon(Pts(r.GetProperty("exterior")), roadColor, 20);
+                if (r.TryGetProperty("holes", out var eholes))
+                    foreach (var h in eholes.EnumerateArray())
+                        AddPolygon(Pts(h), bg, 21);
+                var edge = new Line2D
+                {
+                    Points = Pts(r.GetProperty("exterior")).ToArray(),
+                    Closed = true,
+                    DefaultColor = new Color(0.42f, 0.42f, 0.47f),
+                    Width = 4f / _cam.Zoom.X,
+                    ZIndex = 22,
+                };
+                _world.AddChild(edge);
+                _bridgeEdges.Add(edge);
             }
 
         // --- Junction dots: physical radius with a 1 px screen floor
@@ -614,9 +641,12 @@ public partial class MapRenderer : Node2D
         foreach (var kv in _fadedDyn)
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
 
-        // Paved edge stays exactly 2 screen px wide (pygame parity).
+        // Paved edge stays exactly 2 screen px wide (pygame parity);
+        // bridge edges 4 px.
         foreach (var l in _edgeLines)
             l.Width = 2f / s;
+        foreach (var l in _bridgeEdges)
+            l.Width = 4f / s;
 
         // Minimap only changes when the camera moves.
         if (_minimap != null &&
