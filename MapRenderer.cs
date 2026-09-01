@@ -946,7 +946,11 @@ public partial class MapRenderer : Node2D
         try
         {
             var root = JsonDocument.Parse(body).RootElement;
-            double t = root.GetProperty("time").GetDouble();
+            // A response without "time" is not a state frame (e.g. the
+            // sim's startup window, where /state was briefly just static
+            // data): skip it silently instead of erroring.
+            if (!root.TryGetProperty("time", out var tEl)) return;
+            double t = tEl.GetDouble();
             // Time went backwards => the sim restarted: wipe everything.
             if (t < _lastMaxTime - 0.5) ClearCars();
             double prevMax = _lastMaxTime;
@@ -1065,6 +1069,9 @@ public partial class MapRenderer : Node2D
         }
         catch (System.Exception e)
         {
+            // A state frame always has "time" (checked above), so anything
+            // that still throws is an unexpected payload shape - log and
+            // keep the last good state.
             GD.PrintErr($"GET /state: bad payload: {e.Message}");
         }
     }
