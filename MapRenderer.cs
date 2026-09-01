@@ -269,6 +269,8 @@ public partial class MapRenderer : Node2D
 
         // --- Paved-edge outline (z 3, above markings — pygame draws it
         // after the road tiles): one closed Line2D per unioned ring.
+        // Physical width like the centreline - NO 1 px floor (user
+        // decision): at low zoom it thins out naturally.
         foreach (var l in _edgeLines) l.QueueFree();
         _edgeLines.Clear();
         foreach (var l in _bridgeEdges) l.QueueFree();
@@ -281,7 +283,7 @@ public partial class MapRenderer : Node2D
                     Points = Pts(ring).ToArray(),
                     Closed = true,
                     DefaultColor = white,
-                    Width = 2f / _cam.Zoom.X,   // _Process keeps it at 2 px
+                    Width = EdgeLineWidthM,
                     ZIndex = 3,
                 };
                 _world.AddChild(line);
@@ -320,7 +322,7 @@ public partial class MapRenderer : Node2D
                     Points = Pts(ring).ToArray(),
                     Closed = true,
                     DefaultColor = white,
-                    Width = 2f / _cam.Zoom.X,   // _Process keeps it at 2 px
+                    Width = EdgeLineWidthM,     // physical, no 1 px floor
                     ZIndex = 22,
                 };
                 _world.AddChild(edge);
@@ -564,6 +566,9 @@ public partial class MapRenderer : Node2D
     // Parity with pygame: config.MIN_ZOOM/MAX_ZOOM × PPPM=2 → 0.24–32 px/m.
     const float ZoomMin = 0.24f;
     const float ZoomMax = 64f;   // = 32x in the label (pygame units)
+    // Edge line width in METRES: same as the lane centreline. No pixel
+    // floor - it scales purely with zoom (user decision).
+    const float EdgeLineWidthM = 0.15f;
     const float ZoomStep = 1.15f; // config.ZOOM_STEP
 
     bool _dragging;
@@ -673,13 +678,6 @@ public partial class MapRenderer : Node2D
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
         foreach (var kv in _fadedDyn)
             kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
-
-        // Paved edge stays exactly 2 screen px wide (pygame parity);
-        // bridge edges the same.
-        foreach (var l in _edgeLines)
-            l.Width = 2f / s;
-        foreach (var l in _bridgeEdges)
-            l.Width = 2f / s;
 
         // Minimap only changes when the camera moves.
         if (_minimap != null &&
