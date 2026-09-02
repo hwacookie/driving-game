@@ -166,12 +166,47 @@ public partial class MapRenderer : Node2D
     private ulong _lastManualMs = 0;
     private float _localZoom = -1f;     // wheel/pinch override while following
 
-    // Blinker state per car (from /state), for the corner lights.
-    private readonly Dictionary<long, (bool L, bool R, bool H)> _blinkers = new();
+    // Per-car display state from /state (multi-car, docs/MULTI_CAR_PLAN.md):
+    // color name, blinker/hazard lights, the car's OWN test flags + label.
+    private class CarMeta
+    {
+        public string Color = "red";
+        public bool BlinkL, BlinkR, Hazard;
+        public (float X, float Y, float Hdg)? FlagGreen, FlagRed;
+        public string HudLabel;
+    }
+    private readonly Dictionary<long, CarMeta> _carMeta = new();
+    // Small per-car HUD label in world space above the car's nose.
+    private readonly Dictionary<long, Label> _carLabels = new();
     // Corner light nodes per car (Variant can't hold object arrays, so no
     // SetMeta - plain dictionaries).
     private readonly Dictionary<long, Polygon2D[]> _blinkL = new();
     private readonly Dictionary<long, Polygon2D[]> _blinkR = new();
+
+    // Car colors: the old pygame palette (red = player, then the obstacle
+    // palette). Sprite variants are pre-tinted PNGs generated with the old
+    // pygame tint formula (see driving-game asset generation note in the
+    // plan doc).
+    static readonly Dictionary<string, Color> CarColors = new()
+    {
+        ["red"] = new(0.706f, 0.118f, 0.118f),      // #B41E1E
+        ["blue"] = new(65f / 255f, 105f / 255f, 220f / 255f),
+        ["yellow"] = new(235f / 255f, 195f / 255f, 45f / 255f),
+        ["white"] = new(238f / 255f, 238f / 255f, 238f / 255f),
+    };
+    static readonly Dictionary<string, Texture2D> _carTextures = new();
+    static Texture2D CarTexture(string color)
+    {
+        if (_carTextures.Count == 0)
+        {
+            _carTextures["red"] = GD.Load<Texture2D>("res://assets/car_64x128.png");
+            _carTextures["blue"] = GD.Load<Texture2D>("res://assets/car_64x128_blue.png");
+            _carTextures["yellow"] = GD.Load<Texture2D>("res://assets/car_64x128_yellow.png");
+            _carTextures["white"] = GD.Load<Texture2D>("res://assets/car_64x128_white.png");
+        }
+        return color != null && _carTextures.TryGetValue(color, out var t)
+            ? t : _carTextures["red"];
+    }
 
     // Breadcrumb trail (rear-axle points in metres + heading deg) and the
     // four wheel-track Line2Ds derived from it.
@@ -188,9 +223,11 @@ public partial class MapRenderer : Node2D
     private float _lastTrailZoom = -1f;
 
     // Test flags (green start / red end pennants), world metres + heading.
+    // Legacy single-car sim: root-level pennants. Multi-car sims carry the
+    // flags per car in _carMeta instead.
     private (float X, float Y, float Hdg)? _flagGreen, _flagRed;
     private readonly List<CanvasItem> _flagNodes = new();
-    private (float, float, float)? _lastFlagG, _lastFlagR;
+    private string _lastFlagFp = "";   // fingerprint of all visible pennants
 
     public override void _Ready()
     {
@@ -317,8 +354,7 @@ public partial class MapRenderer : Node2D
         _trailLines = new Node2D[4];
         _lastTrailTail = null;
         _flagNodes.Clear();
-        _lastFlagG = null;
-        _lastFlagR = null;
+        _lastFlagFp = "";
         ClearCars();
 
         var bg = new Color(34 / 255f, 120 / 255f, 34 / 255f);
@@ -1011,13 +1047,42 @@ public partial class MapRenderer : Node2D
                 _lastTrailTime[uid] = t;
             }
 
-            if (root.TryGetProperty("cars", out var cars))   // future multi-car shape
+            if (root.TryGetProperty("cars", out var cars))   // multi-car shape
+            {
+                bool anyNewCar = false;
+                long newestUid = 0;
                 foreach (var c in cars.EnumerateArray())
-                    Add(c.GetProperty("car_uid").GetInt64(),
+                {
+                    long uid = c.GetProperty("car_uid").GetInt64();
+                    if (!_carBuf.ContainsKey(uid)) anyNewCar = true;
+                    if (uid > newestUid) newestUid = uid;
+                    Add(uid,
                         c.GetProperty("x").GetSingle(), c.GetProperty("y").GetSingle(),
                         c.GetProperty("heading").GetSingle(),
                         c.GetProperty("speed_kmh").GetSingle(),
                         c.GetProperty("level").GetInt32());
+                    // Per-car display state: color, lights, OWN flags/label.
+                    if (!_carMeta.TryGetValue(uid, out var m))
+                        _carMeta[uid] = m = new CarMeta();
+                    m.Color = c.TryGetProperty("color", out var cc)
+                               && cc.ValueKind == JsonValueKind.String
+                           ? cc.GetString() : "red";
+                    m.BlinkL = c.TryGetProperty("blinker_left", out var bl) && bl.GetBoolean();
+                    m.BlinkR = c.TryGetProperty("blinker_right", out var br) && br.GetBoolean();
+                    m.Hazard = c.TryGetProperty("hazard", out var hz) && hz.GetBoolean();
+                    m.FlagGreen = ParseFlag(c, "green");
+                    m.FlagRed = ParseFlag(c, "red");
+                    m.HudLabel = c.TryGetProperty("hud_label", out var hlc)
+                                  && hlc.ValueKind == JsonValueKind.String
+                           ? hlc.GetString() : null;
+                }
+                // Multi-car auto-follow: a freshly spawned car takes over
+                // the camera binding - mirrors the sim, which follows the
+                // LAST teleported car. Skipped after F (follow released) or
+                // while no new car arrived (TAB stays in effect).
+                if (_autoFollow && anyNewCar && newestUid > 0)
+                    _followUid = newestUid;
+            }
             else if (root.TryGetProperty("has_car", out var hc) && hc.GetBoolean())
                 Add(root.GetProperty("car_uid").GetInt64(),
                     root.GetProperty("x").GetSingle(), root.GetProperty("y").GetSingle(),
@@ -1043,25 +1108,33 @@ public partial class MapRenderer : Node2D
                 }
             }
 
-            // Blinker state (single-car form; the future cars-array shape
-            // would read it per car).
+            // Blinker state: the multi-car shape carries it per car above;
+            // the legacy single-car form uses the top-level fields.
             if (!root.TryGetProperty("cars", out _) &&
                 root.TryGetProperty("car_uid", out var bu))
             {
-                bool bl = root.TryGetProperty("blinker_left", out var b0) && b0.GetBoolean();
-                bool br = root.TryGetProperty("blinker_right", out var b1) && b1.GetBoolean();
-                bool hz = root.TryGetProperty("hazard", out var b2) && b2.GetBoolean();
-                _blinkers[bu.GetInt64()] = (bl, br, hz);
+                long uid = bu.GetInt64();
+                if (!_carMeta.TryGetValue(uid, out var m))
+                    _carMeta[uid] = m = new CarMeta();
+                m.BlinkL = root.TryGetProperty("blinker_left", out var b0) && b0.GetBoolean();
+                m.BlinkR = root.TryGetProperty("blinker_right", out var b1) && b1.GetBoolean();
+                m.Hazard = root.TryGetProperty("hazard", out var b2) && b2.GetBoolean();
             }
 
-            // HUD test label ("5/21") - string or null.
+            // HUD test label ("5/21") - the PRIMARY car's label, string or null.
             if (root.TryGetProperty("hud_label", out var hl))
                 _lastTestText = hl.ValueKind == JsonValueKind.String
                     ? hl.GetString() : null;
 
-            // Test flags (green start / red end pennants).
-            _flagGreen = ParseFlag(root, "green");
-            _flagRed = ParseFlag(root, "red");
+            // Test flags: legacy single-car sim puts them at the root; the
+            // multi-car shape carries them per car (parsed above), so skip
+            // the root pair then - it is the primary's copy and would
+            // double-draw.
+            if (!root.TryGetProperty("cars", out _))
+            {
+                _flagGreen = ParseFlag(root, "green");
+                _flagRed = ParseFlag(root, "red");
+            }
 
             // Cars missing from this response are gone.
             foreach (var uid in _carBuf.Keys.Where(u => !seen.Contains(u)).ToArray())
@@ -1091,7 +1164,9 @@ public partial class MapRenderer : Node2D
         _carBuf.Remove(uid);
         _trails.Remove(uid);
         _lastTrailTime.Remove(uid);
-        _blinkers.Remove(uid);
+        _carMeta.Remove(uid);
+        if (_carLabels.TryGetValue(uid, out var lab))
+        { lab.QueueFree(); _carLabels.Remove(uid); }
         _blinkL.Remove(uid);
         _blinkR.Remove(uid);
         if (_carNodes.TryGetValue(uid, out var n))
@@ -1102,6 +1177,7 @@ public partial class MapRenderer : Node2D
     void ClearCars()
     {
         foreach (var uid in _carBuf.Keys.ToArray()) RemoveCar(uid);
+        _lastFlagFp = "";
         _lastMaxTime = double.NegativeInfinity;
         _simNow = double.NegativeInfinity;
         _rateRefSim = -1;
@@ -1117,13 +1193,18 @@ public partial class MapRenderer : Node2D
         // on the REAR AXLE (/state x/y); the sprite is centred on the BODY
         // centre, RearAxleOffsetM ahead of it.
         var root = new Node2D { Name = $"car_{uid}" };
+        // Multi-car: each car gets its own pre-tinted sprite (red = the
+        // original; blue/yellow/white generated with the old pygame tint
+        // formula). Meta may not exist yet on the very first sample - red
+        // is the safe default.
+        string color = _carMeta.TryGetValue(uid, out var meta) ? meta.Color : "red";
         // The 64x128 px texture is stretched to the car's physical size
         // (pygame: transform.scale to CAR_WIDTH x CAR_LENGTH in world px).
         // Nose = texture top; with rotation_degrees = heading the nose
         // points along travel (verified pixel-wise against pygame).
         root.AddChild(new Sprite2D
         {
-            Texture = GD.Load<Texture2D>("res://assets/car_64x128.png"),
+            Texture = CarTexture(color),
             Scale = new Vector2(CarWidthM / 64f, CarLengthM / 128f),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
@@ -1253,17 +1334,44 @@ public partial class MapRenderer : Node2D
             node.ZIndex = 10 + 20 * level;
 
             // Blinker corner lights: pygame's 0.5 s period, radius clamped.
-            if (_blinkers.TryGetValue(kv.Key, out var bk))
+            if (_carMeta.TryGetValue(kv.Key, out var meta))
             {
                 bool on = Time.GetTicksMsec() % 500 <= 250;
                 float rPx = Mathf.Clamp(_cam.Zoom.X * 0.4f, 2f, 7f);
                 var sc = new Vector2(rPx / _cam.Zoom.X, rPx / _cam.Zoom.X);
                 if (_blinkL.TryGetValue(kv.Key, out var bl))
                     foreach (var b in bl)
-                        { b.Visible = on && (bk.L || bk.H); b.Scale = sc; }
+                        { b.Visible = on && (meta.BlinkL || meta.Hazard); b.Scale = sc; }
                 if (_blinkR.TryGetValue(kv.Key, out var br))
                     foreach (var b in br)
-                        { b.Visible = on && (bk.R || bk.H); b.Scale = sc; }
+                        { b.Visible = on && (meta.BlinkR || meta.Hazard); b.Scale = sc; }
+
+                // Small per-car HUD label above the nose (parallel tests):
+                // world-space so it never rotates with the car. The default
+                // font is ~16 px = 16 METRES in world space, so scale down
+                // to ~1.6 m tall (readable from driving zooms up).
+                string lbl = meta.HudLabel;
+                if (!string.IsNullOrEmpty(lbl))
+                {
+                    if (!_carLabels.TryGetValue(kv.Key, out var lab))
+                    {
+                        lab = new Label
+                        {
+                            ZIndex = 100,
+                            HorizontalAlignment = HorizontalAlignment.Center,
+                            Scale = new Vector2(0.1f, 0.1f),
+                        };
+                        _world.AddChild(lab);
+                        _carLabels[kv.Key] = lab;
+                    }
+                    if (lab.Text != lbl) lab.Text = lbl;
+                    // Center on the car's axis (Label origin is top-left).
+                    lab.Position = pos + new Vector2(
+                        -lab.Size.X * 0.1f * 0.5f,
+                        -(RearAxleOffsetM + CarLengthM / 2f + 0.6f));
+                }
+                else if (_carLabels.TryGetValue(kv.Key, out var dead))
+                { dead.QueueFree(); _carLabels.Remove(kv.Key); }
             }
 
             if (firstUid == null) { firstUid = kv.Key; firstKmh = kmh; }
@@ -1271,14 +1379,20 @@ public partial class MapRenderer : Node2D
 
         FollowCamera();
 
-        // Minimap dots: every car, the bound one gets a yellow ring.
+        // Minimap dots: every car in its own color, the bound one gets a
+        // yellow ring.
         if (_minimap != null)
         {
             _minimap.Cars.Clear();
             foreach (var kv in _carNodes)
+            {
+                string col = _carMeta.TryGetValue(kv.Key, out var m)
+                    ? m.Color : "red";
                 _minimap.Cars.Add((new Vector2(kv.Value.GlobalPosition.X,
                                                -kv.Value.GlobalPosition.Y),
-                                   kv.Key == _followUid));
+                                   kv.Key == _followUid,
+                                   CarColors[col]));
+            }
             _minimap.QueueRedraw();
         }
 
@@ -1394,12 +1508,21 @@ public partial class MapRenderer : Node2D
         foreach (var l in _trailLines)
             if (l != null) l.ZIndex = 9 + 20 * lvl;
 
-        bool flagChanged = _flagGreen != _lastFlagG || _flagRed != _lastFlagR;
-        if (flagChanged || drift)
+        // Flag change detection: legacy root pair, or every car's own
+        // pennants (multi-car).
+        var fp = new System.Text.StringBuilder();
+        if (_carMeta.Count > 0)
+            foreach (var kv in _carMeta)
+                fp.Append(kv.Key).Append(':')
+                  .Append(kv.Value.FlagGreen?.ToString() ?? "-").Append(',')
+                  .Append(kv.Value.FlagRed?.ToString() ?? "-").Append(';');
+        else
+            fp.Append(_flagGreen?.ToString() ?? "-")
+              .Append(',').Append(_flagRed?.ToString() ?? "-");
+        if (fp.ToString() != _lastFlagFp || drift)
         {
             RebuildFlags();
-            _lastFlagG = _flagGreen;
-            _lastFlagR = _flagRed;
+            _lastFlagFp = fp.ToString();
         }
     }
 
@@ -1477,10 +1600,23 @@ public partial class MapRenderer : Node2D
         foreach (var n in _flagNodes)
             if (GodotObject.IsInstanceValid(n)) n.QueueFree();
         _flagNodes.Clear();
-        DrawFlag(_flagGreen, new Color(0f, 0.784f, 0.314f),     // (0,200,80)
-                             new Color(0f, 0.353f, 0.157f));    // (0,90,40)
-        DrawFlag(_flagRed, new Color(0.902f, 0.196f, 0.196f),   // (230,50,50)
-                            new Color(0.471f, 0.078f, 0.078f)); // (120,20,20)
+        // Multi-car: every car's OWN pennants; legacy single-car sim: the
+        // root-level pair.
+        if (_carMeta.Count > 0)
+            foreach (var kv in _carMeta)
+            {
+                DrawFlag(kv.Value.FlagGreen, new Color(0f, 0.784f, 0.314f),
+                                         new Color(0f, 0.353f, 0.157f));
+                DrawFlag(kv.Value.FlagRed, new Color(0.902f, 0.196f, 0.196f),
+                                    new Color(0.471f, 0.078f, 0.078f));
+            }
+        else
+        {
+            DrawFlag(_flagGreen, new Color(0f, 0.784f, 0.314f),     // (0,200,80)
+                                 new Color(0f, 0.353f, 0.157f));    // (0,90,40)
+            DrawFlag(_flagRed, new Color(0.902f, 0.196f, 0.196f),   // (230,50,50)
+                                new Color(0.471f, 0.078f, 0.078f)); // (120,20,20)
+        }
     }
 
     void DrawFlag((float X, float Y, float Hdg)? f, Color fill, Color outline)
@@ -1545,9 +1681,10 @@ public partial class MinimapNode : Node2D
     Color _road;
     Camera2D _cam;
 
-    // M2: all live cars in SIM coords; the second flag marks the car the
-    // camera is bound to (drawn with a yellow ring).
-    public List<(Vector2 Pos, bool Followed)> Cars = new();
+    // All live cars in SIM coords; the second flag marks the car the
+    // camera is bound to (drawn with a yellow ring); the color is the
+    // car's own display color (multi-car).
+    public List<(Vector2 Pos, bool Followed, Color Col)> Cars = new();
 
     public void Setup(List<(Vector2 A, Vector2 B, float W)> segs,
                       Rect2 bounds, Color road, Camera2D cam)
@@ -1577,10 +1714,10 @@ public partial class MinimapNode : Node2D
             DrawLine(Mm(a), Mm(b), _road, lw);
         }
 
-        foreach (var (p, followed) in Cars)
+        foreach (var (p, followed, col) in Cars)
         {
             var cp = Mm(p);
-            DrawCircle(cp, followed ? 4.5f : 3f, CarColor);
+            DrawCircle(cp, followed ? 4.5f : 3f, col);
             if (followed)
                 DrawCircle(cp, 6.5f, new Color(1f, 1f, 0f), false, 2f);
         }
