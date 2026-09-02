@@ -19,6 +19,7 @@ public partial class MapRenderer : Node2D
 {
     const string MapUrl = "http://127.0.0.1:5000/map";
     const string StateUrl = "http://127.0.0.1:5000/state";
+    const string RunTestUrl = "http://127.0.0.1:5000/run_test";
     const float Ppm = 2f;   // config.PIXELS_PER_METER (/state is in world pixels)
 
     static Vector2 W(float x, float y) => new(x, -y);
@@ -36,6 +37,15 @@ public partial class MapRenderer : Node2D
     }
 
     private HttpRequest _http;
+    // Test-runner UI (bottom left): number field + "Run Test" button.
+    // The sim's POST /run_test launches the EXTERNAL test runner process
+    // (tests live outside the sim - they drive it via this API).
+    private HttpRequest _cmdHttp;
+    private string _pendingCmd = "";      // "post" | "poll"
+    private bool _pollActive;
+    private LineEdit _testInput;
+    private Button _runTestBtn;
+    private Label _runStatus;
     private Camera2D _cam;
     private Node2D _world;                 // container for all map nodes
     private Node2D _markLayer;             // rebuilt on zoom change (px floor)
@@ -47,6 +57,7 @@ public partial class MapRenderer : Node2D
     // Dev hook: --motionlog <file> writes "ms x y" per car per frame so
     // rendering smoothness can be measured (delta variance = stutter).
     private string _motionLogPath;
+    private int _autoRunTest = -1;   // --run-test <N>: auto-click Run Test
     private StreamWriter _motionLog;
     private bool _testPan;
     private Vector2? _overrideCenter;
@@ -270,6 +281,15 @@ public partial class MapRenderer : Node2D
             OnStateResponse(code, body, _stateHttpA);
         RequestState(_stateHttpA);
 
+        // Test-runner UI + its own HTTP node (the map/state nodes are busy
+        // with their pipelines).
+        _cmdHttp = new HttpRequest { UseThreads = true, Timeout = 5.0 };
+        AddChild(_cmdHttp);
+        _cmdHttp.RequestCompleted += (id, code, hdr, body) =>
+            OnCmdResponse(code, body);
+        BuildRunTestUi();
+
+
         // User args after "--": --screenshot <path> saves the viewport a
         // moment after the map is built (parity check vs pygame) and then
         // QUITS — screenshot runs are self-terminating, so nothing has to
@@ -294,7 +314,18 @@ public partial class MapRenderer : Node2D
                 _testPan = true;
             else if (args[i] == "--motionlog")
                 _motionLogPath = args[i + 1];
+            else if (args[i] == "--run-test" && i + 1 < args.Length)
+                _autoRunTest = int.Parse(args[i + 1]);
         }
+
+        // --run-test <N>: fill the field and fire the same code path as a
+        // button click, a moment after the UI is built.
+        if (_autoRunTest > 0)
+            GetTree().CreateTimer(1.0).Timeout += () =>
+            {
+                _testInput.Text = _autoRunTest.ToString();
+                RunTestFromUi();
+            };
 
         if (_motionLogPath != null)
             _motionLog = new StreamWriter(_motionLogPath, append: false);
@@ -1658,6 +1689,163 @@ public partial class MapRenderer : Node2D
         GD.Print(err == Error.Ok ? $"Screenshot saved: {path}" : $"SavePng failed: {err}");
         // Screenshot runs are one-shot: quit cleanly (no external kill).
         GetTree().Quit();
+    }
+
+    // ---------------- test-runner UI (bottom left) ----------------
+
+    void BuildRunTestUi()
+    {
+        var layer = new CanvasLayer { Layer = 10 };
+        AddChild(layer);
+
+        var sb = new StyleBoxFlat
+        {
+            BgColor = new Color(20 / 255f, 20 / 255f, 20 / 255f, 180f / 255f),
+            ContentMarginLeft = 7, ContentMarginRight = 7,
+            ContentMarginTop = 5, ContentMarginBottom = 5,
+        };
+
+        var box = new VBoxContainer();
+        // Bottom-left corner (stretch mode is disabled: viewport == window).
+        var vp = GetViewport().GetVisibleRect().Size;
+        box.Position = new Vector2(8, vp.Y - 96);
+        layer.AddChild(box);
+
+        var row = new HBoxContainer();
+        box.AddChild(row);
+
+        var cap = new Label { Text = "Test-Nr:" };
+        cap.AddThemeFontSizeOverride("font_size", 20);
+        row.AddChild(cap);
+
+        _testInput = new LineEdit
+        {
+            PlaceholderText = "z.B. 22 (Stresstest)",
+            MaxLength = 4,
+        };
+        _testInput.CustomMinimumSize = new Vector2(170, 0);
+        row.AddChild(_testInput);
+
+        _runTestBtn = new Button { Text = "Run Test" };
+        _runTestBtn.Pressed += RunTestFromUi;
+        row.AddChild(_runTestBtn);
+
+        // Enter in the field also starts the test.
+        _testInput.TextSubmitted += _ => RunTestFromUi();
+
+        _runStatus = new Label();
+        _runStatus.AddThemeStyleboxOverride("normal", sb);
+        _runStatus.AddThemeColorOverride("font_color",
+            new Color(1f, 1f, 0f));
+        _runStatus.AddThemeFontSizeOverride("font_size", 18);
+        box.AddChild(_runStatus);
+    }
+
+    void RunTestFromUi()
+    {
+        if (_testInput == null) return;
+        if (!int.TryParse(_testInput.Text.Trim(), out int n) || n < 1)
+        {
+            SetRunStatus("Bitte eine Test-Nummer eingeben (Liste: GET /tests)",
+                ok: false);
+            return;
+        }
+        var body = System.Text.Encoding.UTF8.GetBytes($"{{\"number\": {n}}}");
+        _pendingCmd = "post";
+        _runTestBtn.Disabled = true;
+        SetRunStatus($"Starte Test #{n} …", ok: true);
+        // RequestRaw: raw byte body + custom headers (Godot 4.7).
+        _cmdHttp.RequestRaw(RunTestUrl,
+            new[] { "Content-Type: application/json" },
+            HttpClient.Method.Post, body);
+    }
+
+    void OnCmdResponse(long code, byte[] body)
+    {
+        string txt = System.Text.Encoding.UTF8.GetString(body);
+        if (_pendingCmd == "post")
+        {
+            _runTestBtn.Disabled = false;
+            int reqNum = int.TryParse(_testInput?.Text.Trim(), out int nn)
+                ? nn : 0;
+            if (code == 200)
+            {
+                SetRunStatus($"Test #{reqNum} läuft …", ok: true);
+                StartPolling();
+            }
+            else
+            {
+                string err = txt;
+                try
+                {
+                    using var doc = JsonDocument.Parse(txt);
+                    if (doc.RootElement.TryGetProperty("error", out var e))
+                        err = e.GetString() ?? txt;
+                }
+                catch { /* non-JSON error body: show raw */ }
+                SetRunStatus($"Fehler: {err}", ok: false);
+            }
+            return;
+        }
+        if (_pendingCmd != "poll") return;
+
+        bool running = false, haveNumber = false;
+        int n = 0, rc = -1;
+        string logFile = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(txt);
+            var root = doc.RootElement;
+            running = root.GetProperty("running").GetBoolean();
+            if (root.TryGetProperty("number", out var numEl))
+            { n = numEl.GetInt32(); haveNumber = true; }
+            if (root.TryGetProperty("returncode", out var r) &&
+                r.ValueKind == JsonValueKind.Number)
+                rc = r.GetInt32();
+            if (root.TryGetProperty("log_file", out var lf))
+                logFile = lf.GetString() ?? "";
+        }
+        catch { /* malformed: keep polling */ }
+
+        if (running && haveNumber)
+        {
+            SetRunStatus($"Test #{n} läuft …", ok: true);
+            GetTree().CreateTimer(3.0).Timeout += PollRunStatus;
+        }
+        else if (!haveNumber)
+        {
+            // No run has ever been recorded - nothing to track.
+            _pollActive = false;
+        }
+        else if (!running && haveNumber)
+        {
+            _pollActive = false;
+            SetRunStatus(rc == 0
+                ? $"Test #{n} fertig ✅ (Log: {logFile})"
+                : $"Test #{n} beendet, rc={rc} ❌ (Log: {logFile})",
+                ok: rc == 0);
+        }
+    }
+
+    void StartPolling()
+    {
+        if (_pollActive) return;
+        _pollActive = true;
+        PollRunStatus();
+    }
+
+    void PollRunStatus()
+    {
+        _pendingCmd = "poll";
+        _cmdHttp.Request(RunTestUrl);
+    }
+
+    void SetRunStatus(string text, bool ok)
+    {
+        if (_runStatus == null) return;
+        _runStatus.Text = text;
+        _runStatus.AddThemeColorOverride("font_color",
+            ok ? new Color(0.6f, 1f, 0.6f) : new Color(1f, 0.55f, 0.4f));
     }
 }
 
