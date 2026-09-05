@@ -4,4 +4,12 @@
     <RootNamespace>DrivingGame</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
+
+  <!-- The C# sim port (docs/C_SHARP_PORT_SPEC.md) lives in sibling projects;
+       keep it out of the Godot assembly's compile glob. -->
+  <ItemGroup>
+    <Compile Remove="DrivingGame.Sim/**" />
+    <Compile Remove="DrivingGame.Server/**" />
+  </ItemGroup>
+
 </Project>
