@@ -134,9 +134,18 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 
 ## Phases & To-do list
 
-> Progress (2026-09-05): Phase 0 ✓, Phase 1 ✓, Phase 2 ✓ — Gate G1 passed
-> for both the `basic` test map and the OSM map; Phase 2 gate passed with
-> all 23 reference cases at ≤1e-9 (see below). **Next: Phase 3 — BicycleNav.**
+> Progress (2026-09-05): Phase 0 ✓, Phase 1 ✓, Phase 2 ✓, Phase 3 ✓ — Gate
+> G1 passed for both the `basic` test map and the OSM map; Phase 2 gate passed
+> with all 23 reference cases at ≤1e-9; Gate G2 passed via 5 behavioural
+> integration tests (see below). **Phase 4 code complete** (Car/Driver,
+> LaneGuard, PhysicsValidator, Obstacles — 90/90 unit tests green) and its
+> feature gate now passes (blinker-parity bug fixed 2026-09-05 — see Phase 4
+> below). **Phase 5**: sim engine + pacing done; REST API
+> implemented in the console host (shared-code placement deferred to Phase 7).
+> **Phase 6 complete**: G3 passed (576-car stress); G4 passed — capacity
+> sweep: C# real-time ceiling ~170 cars vs Python ~90 (single-threaded, ~2×
+> per-car speedup, see Phase 6 below); A/B sanity done; full e2e suite 22/22
+> against a fresh C# host with the visible Godot window (`scripts/run_e2e.sh`).
 
 ### Phase 0 — Scaffolding ✅ (2026-09-04)
 - [x] Solution layout in this repo (Sim + Server projects, net8.0)
@@ -182,29 +191,112 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 - **Gate: PASSED** (2026-09-05) — `dotnet test DrivingGame.Sim.Tests/`
   → 73/73 green.
 
-### Phase 3 — BicycleNav
-- [ ] SmoothCurve, RefLine (+ bisect point_at/heading_at), projection
+### Phase 3 — BicycleNav ✅ (2026-09-05)
+- [x] SmoothCurve, RefLine (+ bisect point_at/heading_at), projection
       refinement, speed profile, pursuit controller, parking / pull-over
-      maneuvers
-- **Gate G2:** single-car trajectory sane; parking + pull-over features work
+      maneuvers — `BicycleNav.part1/2/3.cs` (~3.3k lines: route build +
+      key-cached rebuilds, curvature-limited speed profile with braking ramps,
+      pure-pursuit steering + Stanley law for the parking final straight,
+      forward & reverse-in parking, U-turn §5a single swing / §5b three-point),
+      `RefLine.cs` (arc-length line: PointAt/HeadingAt/CurvatureAt via bisect,
+      ProjectS + RefineProject)
+- **Gate G2: PASSED** (2026-09-05) — 5 new `BicycleNavTests` drive a real
+  Car + BicycleDriver at 60 Hz on the `basic` map, all green: straight driving
+  (keeps road, builds speed), 90° corner (follows the line, corner speed
+  limited vs cruise), dead-end auto-park (pull-over swerve + stop, `Parked`
+  latched), red-flag reverse-in park (front bumper 6 cm from the flag), full
+  U-turn (single swing §5a, heading flipped ~180°, ends on road). Suite:
+  78/78. Testing also caught and fixed 3 nav bugs: `Parked` never latched on
+  forward stops; U-turn room check measured only to the next node instead of
+  walking degree-2 continuations; reverse-in stopped at first pose convergence,
+  3.7 m short of the flag.
 
 ### Phase 4 — Car & safety systems
-- [ ] Car (FREE + BICYCLE modes, gear, steering-wheel ramp), Driver classes
-- [ ] LaneGuard, PhysicsValidator, Obstacles (contact stop)
+- [x] Car (FREE + BICYCLE modes, gear, steering-wheel ramp), Driver classes
+      (`Car.cs`: FREE-mode gear model with fresh-press shifts, `_steerPos`
+      wheel ramp, BICYCLE dispatch to BicycleNav; `Driver.cs`: abstract base +
+      Keyboard + Bicycle drivers)
+- [x] LaneGuard, PhysicsValidator, Obstacles (contact stop)
+      (`LaneGuard.cs`: per-car wrong-side detection + stats in the state
+      snapshot; `PhysicsValidator.cs`: jump / off-road / turning-radius
+      checks; `Obstacles.cs` + `ObstacleManager`: placement validation,
+      contact stop, per-map layouts save/load — all wired into SimEngine and
+      covered by `SafetySystemsTests`, 13 tests)
 - Gate: feature checks (breadcrumbs, reverse park, blinkers, u-turn)
+  - **PASSED** (2026-09-05): reverse-in park ✓ (Phase 3 G2),
+    u-turn ✓ (`Uturn_CompletesAndFlipsHeading`), breadcrumbs present
+    (per-car toggle + state export), blinker parity ✓ — the earlier failure
+    (scenarios 7/8: crossroads left/right ending on the straight-through
+    segment) is fixed. Root cause: a braceless `if` in `MaybeRebuild`
+    (`BicycleNav.part2.cs`) made `RebuildStraightPast()` run UNCONDITIONALLY
+    after every turn rebuild — Python's indented equivalent is conditional, so
+    the C# car silently replaced the signalled-turn line with a straight-past
+    line on every signal (at a crossroads that IS the straight-through
+    segment; at a T-junction it resolves to the wrong spoke and drives onto
+    the wrong side). Fixed by bracing the block; repo-wide scan found no other
+    braceless-if-with-two-statements. Verified: `test_turning.py` turning
+    scenarios (corners, T-junction, Y, crossroads — 9 tests) all green on the
+    C# console host.
 
 ### Phase 5 — Engine & API
-- [ ] Sim engine: command queue, fixed-dt accumulator (4-substep cap),
+- [x] Sim engine: command queue, fixed-dt accumulator (4-substep cap),
       sim clock = substeps, state snapshot export
-- [ ] Pacing: re-measure .NET `Thread.Sleep` quantization on this Mac; set
+      (`SimEngine.cs`: thread-safe command queue drained per frame, shared
+      fixed-timestep accumulator clamped to 4×DtFixed, `_simStepsTotal` as the
+      sim clock, `StateSnapshot()` serving GET /state)
+- [x] Pacing: re-measure .NET `Thread.Sleep` quantization on this Mac; set
       spin window accordingly (may be smaller or unnecessary)
+      (measured via `--measure-sleep`: ~3.3 ms mean sleep overshoot at the
+      16.7 ms target; spin window set to 4 ms; production loop verified at
+      ~60 Hz)
 - [ ] REST API (all endpoints, identical payloads) in shared code
-- Gate: console host endpoint parity vs Python server
+      (all endpoints implemented and live in `DrivingGame.Server/GameApi.cs` —
+      the Python test scripts run against it unchanged; "shared code"
+      placement is a Phase 7 concern)
+- **Gate: PASSED** (2026-09-05) — console host endpoint parity vs Python
+      server: live probe shows identical `/state` (top-level + per-car keys),
+      `/map`, and `/teleport` payloads on both hosts; G1 already covered
+      `/map` content; the full unchanged `test_turning.py` suite passes
+      against the C# console host (22/22 incl. 576-car stress, see Phase 6).
 
 ### Phase 6 — Burn-in (console host)
-- [ ] 576-car stress suite (unchanged scripts) → **G3**
-- [ ] Capacity sweep → **G4** (record the new real-time ceiling)
-- [ ] Optional A/B: Python vs C# side-by-side sanity
+- [x] 576-car stress suite (unchanged scripts) → **G3 PASSED** (2026-09-05):
+      full `test_turning.py` run green — 21/21 deterministic scenarios +
+      576-car fig8 stress phase: 0 jitters, 0 off-road, no crashes
+      (wrong-side hits in the dense fig8 stress are the known baseline noise).
+      Found & fixed on the way: a C#/Python modulo-semantics port bug —
+      Python's `x % 360` is always non-negative, C#'s keeps the dividend's
+      sign, so every ported angle wrap `(d + 180) % 360 - 180` misread a
+      heading crossing the 360°→0° boundary as a ~360° jump. In
+      `PhysicsValidator.CheckTurningRadius` that threw an unhandled
+      `PhysicsViolationException` and killed the server mid-stress (implied
+      radius 0.05 m from Δheading 359.92° / Δpos 314 mm). Fixed with
+      `Math.WrapDeg` / `Math.PosDeg` helpers (`MathAndNtsCompat.cs`) at all
+      10 wrap sites + 5 heading-update sites; no other `%`-based wraps left.
+- [x] Capacity sweep → **G4 PASSED** (2026-09-05): `tools/capacity_sweep.py`
+      spawns N cars on the fig8 loop and measures pace = sim-time/wall-time
+      over a ≥25 s sim window (pace ≥ 0.97 = real time). Single-threaded
+      (Parallel.For is Phase 8):
+      - **C# real-time ceiling: ~170 cars** (170 → pace 0.992; 180 → 0.951)
+      - Python ceiling: ~90 cars (50 → 1.000; 100 → 0.936)
+      - Per-car speedup ≈ 2×, roughly constant from 160 to 576 cars
+        (576: C# 0.301 vs Python 0.145 pace)
+      - Pace falls super-linearly in N on both hosts → some loop component
+        grows faster than O(N) (candidates: per-frame UpdateState dict
+        allocations / GC, IsOnRoad ×2 per car per frame, spatial-hash
+        rebuild per substep). Input for Phase 8.
+      - Caveat: part of the high-N overhead is /state JSON serialization
+        polled every 250 ms by the measurement client; that goes away in
+        the Phase 7 Godot integration (in-process snapshot read), so the
+        embedded ceiling should be at or above these numbers.
+      Full data: `data/capacity_sweep_summary.json` (+ raw per-phase files).
+- [x] Optional A/B: Python vs C# side-by-side sanity — done as part of G4:
+      identical script against both hosts (C# :5099, Python :5000), same
+      spawn/poll methodology, so the comparison is apples-to-apples.
+- [x] Visible e2e run: `scripts/run_e2e.sh` (port of car/scripts/run_e2e.sh)
+      — fresh C# host on :5000 + visible Godot window + full unchanged
+      suite in the foreground. **22/22 passed** (2026-09-05), incl. 576-car
+      stress phase: 0 jitters, 0 off-road.
 
 ### Phase 7 — Godot integration (target end state)
 - [ ] Godot csproj references `DrivingGame.Sim`
@@ -276,6 +368,16 @@ brake for participants ahead).
 - **Gate G6:** mixed-traffic scenario (car + truck + bicycle + pedestrian incl.
   playing child) passes the stress invariants; determinism verified
   (same seed → same run).
+
+## Pending (user decision 2026-09-05)
+
+- **Stale-normal quirk review — after the port, before any new work.**
+  The Python `legal_corridor` t_junc uses stale nx/ny (route-end normal at
+  every station); the C# port reproduces it on purpose. After Phase 8 and
+  BEFORE Phase 9 / any new feature: fix in Python first, regenerate the
+  reference dump, run tests + e2e scenarios, compare lines before/after;
+  port the fix to C# only if it is a verified improvement. Otherwise document
+  and keep the quirk.
 
 ## Risks / notes
 

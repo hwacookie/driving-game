@@ -1,0 +1,18 @@
+{
+  "note": "Phase 6 gate G4 - capacity sweep, single-threaded sim (no Parallel.For yet; that is Phase 8). Method: tools/capacity_sweep.py spawns N cars evenly on the fig8 loop of the `basic` map (rolling start 50 km/h, throttle held), waits 8 s warmup, then measures pace = sim-time advanced / wall-time over a >=25 s sim window. pace >= 0.97 counts as real-time 60 Hz. Both hosts measured with the identical script (same /state polling overhead).",
+  "date": "2026-09-05",
+  "criterion_real_time": 0.97,
+  "ceiling_cars": { "csharp": 170, "python": "~90 (between 50 and 100; not refined further)" },
+  "pace_by_car_count": {
+    "csharp_console_host": { "50": 1.0003, "100": 1.0, "150": 1.001, "160": 0.998, "170": 0.992, "180": 0.951, "190": 0.909, "200": 0.8652, "300": 0.5774, "400": 0.4319, "576": 0.301, "800": 0.2174 },
+    "python_server":       { "50": 0.9999, "100": 0.9363, "120": 0.7803, "140": 0.6586, "160": 0.5751, "200": 0.4558, "300": 0.2803, "576": 0.1449 }
+  },
+  "same_count_ratio_csharp_over_python": { "100": 1.07, "160": 1.74, "200": 1.9, "300": 2.06, "576": 2.08 },
+  "observations": [
+    "C# holds exact real time up to ~170 cars (pace 0.992), i.e. ~1.9x the Python ceiling (~90).",
+    "Per-car speedup is ~2x and roughly constant from 160 to 576 cars.",
+    "Pace falls SUPER-linearly with N on both hosts (e.g. C# 200->800: 0.865 -> 0.217): some loop component grows faster than O(N). Candidates for Phase 8 analysis: per-frame UpdateState allocates N dicts (GC pressure), IsOnRoad runs twice per car per frame, spatial-hash rebuild per substep.",
+    "Part of the high-N overhead is /state JSON serialization polled every 250 ms by the measurement client - this goes away in the Phase 7 Godot integration (in-process snapshot read), so the embedded ceiling should be at or above these numbers."
+  ],
+  "raw_files": ["data/capacity_sweep.json", "data/capacity_sweep_python.json"]
+}

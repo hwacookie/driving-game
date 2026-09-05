@@ -43,6 +43,22 @@ public static class Math
     /// <summary>sqrt(x² + y²) — Python's math.hypot.</summary>
     public static double Hypot(double x, double y) => System.Math.Sqrt(x * x + y * y);
 
+    /// <summary>Python's math.radians (degrees → radians).</summary>
+    public static double Radians(double degrees) => degrees * PI / 180.0;
+
+    /// <summary>Wrap an angle difference (degrees) to [-180, 180).
+    /// Equivalent to Python's `(d + 180) % 360 - 180` — C#'s `%` keeps the
+    /// dividend's sign, so the naive port is wrong for d &lt; -180 (heading
+    /// crossing the 360°→0° boundary read as a ~360° jump).</summary>
+    public static double WrapDeg(double d) => (d + 540.0) % 360.0 - 180.0;
+
+    /// <summary>Positive modulo into [0, 360) — Python's `x % 360` semantics
+    /// (C#'s `%` can return a negative result for negative x).</summary>
+    public static double PosDeg(double x) => ((x % 360.0) + 360.0) % 360.0;
+
+    /// <summary>Python's math.degrees (radians → degrees).</summary>
+    public static double Degrees(double radians) => radians * 180.0 / PI;
+
     public static int Clamp(int value, int min, int max) => System.Math.Clamp(value, min, max);
     public static double Clamp(double value, double min, double max) => System.Math.Clamp(value, min, max);
 }

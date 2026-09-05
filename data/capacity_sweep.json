@@ -1,0 +1,79 @@
+{
+  "api_url": "http://127.0.0.1:5099",
+  "criterion": 0.97,
+  "ceiling_cars": 150,
+  "phases": {
+    "50": {
+      "cars": 50,
+      "pace": 1.0003,
+      "sim_s": 25.02,
+      "wall_s": 25.01,
+      "reliable": true,
+      "wedged": false,
+      "real_time": true
+    },
+    "100": {
+      "cars": 100,
+      "pace": 1.0,
+      "sim_s": 25.1,
+      "wall_s": 25.1,
+      "reliable": true,
+      "wedged": false,
+      "real_time": true
+    },
+    "150": {
+      "cars": 150,
+      "pace": 1.001,
+      "sim_s": 25.15,
+      "wall_s": 25.12,
+      "reliable": true,
+      "wedged": false,
+      "real_time": true
+    },
+    "200": {
+      "cars": 200,
+      "pace": 0.8652,
+      "sim_s": 25.17,
+      "wall_s": 29.09,
+      "reliable": true,
+      "wedged": false,
+      "real_time": false
+    },
+    "300": {
+      "cars": 300,
+      "pace": 0.5774,
+      "sim_s": 25.0,
+      "wall_s": 43.3,
+      "reliable": true,
+      "wedged": false,
+      "real_time": false
+    },
+    "400": {
+      "cars": 400,
+      "pace": 0.4319,
+      "sim_s": 25.0,
+      "wall_s": 57.88,
+      "reliable": true,
+      "wedged": false,
+      "real_time": false
+    },
+    "576": {
+      "cars": 576,
+      "pace": 0.301,
+      "sim_s": 25.0,
+      "wall_s": 83.07,
+      "reliable": true,
+      "wedged": false,
+      "real_time": false
+    },
+    "800": {
+      "cars": 800,
+      "pace": 0.2174,
+      "sim_s": 19.57,
+      "wall_s": 90.01,
+      "reliable": true,
+      "wedged": false,
+      "real_time": false
+    }
+  }
+}
