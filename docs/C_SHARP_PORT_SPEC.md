@@ -134,19 +134,26 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 
 ## Phases & To-do list
 
-### Phase 0 — Scaffolding
-- [ ] Solution layout in this repo (Sim + Server projects, net8.0)
-- [ ] Godot csproj: exclude Sim/ and Server/ from its compile glob
-      (SDK-style projects glob all .cs under the directory!)
-- [ ] Copy OSM cache file into `data/osm_cache/`
-- [ ] `.gitignore` for bin/obj
+> Progress (2026-09-05): Phase 0 ✓, Phase 1 ✓ — Gate G1 passed for both the
+> `basic` test map and the OSM map (all layers exact or ≤0.44% per-polygon
+> symmetric difference; see diary 2026-09-05). **Next: Phase 2 — Raceline.**
 
-### Phase 1 — Data layer
-- [ ] `Config.cs` (constants + kerb/park/lane offset functions)
-- [ ] `RoadSegment` / `RoadNetwork` (centerlines, junctions, levels)
-- [ ] TestMaps: `build_basic_test_map` (fig8) first; other maps later
-- [ ] SmoothGeometry (corner fillets, resampling, SmoothedNetwork)
-- **Gate G1:** `/map` export matches Python server (float tolerance)
+### Phase 0 — Scaffolding ✅ (2026-09-04)
+- [x] Solution layout in this repo (Sim + Server projects, net8.0)
+- [x] Godot csproj: exclude Sim/ and Server/ from its compile glob
+      (SDK-style projects glob all .cs under the directory!)
+- [x] Copy OSM cache file into `data/osm_cache/`
+- [x] `.gitignore` for bin/obj
+
+### Phase 1 — Data layer ✅ (2026-09-05)
+- [x] `Config.cs` (constants + kerb/park/lane offset functions)
+- [x] `RoadSegment` / `RoadNetwork` (centerlines, junctions, levels)
+- [x] TestMaps: `build_basic_test_map` (fig8) first; other maps later
+- [x] SmoothGeometry (corner fillets, resampling, SmoothedNetwork)
+- **Gate G1: PASSED** (2026-09-05) — `/map` export matches Python server:
+  `basic` map exact parity; OSM map all layers exact or within float tolerance
+  (roads ≤0.44% per-polygon symdiff, total paved area Δ=4 m² / 0.0012%; the
+  only deltas are degenerate sub-meter slivers that NTS drops and GEOS keeps)
 
 ### Phase 2 — Raceline
 - [ ] Banded solver, legal corridor, min-curvature optimization,
@@ -189,6 +196,64 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
       enabled by the concurrency-ready design rule above). Verify stress
       suite still passes; confirm determinism (independent per-car updates,
       shared state confined to pre/post passes).
+
+### Phase 9 — Traffic participants (post-port extension, NOT part of the 1:1 port)
+
+Goal: participant types beyond a single car class — trucks, bicycles,
+pedestrians, playing children. Deliberately after G5: Phases 0–8 stay a 1:1
+mirror of the Python original; this is new feature work on the verified engine.
+
+Design (hauke, 2026-09-05): **two orthogonal class hierarchies, composed** —
+what a participant IS and how it is DRIVEN are independent axes:
+
+- **Vehicle axis** (physical properties): `TrafficParticipant` base →
+  `RoadVehicle` / `Pedestrian`. Road vehicles carry a `VehicleSpec`
+  (width, v_max, a_lat_max, braking, wheelbase, edge-hug flag) — mostly data;
+  subclass only when physics LOGIC differs (e.g. articulated truck). A Porsche
+  is a spec instance, not a class.
+- **Driver axis** (behavior policy): generalizes the existing `Driver(ABC)`
+  seam (`Car(driver=...)`, Keyboard/Bicycle drivers already live here — the C#
+  port carries it over as `RoadVehicle(VehicleSpec, Driver)`). New: style
+  policies as driver classes/strategies — cautious vs aggressive: how close to
+  the physical limit they drive (speed-profile scale), following distance,
+  reaction time, lane-change aggressiveness. Same Porsche + different Driver =
+  different behavior; N vehicles × M drivers without N×M classes.
+- Pedestrians have no driver — their behavior model is intrinsic
+  (wander/cross/wait); a playing child is a parameterized pedestrian (smaller,
+  impulsive). All stochastic behavior uses seeded RNG to keep the determinism
+  regime.
+
+Raceline interaction: the cached solve stays keyed on
+(route geometry, VehicleSpec) — driver style acts at follow time (scales the speed profile,
+adapts gaps), so style changes never invalidate the line cache. If a style ever
+needs its own line variant (e.g. cautious = no corner cutting), style joins the
+cache key; the cheap speed-profile re-derivation already covers most of it.
+
+Open item (hauke, 2026-09-05) — **truck left-turn encroachment** (Flankieren):
+on narrow two-way streets a Sattelschlepper can often only negotiate a tight
+corner by pulling wide into the oncoming lane early, smoothing the curve. Today
+the centreline bound is a hard constraint for every vehicle; for wide/long
+VehicleSpecs it must become CONDITIONALLY relaxable — two-pass solve: (1) normal
+solve with the hard bound; (2) only if the result is infeasible for the class
+(line radius below the vehicle's mechanical minimum, or speed profile below a
+crawl floor) re-solve with `lo` relaxed into the oncoming lane, bounded by its
+far curb. "Only when necessary" = gated on that feasibility check, never a style
+option. Cache stays clean: the relaxation is deterministic per (geometry,
+VehicleSpec). Interaction cost: an encroaching truck conflicts with real
+oncoming traffic — needs yielding/right-of-way behavior from the other axis
+(driver policy + collision avoidance), which is why this lands with Phase 9's
+mixed-traffic work, not before.
+
+Impacts when started: engine loop (`List<Car>` → `List<TrafficParticipant>`,
+concurrency rule generalizes to "a participant update is a pure function of
+(own state, immutable world snapshot)"), renderer (per-type sprites), REST API
+(`/cars` semantics vs `/participants` — decide against existing test scripts),
+tests (new invariants need baselines first: pedestrians never teleport, cars
+brake for participants ahead).
+
+- **Gate G6:** mixed-traffic scenario (car + truck + bicycle + pedestrian incl.
+  playing child) passes the stress invariants; determinism verified
+  (same seed → same run).
 
 ## Risks / notes
 

@@ -82,10 +82,17 @@ public static class RoadNetworkGeometry
             while (network.NodeDegree.GetValueOrDefault(cur, 0) == 2)
             {
                 if (!byNode.TryGetValue(cur, out var cands)) break;
-                int? j = cands.FirstOrDefault(k => !used[k]);
+                // First unused segment at cur, or -1. (Neither FirstOrDefault
+                // nor FindIndex works: the former's default of 0 splices in
+                // segment 0 when all candidates are used — reachable on a
+                // degree-2 cycle; the latter returns the LIST POSITION, not
+                // the segment index.)
+                int j = -1;
+                foreach (var k in cands)
+                    if (!used[k]) { j = k; break; }
                 if (j < 0) break;
-                var t = segs[j.Value];
-                used[j.Value] = true;
+                var t = segs[j];
+                used[j] = true;
                 (double X, double Y) nxtPt;
                 if ((t.X1, t.Y1) == last) { nxtPt = (t.X2, t.Y2); cur = t.EndNode; }
                 else { nxtPt = (t.X1, t.Y1); cur = t.StartNode; }

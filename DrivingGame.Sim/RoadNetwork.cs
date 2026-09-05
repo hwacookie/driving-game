@@ -393,15 +393,21 @@ public class RoadNetwork
                 string cur = direction == 0 ? seg.StartNode : seg.EndNode;
                 while (true)
                 {
-                    int? i2 = byNode.TryGetValue(cur, out var l)
-                        ? l.FirstOrDefault(j => !seenSeg.Contains(j))
-                        : -1;
+                    // First unused elevated segment at cur, or -1. (Neither
+                    // FirstOrDefault nor FindIndex works: the former's default
+                    // of 0 splices in segment 0 when all candidates are seen
+                    // — reachable on degree-2 cycles; the latter returns the
+                    // LIST POSITION, not the segment index.)
+                    int i2 = -1;
+                    if (byNode.TryGetValue(cur, out var l))
+                        foreach (var j in l)
+                            if (!seenSeg.Contains(j)) { i2 = j; break; }
                     if (i2 < 0) break;
-                    var s2 = Segments[i2.Value];
+                    var s2 = Segments[i2];
                     string other = s2.StartNode == cur ? s2.EndNode : s2.StartNode;
                     if (direction == 0) ids.Insert(0, other); else ids.Add(other);
                     widths.Add(s2.Width);
-                    seenSeg.Add(i2.Value);
+                    seenSeg.Add(i2);
                     cur = other;
                 }
             }

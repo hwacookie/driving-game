@@ -175,8 +175,7 @@ public static class SmoothGeometry
             double s0 = S[i], s1 = S[i + 1];
             double f = s1 > s0 ? (s - s0) / (s1 - s0) : 0.0;
             double h0 = Hdg[i], h1 = Hdg[i + 1];
-            double dh = (h1 - h0 + Math.PI) % (2 * Math.PI) - Math.PI;
-            return (h0 + f * dh) * 180.0 / Math.PI;
+            return (h0 + f * AngleDelta(h0, h1)) * 180.0 / Math.PI;
         }
 
         /// <summary>Signed curvature (1/m) at arc length s (positive = right
@@ -198,9 +197,24 @@ public static class SmoothGeometry
             var (cx, cy) = PointAt(Math.Max(0.0, s2 - e));
             var (dx, dy) = PointAt(Math.Min(Total, s2 + e));
             double h2 = Math.Atan2(dx - cx, dy - cy);
-            double dh = (h2 - h1 + Math.PI) % (2 * Math.PI) - Math.PI;
-            return dh / (s2 - s1);
+            return AngleDelta(h1, h2) / (s2 - s1);
         }
+    }
+
+    /// <summary>Signed shortest angle delta from `from` to `to`, in
+    /// [-π, π). The naive `(to - from + π) % 2π - π` breaks when two
+    /// near-identical headings straddle atan2's ±π branch cut (a road running
+    /// exactly due south samples as +π−δ on one side and −π+δ on the other —
+    /// ulp-level x jitter decides which, and .NET's FMA contraction makes it
+    /// differ from CPython): it returns ∓2π instead of ~0, spiking curvature
+    /// to ±2π/m on a perfectly straight line. The two-step normalization is
+    /// robust for any input.</summary>
+    private static double AngleDelta(double from, double to)
+    {
+        double dh = (to - from) % (2 * Math.PI);
+        if (dh > Math.PI) dh -= 2 * Math.PI;
+        else if (dh < -Math.PI) dh += 2 * Math.PI;
+        return dh;
     }
 
     /// <summary>Dense polyline (world pixels) of the curve, resampled every
