@@ -4846,3 +4846,22 @@ Phase 6 is optional, but it's a quick win now that the C# sweep is done. Let me 
 - Done: Verified all completed phases marked [x] in C_SHARP_PORT_SPEC.md (Phases 0–6 fully checked; Phase 5 REST API shared-code deferral correctly left [ ] for Phase 7); identified all uncommitted files in both repos (driving-game: Sim core, Server/GameApi, test projects, capacity_sweep data, scripts/tools; car: test_turning.py + TESTING.md)
 - State: Ready to commit. Specification checklist is accurate and complete. Both repos have clean, cohesive changeset: driving-game for Phases 3–6 C# port, car for stress-phase test defaults. Next: execute two commits and verify completion.
 
+## 2026-09-05 22:27–22:27 (hauke-walden)
+bash(command="cd /Users/hauke/prj/car && pytest test_e2e_car.py::test_gate_2_nav -q 2>&1", timeout=60)
+
+[Tool result]: 1 passed in 0.27s
+
+- **Worked on:** Phases 3–6 verification (BicycleNav gate, Car/safety, engine/API, burn-in stress). Finalizing for commit: confirmed checkbox alignment and test suite status (90/90 C# unit tests, 78 Python e2e suite).
+- **Done:** Phase 3 (nav + 5 integration tests at 60 Hz), Phase 4 (car modes + LaneGuard + blinker-parity fix), Phase 5 (engine threading + fixed-dt accumulator + REST API in GameApi.cs), Phase 6 (G3 stress 576 cars green, G4 capacity ~170 cars, A/B sanity, e2e suite 22/22). Test count verified.
+- **State:** Two repos ready for commit (driving-game for Phases 3–6 + diary update; car for stress phase default change). Both test suites passing. About to write commit messages and push.
+
+## 2026-09-05 22:27–22:27 (hauke-walden)
+- Worked on: Committing car repo changes—stress phase default values (100/150/200) in test_turning.py and TESTING.md documentation
+- Done: car repo commit `d170bdf` with justification referencing capacity sweep results (170 cars in C# sim real-time; ~90 Python); updated defaults from above 200 to 100/150/200 range to stay real-time without excess wall time
+- State: Both driving-game (`5cf36b8`) and car (`d170bdf`) repos committed with consistent stress-phase defaults; all 2026-09-05 work staged
+
+## 2026-09-05 22:27–22:27 (hauke-walden)
+- Worked on: code review and state verification for driving-game (Phases 3–6) and car (stress defaults)
+- Done: confirmed both repositories cleanly committed with working trees verified; spec checklist audit completed; identified genuine remaining work (Phase 5 shared code placement deferred to Phase 7, Phase 7 Godot integration 3 items + G5, Phase 8 Parallel.For)
+- State: both repos ready to push after user confirms "tested"; Phase 7 (Godot integration with in-process Sim, MapRenderer snapshot reads, embedded REST) queued as next deliverable
+
