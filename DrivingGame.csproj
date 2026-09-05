@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Remove="DrivingGame.Sim/**" />
     <Compile Remove="DrivingGame.Server/**" />
+    <Compile Remove="DrivingGame.Sim.Tests/**" />
   </ItemGroup>
 
 </Project>

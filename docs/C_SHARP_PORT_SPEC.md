@@ -134,9 +134,9 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 
 ## Phases & To-do list
 
-> Progress (2026-09-05): Phase 0 ✓, Phase 1 ✓ — Gate G1 passed for both the
-> `basic` test map and the OSM map (all layers exact or ≤0.44% per-polygon
-> symmetric difference; see diary 2026-09-05). **Next: Phase 2 — Raceline.**
+> Progress (2026-09-05): Phase 0 ✓, Phase 1 ✓, Phase 2 ✓ — Gate G1 passed
+> for both the `basic` test map and the OSM map; Phase 2 gate passed with
+> all 23 reference cases at ≤1e-9 (see below). **Next: Phase 3 — BicycleNav.**
 
 ### Phase 0 — Scaffolding ✅ (2026-09-04)
 - [x] Solution layout in this repo (Sim + Server projects, net8.0)
@@ -155,10 +155,32 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
   (roads ≤0.44% per-polygon symdiff, total paved area Δ=4 m² / 0.0012%; the
   only deltas are degenerate sub-meter slivers that NTS drops and GEOS keeps)
 
-### Phase 2 — Raceline
-- [ ] Banded solver, legal corridor, min-curvature optimization,
-      per-curve memo cache
-- Gate: solve outputs vs Python reference dump (~1e-9 tolerance)
+### Phase 2 — Raceline ✅ (2026-09-05)
+- [x] `DrivingGame.Sim/Raceline.cs` — banded solver, legal corridor,
+      min-curvature optimization, per-curve memo cache (1:1 port of
+      car/src/raceline.py; the Python stale-normal quirk in legal_corridor's
+      t_junc is reproduced on purpose — see comment in Raceline.cs)
+- [x] Reference harness: car repo `tools/raceline_reference.py` dumps 23
+      routes (every code path: straight fast path, degree-2/3+ junctions,
+      left/right/straight turns, one-way corridors, multi-lane + parking
+      nominals, width-step diagonals, merge-right blend, 2894-station loop)
+      to `data/raceline_reference/basic.json` incl. the raw paved + eroded
+      safe polygons and all intermediates (K, lo/hi, base profile).
+- [x] Gate harness: `DrivingGame.Sim.Tests` (xunit) — 73 tests:
+      - STRICT (≤1e-9): P/N/offsets/cum + intermediates vs the dump, with
+        PYTHON's polygons injected (NTS geometry built from the dump), so
+        both engines solve on identical geometry. All 23 cases pass.
+      - PRODUCTION PATH: C# computes its own erosion — NTS buffer with
+        BufferParameters(16, Round, Round, 5.0) = shapely 2.x defaults
+        (quad_segs=16). Result: ZERO offset difference vs Python on all 23
+        cases (tolerance was 5 cm); erosion areas match to <0.5%.
+      - Cache semantics (hit/miss counts, copy-out, FIFO) + network/
+        corner-rounding parity checks.
+- Perf (this machine, uncached SolveLineImpl): fig8 full loop 2894 st
+  C# 54 ms vs Python 361 ms; 475-st window C# 3.1 ms vs Python 30 ms;
+  cache hit 0.12 ms.
+- **Gate: PASSED** (2026-09-05) — `dotnet test DrivingGame.Sim.Tests/`
+  → 73/73 green.
 
 ### Phase 3 — BicycleNav
 - [ ] SmoothCurve, RefLine (+ bisect point_at/heading_at), projection

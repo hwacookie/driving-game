@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries.Prepared;
 using NetTopologySuite.Operation.Buffer;
 using NetTopologySuite.Operation.OverlayNG;
 using NetTopologySuite.Operation.Union;
@@ -72,6 +73,13 @@ public class RoadNetwork
 
     // Lazy caches (the road network never changes at runtime).
     public SmoothGeometry.SmoothedNetwork? SmoothedCache { get; set; }
+    /// <summary>Eroded paved polygon for the raceline corridor (mirrors
+    /// raceline.py's _raceline_safe). Built once on first use by
+    /// <see cref="Raceline.LegalCorridor"/>; tests may inject a pre-built one.</summary>
+    public Geometry? RacelineSafe { get; set; }
+    /// <summary>Prepared (fast contains) form of <see cref="RacelineSafe"/>.
+    /// Mirrors raceline.py's _raceline_safe_prep.</summary>
+    public IPreparedGeometry? RacelineSafePrep { get; set; }
     private List<RoadPolygonGroup>? _roadPolygonsCache;
     private (Geometry? Deck, Geometry? Roadway)? _elevatedGeomCache;
     private List<List<(double X, double Y)>>? _elevatedCenterlinesCache;
