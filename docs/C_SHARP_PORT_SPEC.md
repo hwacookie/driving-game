@@ -22,6 +22,19 @@ Built in two stages:
    in-process snapshots (HTTP double-pipeline retired for gameplay), REST API
    embedded for external tests.
 
+**Consolidation (2026-09-05, hauke):** this repo becomes the single home —
+step by step. DONE: the e2e suite lives here as `tests/test_turning.py` (the
+three config constants it imported from `src/config.py` are inlined;
+`DrivingGame.Sim/Config.cs` stays the source of truth); `scripts/run_e2e.sh`
+and the `/run_test` + `/tests` endpoints resolve the suite in-repo. AFTER
+PHASE 7 (hauke decision): copy the behavioral docs from `car/docs/`
+(SPEC.md, TESTING.md, DRIVING_MANEUVERS.md, MULTI_CAR_PLAN.md, OBSTACLES.md,
+REST_API.md, GODOT_FRONTEND.md, SMOOTH_GEOMETRY_DESIGN.md,
+TURN_REWORK_PLAN.md) into this repo's `docs/`. Until then the car repo stays
+reference + fallback: its Python sim must remain runnable for the pending
+stale-normal quirk review (deliberately done in Python first), then it is
+history.
+
 ## Architecture (target)
 
 ```
@@ -386,5 +399,11 @@ brake for participants ahead).
   Re-measure before trusting frame timing (Phase 5).
 - **Determinism:** single-threaded correctness first; parallelization only in
   Phase 8 with an explicit audit of shared state.
-- **Transition safety:** the Python server stays committed and runnable in
-  `/Users/hauke/prj/car` as reference + fallback throughout.
+- **Transition safety:** after the 2026-09-05 consolidation the e2e suite
+  lives in THIS repo (`tests/test_turning.py`); the behavioral docs follow
+  after Phase 7 (see Consolidation note). `/Users/hauke/prj/car` is reference
+  + fallback only meanwhile. Its Python sim must stay runnable until the
+  stale-normal
+  quirk review (after Phase 8, before any new feature work) is done — that
+  experiment is deliberately run in Python first — then the car repo is
+  history.

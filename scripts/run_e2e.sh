@@ -10,8 +10,9 @@
 #   3. Wait until /health is up
 #   4. Launch the Godot client (VISIBLE window - MapRenderer polls :5000, so
 #      you can watch the car while the suite runs) unless --no-godot
-#   5. Run the unchanged Python suite (../car/tests/test_turning.py) in the
-#      foreground: output goes to the console AND /tmp/test_run.log via tee
+#   5. Run the e2e suite (tests/test_turning.py, lives in this repo since
+#      the 2026-09-05 consolidation) in the foreground: output goes to the
+#      console AND /tmp/test_run.log via tee
 #   6. Stop host + Godot on exit
 #
 # Usage:
@@ -104,7 +105,7 @@ fi
 echo "==> Running e2e suite (log: $TEST_LOG)..."
 # -u: unbuffered stdout, so output appears on the console immediately
 #     (piping through tee would otherwise block-buffer it until the end)
-python3 -u "$ROOT/../car/tests/test_turning.py" "${EXTRA_ARGS[@]}" 2>&1 | tee "$TEST_LOG"
+python3 -u "$ROOT/tests/test_turning.py" "${EXTRA_ARGS[@]}" 2>&1 | tee "$TEST_LOG"
 TEST_EXIT=${PIPESTATUS[0]}
 
 echo "==> Stopping host + Godot..."

@@ -14,3 +14,7 @@ export.cfg
 
 ## Godot SDK-bump backups
 *.csproj.old
+
+## e2e suite (regenerated on every run)
+tests/turning_results.json
+tests/run_test_*.log

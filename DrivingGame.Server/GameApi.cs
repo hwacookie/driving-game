@@ -23,11 +23,16 @@ public static class GameApi
           "blinker_left", "blinker_right", "uturn" };
 
     // External test runner: the test scenarios live OUTSIDE the sim -
-    // tests/test_turning.py drives this very API. POST /run_test launches it
-    // as a subprocess (one run at a time). Path is overridable via env.
+    // tests/test_turning.py (in this repo) drives this very API. POST
+    // /run_test launches it as a subprocess (one run at a time). Path is
+    // overridable via env; the default resolves <repo>/tests relative to
+    // the app binary (<root>/DrivingGame.Server/bin/<config>/net9.0/ ->
+    // four levels up).
     private static string RunnerPath =>
         Environment.GetEnvironmentVariable("DRIVING_GAME_TEST_RUNNER")
-        ?? "/Users/hauke/prj/car/tests/test_turning.py";
+        ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..",
+                                        "..", "..", "..",
+                                        "tests", "test_turning.py"));
 
     private static string PythonExe =>
         Environment.GetEnvironmentVariable("PYTHON") ?? "python3";
@@ -451,7 +456,8 @@ public static class GameApi
                 return Json(new Dictionary<string, object?>
                     { ["error"] = $"no test {number} (1..{rows.Count})" }, 404);
 
-            string repoRoot = Path.GetDirectoryName(RunnerPath)!.Split('/', '\\')[^3];
+            // <repo>/tests/test_turning.py -> two levels up = repo root
+            string repoRoot = Path.GetDirectoryName(Path.GetDirectoryName(RunnerPath)!)!;
             var logFile = Path.Combine(Path.GetDirectoryName(RunnerPath)!,
                 $"run_test_{number}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
 
@@ -580,7 +586,8 @@ public static class GameApi
         }
         try
         {
-            string repoRoot = Path.GetDirectoryName(RunnerPath)!.Split('/', '\\')[^3];
+            // <repo>/tests/test_turning.py -> two levels up = repo root
+            string repoRoot = Path.GetDirectoryName(Path.GetDirectoryName(RunnerPath)!)!;
             var psi = new ProcessStartInfo(PythonExe, $"\"{RunnerPath}\" --list-json")
             {
                 WorkingDirectory = repoRoot,
