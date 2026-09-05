@@ -327,6 +327,11 @@ public partial class MapRenderer : Node2D
                 RunTestFromUi();
             };
 
+        // --zoom also pins the follow-camera zoom (like a wheel-zoom at
+        // start): without this, FollowCamera() overwrites the initial view
+        // with the sim's camera_zoom as soon as it starts following.
+        if (_overrideZoom.HasValue) _localZoom = _overrideZoom.Value;
+
         if (_motionLogPath != null)
             _motionLog = new StreamWriter(_motionLogPath, append: false);
 
@@ -960,7 +965,10 @@ public partial class MapRenderer : Node2D
             foreach (var kv in _carNodes)
                 _motionLog.WriteLine($"{Time.GetTicksMsec()} {kv.Key} " +
                     $"{kv.Value.GlobalPosition.X:F2} {kv.Value.GlobalPosition.Y:F2} " +
-                    $"{_simNow:F3} {(_rtClamped ? 1 : 0)} {_renderTarget:F4}");
+                    // camera world pos: screen-space car motion = (car-cam)*zoom
+                    $"{_cam.GlobalPosition.X:F2} {_cam.GlobalPosition.Y:F2} " +
+                    $"{_simNow:F3} {(_rtClamped ? 1 : 0)} {_renderTarget:F4} " +
+                        $"{_cam.Zoom.X:F1}");
 
         // Breadcrumb trails + test flags (rebuild on data/zoom change).
         UpdateOverlays();
