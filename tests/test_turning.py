@@ -498,7 +498,7 @@ DETERMINISTIC_TESTS = [
      "slide into the oncoming lane and trigger the wrong-side detection",
      0.8, False, 0.5, True),
     # MULTI-CAR STRESS (docs/MULTI_CAR_PLAN.md): N cars drive the figure-8
-    # loop at once for 30 s (default phases 100/150/200 - the real-time range). No
+    # loop at once for 30 s (default phase: 150 cars - realtime-safe). No
     # flags - the metric is how often a car gets displaced jerkily (a
     # "ruckler"): per poll, any car that moves more than the suite's
     # teleport/jump bound max(speed, 50 km/h)*dt*1.5 + 1 m counts one
@@ -509,7 +509,7 @@ DETERMINISTIC_TESTS = [
     # starts stuttering. Dispatched by start_point name, not through
     # monitor_turn (see run_deterministic_test).
     ('fig8_stress', 'straight', 0, None, 170.0,
-     "Multi-car stress: 100/150/200 cars on the figure-8, 30 s each (default phases)"),
+     "Multi-car stress: 150 cars on the figure-8 for 30 s of sim time (realtime-safe default; --stress-cars N overrides)"),
 ]
 
 
@@ -628,7 +628,7 @@ class TurnTester:
         requests.post(f"{API_URL}/label", json={'text': text})
 
     # --- Multi-car stress scenario (fig8_stress, docs/MULTI_CAR_PLAN.md) ---
-    # Default phases are 100/150/200 cars: the real-time range of the sim
+    # Default phase is 150 cars: safely inside the sim's real-time range
     # (capacity sweep 2026-09-05 - C# ceiling ~170, Python ~90; anything
     # above 200 runs in slow motion and just stretches wall time). Higher
     # counts stay available via --stress-cars. Each phase drives the
@@ -644,7 +644,9 @@ class TurnTester:
     # accumulator caps substeps -> slow motion, never a leap); the phase
     # duration is therefore measured in SIM time so every phase covers the
     # same driving distance no matter how slow the wall clock gets.
-    STRESS_PHASE_CARS = (100, 150, 200)
+    # Realtime ceiling on this machine is ~200 cars (0.83x); 150 keeps a
+    # safety margin (measured 1.00x). Higher counts via --stress-cars.
+    STRESS_PHASE_CARS = (150,)
     STRESS_PHASE_SECONDS = 30.0
     STRESS_POLL_S = 0.1
     # Positional indices into network.segments - fragile if the map

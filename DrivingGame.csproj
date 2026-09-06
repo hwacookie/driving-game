@@ -1,6 +1,9 @@
 <Project Sdk="Godot.NET.Sdk/4.7.1">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- net9.0: the sim port targets net9.0 (only .NET 9 SDK is installed);
+         Godot rolls the runtime forward, as it already did for net8.0 on
+         this machine. -->
+    <TargetFramework>net9.0</TargetFramework>
     <RootNamespace>DrivingGame</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
@@ -10,7 +13,25 @@
   <ItemGroup>
     <Compile Remove="DrivingGame.Sim/**" />
     <Compile Remove="DrivingGame.Server/**" />
+    <Compile Remove="DrivingGame.Api/**" />
     <Compile Remove="DrivingGame.Sim.Tests/**" />
+  </ItemGroup>
+
+  <!-- Phase 7: the Godot app can run the sim IN-PROCESS (the "embedded"
+       source). The HTTP pipeline stays available as the alternative (the
+       "http" source, default): both communication methods coexist, selected
+       at startup (the source user arg). DrivingGame.Api carries the REST
+       API wired by BOTH hosts. -->
+  <ItemGroup>
+    <ProjectReference Include="DrivingGame.Sim/DrivingGame.Sim.csproj" />
+    <ProjectReference Include="DrivingGame.Api/DrivingGame.Api.csproj" />
+  </ItemGroup>
+
+  <!-- Declared DIRECTLY (not just transitively via DrivingGame.Api): the
+       embedded REST API needs the ASP.NET Core shared framework at runtime
+       inside Godot's assembly load context. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
 </Project>

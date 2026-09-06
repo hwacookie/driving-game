@@ -159,6 +159,10 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 > sweep: C# real-time ceiling ~170 cars vs Python ~90 (single-threaded, ~2×
 > per-car speedup, see Phase 6 below); A/B sanity done; full e2e suite 22/22
 > against a fresh C# host with the visible Godot window (`scripts/run_e2e.sh`).
+>
+> **Update (2026-09-06):** car-to-car collision + avoidance v1 implemented
+> (`CarCollisions.cs`), v2 design confirmed, driver profiles + new test-map
+> scenario scoped — all under Phase 9, started BEFORE G5 by user decision.
 
 ### Phase 0 — Scaffolding ✅ (2026-09-04)
 - [x] Solution layout in this repo (Sim + Server projects, net8.0)
@@ -235,6 +239,9 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
       checks; `Obstacles.cs` + `ObstacleManager`: placement validation,
       contact stop, per-map layouts save/load — all wired into SimEngine and
       covered by `SafetySystemsTests`, 13 tests)
+- Car-to-car collision & avoidance: **post-port feature**, started
+      2026-09-06 (user decision) — v1 in `CarCollisions.cs`; design, status
+      and remaining wiring in Phase 9 ("Collision detection & avoidance")
 - Gate: feature checks (breadcrumbs, reverse park, blinkers, u-turn)
   - **PASSED** (2026-09-05): reverse-in park ✓ (Phase 3 G2),
     u-turn ✓ (`Uturn_CompletesAndFlipsHeading`), breadcrumbs present
@@ -328,7 +335,10 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 
 Goal: participant types beyond a single car class — trucks, bicycles,
 pedestrians, playing children. Deliberately after G5: Phases 0–8 stay a 1:1
-mirror of the Python original; this is new feature work on the verified engine.
+mirror of the Python original; this is new feature work on the verified
+engine. **Exception (hauke, 2026-09-06):** car-to-car collision + avoidance
+and driver profiles started BEFORE G5 — see the three sections at the end of
+this phase.
 
 Design (hauke, 2026-09-05): **two orthogonal class hierarchies, composed** —
 what a participant IS and how it is DRIVEN are independent axes:
@@ -381,6 +391,104 @@ brake for participants ahead).
 - **Gate G6:** mixed-traffic scenario (car + truck + bicycle + pedestrian incl.
   playing child) passes the stress invariants; determinism verified
   (same seed → same run).
+
+### Collision detection & avoidance (started 2026-09-06, ahead of G5 — user decision)
+
+User brief: "erstmal die Kollision und einfache Kollisionsvermeidung (durch
+Abbremsen)" — collision + simple avoidance by braking. Cars exert NO
+collision forces on each other; they brake and rest against each other like
+against a wall (same semantics as `Obstacles.ApplyContactStop`). Two layers,
+both per physics substep in `SimEngine.Tick`:
+
+1. **AVOIDANCE** — every car gets a speed cap = the fastest speed from which
+   `CAR_BRAKING` still stops behind the nearest car in its forward corridor
+   (plus a standstill gap). Applied as decel-limited braking AFTER the
+   driver's own longitudinal logic ran → works for every driver (BICYCLE and
+   FREE, incl. U-turn/reverse maneuvers) without touching their code.
+2. **RESPONSE** — if two body boxes overlap after the step, both cars roll
+   back to their pre-step pose and stop. A substep cannot skip over a 4.4 m
+   car, so the pre-step poses were clear: no interpenetration, no teleport
+   (the validator sees zero motion for them).
+
+**v1 — implemented** (`DrivingGame.Sim/CarCollisions.cs`, 2026-09-06):
+- Broadphase: uniform grid, 20 m cells (look-ahead ring = 3 cells)
+- Forward corridor: lateral ±1.8 m of own axis (a car in the adjacent lane
+  on a 7 m road sits ~3.5 m away and must NOT trigger), look-ahead 40 m,
+  standstill gap 3 m
+- Cap: `min(v_ahead projected onto my axis, sqrt(2·CAR_BRAKING·max(gap−3 m, 0)))`;
+  boxes touching → cap 0. Geometric corridor only (no refline following) —
+  v1 scope: the curvature-limited speed profiles are conservative enough
+  that a straight 40 m look-ahead still gives ≥1.5 s detection in curves;
+  refline-following detection deferred to v2.
+- `Resolve`: SAT body-box overlap → both cars roll back + stop; returns the
+  contacted uids (the validator treats their motion as externally constrained)
+
+v1 remaining wiring:
+- [ ] `SimEngine.Tick` two-pass restructure — loop A (car Update + obstacle
+      contact + avoidance caps), then `Resolve`, then loop B (Validator +
+      LaneGuard). Ordering matters: the validator must check the FINAL
+      post-resolution state (single-pass was discarded for exactly this reason)
+- [ ] `CollisionsEnabled` flag on SimEngine + `--no-collisions` CLI arg
+- [ ] Cost measurement: Stopwatch µs per call for ComputeAvoidCaps + Resolve,
+      printed every 5 s (budget context: ~200 µs/car/substep total today)
+- [ ] Verify: head-on pair test + 150-car stress run (suite gates unchanged)
+
+**v2 — design confirmed (hauke, 2026-09-06):** time-window pair prediction
+for oblique/crossing conflicts (the corridor cap alone cannot see a car that
+is not yet in the forward tube):
+- **Hybrid two-pass avoidance:** keep the corridor cap for smooth continuous
+  car-following; ADD a symmetric pair check that predicts each car's position
+  at t ∈ {1 s, 3 s, 5 s} (advance along the refline when available — BICYCLE
+  cars with an active route — else linear extrapolation) and tests all nearby
+  pairs' body boxes per stage. TTC = earliest hit stage.
+- **TTC stages 1 s / 3 s / 5 s, graded response:** earlier hit → stronger
+  reaction (1 s → stop, 3 s → cap to a safe speed, 5 s → mild anticipation).
+- **Prediction velocity: `max(current speed, planned target speed)`** per car
+  — conservative; avoids phantom conflicts from cars that are slow NOW but
+  will be at cruising speed by the crossing.
+- **Right-before-left priority** for oblique pairs (neither car is directly
+  ahead of the other): the car seeing the other come from its RIGHT yields.
+  Geometric test: other's position in my right half-plane AND other
+  approaches the meeting point (dot-product test). The local-frame derivation
+  was discarded — degenerate: two perpendicular cars can both see each other
+  as "ahead-right". Deterministic tie-breaker for equal-priority pairs:
+  lower uid yields.
+- Needs a `public RefLine? Ref` accessor on BicycleNav (null without an active
+  route; clamp the lookahead sample to `min(S + d, Total)`).
+
+v2 remaining:
+- [ ] Pair check + TTC grading in CarCollisions (ComputeAvoidCaps v2)
+- [ ] Right-before-left geometric test + uid tie-breaker
+- [ ] Cost measurement incl. pair pass (µs per car per substep, combined)
+
+### Driver profiles (first Driver-axis instances, user request 2026-09-06)
+
+Concrete first instances of the Driver-axis style policies above:
+- **Cautious** ("Miss Daisy"): target speed ≈ 0.5 × profile max — drives well
+  below the limit, big gaps
+- **Normal**: 1.0 × (today's behavior; default)
+- **Sporty**: 1.0 × but full acceleration, tries to reach the planned max as
+  fast as possible, minimal margin
+
+Implementation: per-car speed factor assigned at spawn (API param), applied
+where vTarget is finalized (`BicycleNav.part3.cs`). Style acts at follow time
+→ never invalidates the raceline cache (consistent with the design above).
+- [ ] Spawn API param (default Normal)
+- [ ] Factor in BicycleNav vTarget finalization
+- [ ] Test: mixed profiles on a shared route — no collisions, stable ordering
+
+### Test infrastructure (user request 2026-09-06)
+
+- **New test map: fig-8 with a flat central intersection** (`TestMaps.cs`):
+  the same lemniscate loop as `basic`, but BOTH crossing passages at ground
+  level (level 0, no bridge) so the two branches truly interact and
+  right-before-left applies at the center. Spawn points on both branches.
+- **New e2e scenario:** 8 cars, mixed profiles (Cautious/Normal/Sporty),
+  bidirectional traffic through the central crossing. Invariants: zero
+  collision responses (`Resolve` never fires), all cars complete their routes,
+  stress gates hold (0 off-road, 0 jitter).
+- [ ] `TestMaps.cs`: new map builder
+- [ ] `tests/test_turning.py`: new scenario (numbered after the current suite)
 
 ## Pending (user decision 2026-09-05)
 

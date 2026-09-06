@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DrivingGame.Api</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Shared REST API (docs/C_SHARP_PORT_SPEC.md, Phase 7): implemented once,
+       wired by BOTH hosts - the console host (DrivingGame.Server) and the
+       Godot app (embedded). FrameworkReference so no NuGet is needed. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DrivingGame.Sim/DrivingGame.Sim.csproj" />
+  </ItemGroup>
+
+</Project>

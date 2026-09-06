@@ -1,18 +1,22 @@
 // REST API for remote car control and testing — port of car/src/rest_api.py.
 // Same endpoints & payloads as the Python server; the sim engine is driven
 // through its command queue + control buckets (thread-safe), state comes
-// back as a /state-shaped dict. Runs embedded in the console host (and,
-// later, the Godot app) on port 5000 so external test injection keeps
+// back as a /state-shaped dict. Implemented ONCE here, wired by BOTH hosts
+// (Phase 7): the console host (DrivingGame.Server) and the Godot app
+// (embedded, --source embedded). Port 5000 so external test injection keeps
 // working — all existing test scripts run unchanged.
 
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using DrivingGame.Sim;
 using NetTopologySuite.Geometries;
 using NetTopologySuite.Operation.Buffer;
 using Math = System.Math;
 
-namespace DrivingGame.Server;
+namespace DrivingGame.Api;
 
 public static class GameApi
 {
@@ -95,125 +99,7 @@ public static class GameApi
 
         // --- map export ---------------------------------------------------------
 
-        app.MapGet("/map", () =>
-        {
-            var net = engine.Network;
-            double pppm = Config.PIXELS_PER_METER;
-
-            List<List<double>> M(IEnumerable<(double X, double Y)> pts) =>
-                pts.Select(p => new List<double> { Math.Round(p.X / pppm, 2), Math.Round(p.Y / pppm, 2) })
-                   .ToList();
-
-            var roads = new List<Dictionary<string, object?>>();
-            foreach (var group in net.GetRoadPolygonsByColor())
-                foreach (var ring in group.Rings)
-                    roads.Add(new Dictionary<string, object?>
-                    {
-                        ["exterior"] = M(ring.Exterior),
-                        ["holes"] = ring.Holes.Select(h => M(h)).ToList(),
-                    });
-
-            // Paved-edge rings: the UNIONED paved polygon (unary_union), so
-            // shared/interior buffer edges inside junctions are gone — only
-            // the true outer perimeter + island holes remain. The rings are
-            // offset INWARD by EDGE_LINE_INSET_M so a 15 cm tarmac shoulder
-            // stays outside the white line (ALL roads).
-            var pavedBuf = net.GetPavedPolygon().Buffer(
-                -Config.EDGE_LINE_INSET_M * pppm,
-                new BufferParameters(16, EndCapStyle.Round, JoinStyle.Round, 5.0));
-            var pavedPolys = pavedBuf is MultiPolygon mp
-                ? mp.Geometries.Cast<Polygon>().ToList()
-                : new List<Polygon> { (Polygon)pavedBuf };
-            var pavedEdgeRings = new List<List<List<double>>>();
-            foreach (var p in pavedPolys)
-            {
-                pavedEdgeRings.Add(M(p.ExteriorRing.Coordinates.Select(c => (c.X, c.Y))));
-                foreach (var hole in p.InteriorRings)
-                    pavedEdgeRings.Add(M(hole.Coordinates.Select(c => (c.X, c.Y))));
-            }
-
-            var junctions = new List<Dictionary<string, object?>>();
-            foreach (var (nid, deg) in net.NodeDegree)
-            {
-                if (deg < 3 || !net.Nodes.TryGetValue(nid, out var xy)) continue;
-                junctions.Add(new Dictionary<string, object?>
-                {
-                    ["id"] = nid,
-                    ["x"] = Math.Round(xy.X / pppm, 2),
-                    ["y"] = Math.Round(xy.Y / pppm, 2),
-                });
-            }
-
-            var startPoints = new Dictionary<string, object?>();
-            foreach (var (name, (x, y, hdg, seg, fwd, lat)) in net.StartPoints)
-                startPoints[name] = new Dictionary<string, object?>
-                {
-                    ["x"] = Math.Round(x / pppm, 2), ["y"] = Math.Round(y / pppm, 2),
-                    ["heading_deg"] = hdg, ["seg"] = seg,
-                    ["forward"] = fwd, ["lateral_offset_m"] = lat,
-                };
-
-            var (rcR, rcG, rcB) = Config.ROAD_COLOR;
-            var (bgR, bgG, bgB) = Config.BG_COLOR;
-            return Results.Json(new Dictionary<string, object?>
-            {
-                ["units"] = "meters",
-                ["bounds"] = new List<double>
-                {
-                    0.0, 0.0,
-                    Math.Round(net.WorldWidth / pppm, 2),
-                    Math.Round(net.WorldHeight / pppm, 2),
-                },
-                ["road_color"] = new List<int> { rcR, rcG, rcB },
-                ["bg_color"] = new List<int> { bgR, bgG, bgB },
-                ["roads"] = roads,
-                // Raw segment list (metres) for screen-space consumers like
-                // the minimap. level: 0 = ground, 1 = bridge over the ground.
-                ["segments"] = net.Segments.Select(s => new List<object?>
-                {
-                    Math.Round(s.X1 / pppm, 2), Math.Round(s.Y1 / pppm, 2),
-                    Math.Round(s.X2 / pppm, 2), Math.Round(s.Y2 / pppm, 2),
-                    s.Width, s.Level,
-                }).ToList(),
-                // Bridge decks: buffered smoothed surface of all level>=1
-                // segments (metres).
-                ["elevated_roads"] = net.GetElevatedPolygons().Select(r => new Dictionary<string, object?>
-                {
-                    ["exterior"] = M(r.Exterior),
-                    ["holes"] = r.Holes.Select(h => M(h)).ToList(),
-                }).ToList(),
-                ["elevated_roadways"] = net.GetElevatedRoadwayPolygons().Select(r => new Dictionary<string, object?>
-                {
-                    ["exterior"] = M(r.Exterior),
-                    ["holes"] = r.Holes.Select(h => M(h)).ToList(),
-                }).ToList(),
-                ["elevated_edge_lines"] = net.GetElevatedEdgeLines().Select(M).ToList(),
-                // Deck centrelines (metres): draw as dashes ABOVE the deck.
-                ["elevated_centerlines"] = net.GetElevatedCenterlines().Select(M).ToList(),
-                ["paved_edge_rings"] = pavedEdgeRings,
-                ["centerlines"] = net.GetMarkingCenterlines().Select(M).ToList(),
-                ["lane_markings"] = net.GetLaneMarkings().Select(lm => new Dictionary<string, object?>
-                {
-                    ["style"] = lm.Style,
-                    ["width_m"] = lm.WidthM,
-                    ["pts"] = M(lm.Coords),
-                }).ToList(),
-                ["oneway_arrows"] = net.GetOnewayArrows().Select(M).ToList(),
-                ["parking_marks"] = net.GetParkingMarks().Select(M).ToList(),
-                ["junctions"] = junctions,
-                ["junction_dot_radius_m"] = Config.JUNCTION_DOT_RADIUS_M,
-                ["marking_style"] = new Dictionary<string, object?>
-                {
-                    ["center_dash_m"] = Config.CENTER_DASH_M,
-                    ["center_gap_m"] = Config.CENTER_GAP_M,
-                    ["lane_dash_m"] = Config.LANE_DASH_M,
-                    ["lane_gap_m"] = Config.LANE_GAP_M,
-                    ["park_dash_m"] = Config.PARK_DASH_M,
-                    ["park_gap_m"] = Config.PARK_GAP_M,
-                },
-                ["start_points"] = startPoints,
-            });
-        });
+        app.MapGet("/map", () => Results.Json(MapPayload.Build(engine.Network)));
 
         // --- control -------------------------------------------------------------
 
@@ -444,15 +330,32 @@ public static class GameApi
         app.MapPost("/run_test", async (HttpRequest req) =>
         {
             var data = await ReadJsonBody(req);
-            if (!data.TryGetProperty("number", out var nEl) ||
-                nEl.ValueKind != JsonValueKind.Number ||
-                nEl.GetInt32() < 1)
+            // "number" is optional: absent/null = full suite, >=1 = single
+            // test. (0 or negative = invalid.)
+            int number = 0;
+            if (data.TryGetProperty("number", out var nEl) &&
+                nEl.ValueKind == JsonValueKind.Number)
+            {
+                number = nEl.GetInt32();
+                if (number < 1)
+                    return Json(new Dictionary<string, object?>
+                        { ["error"] = "\"number\" must be >= 1 (omit it for the full suite)" }, 400);
+            }
+            else if (data.TryGetProperty("number", out var bad) &&
+                     bad.ValueKind != JsonValueKind.Null)
                 return Json(new Dictionary<string, object?>
-                    { ["error"] = "body must be {\"number\": <int >= 1>}" }, 400);
-            int number = nEl.GetInt32();
+                    { ["error"] = "\"number\" must be an integer or null" }, 400);
+
+            // Optional extra CLI args for test_turning.py (e.g.
+            // ["--stress-cars", "250"]). Only plain strings, no shell.
+            var extraArgs = new List<string>();
+            if (data.TryGetProperty("args", out var aEl) && aEl.ValueKind == JsonValueKind.Array)
+                foreach (var a in aEl.EnumerateArray())
+                    if (a.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(a.GetString()))
+                        extraArgs.Add(a.GetString()!);
 
             var rows = GetTestList();
-            if (rows is not null && number > rows.Count)
+            if (number > 0 && rows is not null && number > rows.Count)
                 return Json(new Dictionary<string, object?>
                     { ["error"] = $"no test {number} (1..{rows.Count})" }, 404);
 
@@ -468,21 +371,27 @@ public static class GameApi
                         { ["error"] = $"test #{_testRun.Number} is still running (pid {_testRun.Pid})" }, 409);
 
                 Process proc;
+                // NOTE: no `using` here - the stream must stay open for the
+                // whole life of the subprocess; CopyToStreamAsync disposes it
+                // when the process exits.
+                var logStream = File.Open(logFile, FileMode.Append);
                 try
                 {
-                    var psi = new ProcessStartInfo(PythonExe, $"\"{RunnerPath}\" --tests {number}")
+                    string cli = (number > 0 ? $"\"{RunnerPath}\" --tests {number}"
+                                             : $"\"{RunnerPath}\"") +
+                        string.Join(" ", extraArgs.Select(a => " \"" + a.Replace("\"", "\\\"") + "\""));
+                    var psi = new ProcessStartInfo(PythonExe, cli)
                     {
                         WorkingDirectory = repoRoot,
-                        RedirectStandardOutput = false,
+                        RedirectStandardOutput = true,
                         UseShellExecute = false,
                     };
-                    using var logStream = File.Open(logFile, FileMode.Append);
-                    psi.RedirectStandardOutput = true;
                     proc = Process.Start(psi)!;
                     _ = CopyToStreamAsync(proc.StandardOutput, logStream);
                 }
                 catch (Exception e)
                 {
+                    logStream.Dispose();
                     return Json(new Dictionary<string, object?>
                         { ["error"] = $"launch failed: {e.Message}" }, 500);
                 }
@@ -644,5 +553,6 @@ public static class GameApi
             await target.FlushAsync();
         }
         catch { /* process exited */ }
+        finally { target.Dispose(); }
     }
 }

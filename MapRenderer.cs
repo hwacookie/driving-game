@@ -22,6 +22,16 @@ public partial class MapRenderer : Node2D
     const string RunTestUrl = "http://127.0.0.1:5000/run_test";
     const float Ppm = 2f;   // config.PIXELS_PER_METER (/state is in world pixels)
 
+    // Phase 7: communication method, selected at startup (user args after
+    // "--"). "http" (default) = the existing double pipeline to an external
+    // server on :5000; "embedded" = the sim runs IN-PROCESS (SimHost node),
+    // state is read directly per frame, and the REST API is embedded in this
+    // process for external test injection. Both methods coexist.
+    private string _source = "http";
+    private string _embeddedMapName;   // null = OSM (console-host parity)
+    private int _embeddedPort = 5000;
+    private SimHost _simHost;          // non-null in embedded mode
+
     static Vector2 W(float x, float y) => new(x, -y);
 
     /// <summary>One line of marking work (dashed or solid).</summary>
@@ -60,6 +70,11 @@ public partial class MapRenderer : Node2D
     private int _autoRunTest = -1;   // --run-test <N>: auto-click Run Test
     private StreamWriter _motionLog;
     private bool _testPan;
+    // --quit-on-test-done: exit IN-APP (GetTree().Quit) once a polled test
+    // run finishes. Used by scripts/run_e2e.sh so the window never has to
+    // be killed from outside - any kill signal (SIGTERM -> .NET abort,
+    // SIGKILL -> macOS crash-report window) pops an annoying dialog.
+    private bool _quitOnTestDone;
     private Vector2? _overrideCenter;
     private float? _overrideZoom;
 
@@ -242,6 +257,57 @@ public partial class MapRenderer : Node2D
 
     public override void _Ready()
     {
+        // User args after "--": parsed FIRST - the source selection decides
+        // how map + state are fetched. --screenshot <path> saves the viewport
+        // a moment after the map is built (parity check vs pygame) and then
+        // QUITS — screenshot runs are self-terminating, so nothing has to be
+        // killed from outside (a SIGTERM kills .NET's exit path into an
+        // abort; see 2026-08-31 crash reports). --center <x> <y> and
+        // --zoom <z> override the initial fit view.
+        var args = OS.GetCmdlineUserArgs();
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--screenshot" && i + 1 < args.Length)
+                _screenshotPath = args[i + 1];
+            else if (args[i] == "--delay" && i + 1 < args.Length)
+                _shotDelay = float.Parse(args[i + 1]);
+            else if (args[i] == "--center" && i + 2 < args.Length)
+            {
+                _overrideCenter = W(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
+                i += 2;
+            }
+            else if (args[i] == "--zoom" && i + 1 < args.Length)
+                _overrideZoom = float.Parse(args[i + 1]);
+            else if (args[i] == "--test-pan")
+                _testPan = true;
+            else if (args[i] == "--quit-on-test-done")
+                _quitOnTestDone = true;
+            else if (args[i] == "--motionlog" && i + 1 < args.Length)
+                _motionLogPath = args[i + 1];
+            else if (args[i] == "--run-test" && i + 1 < args.Length)
+                _autoRunTest = int.Parse(args[i + 1]);
+            else if (args[i] == "--source" && i + 1 < args.Length)
+                _source = args[i + 1];
+            else if (args[i] == "--map" && i + 1 < args.Length)
+                _embeddedMapName = args[i + 1];
+            else if (args[i] == "--port" && i + 1 < args.Length)
+                _embeddedPort = int.Parse(args[i + 1]);
+        }
+
+        // Phase 7: pick the communication method. Embedded mode creates the
+        // SimHost FIRST (its _Ready runs synchronously on AddChild: network,
+        // sim thread and embedded REST API are up before we fetch anything).
+        bool embedded = string.Equals(_source, "embedded",
+                                      StringComparison.OrdinalIgnoreCase);
+        if (embedded)
+        {
+            _simHost = new SimHost(_embeddedMapName, _embeddedPort);
+            AddChild(_simHost);
+            GD.Print($"Source: EMBEDDED (in-process sim, REST API on :{_embeddedPort})");
+        }
+        else
+            GD.Print("Source: HTTP (external server on :5000)");
+
         _http = GetNode<HttpRequest>("Http");
         // use_threads: without it, Godot's HTTPRequest does ONE socket read
         // per rendered frame (godotengine/godot#120425) - every request then
@@ -257,7 +323,17 @@ public partial class MapRenderer : Node2D
         _world.AddChild(_markLayer);
         _world.AddChild(_dotLayer);
         _http.RequestCompleted += OnMapResponse;
-        FetchMap();
+        if (embedded)
+        {
+            // Map in-process: the SAME payload the /map endpoint serves
+            // (shared MapPayload builder), no HTTP round-trip.
+            var payload = DrivingGame.Api.MapPayload.Build(_simHost.Engine.Network);
+            using var doc = JsonDocument.Parse(
+                JsonSerializer.SerializeToUtf8Bytes(payload));
+            BuildMap(doc.RootElement);
+        }
+        else
+            FetchMap();
 
         // /state polling (pipelined, see below):
         // UseThreads: without it, Godot's HTTPRequest does ONE socket read
@@ -266,20 +342,23 @@ public partial class MapRenderer : Node2D
         // localhost reply that takes 0.4 ms from Python). Threaded mode
         // drains the socket at OS speed; callbacks still fire on main.
         //
-        // PIPLINED polling: the next request goes out IMMEDIATELY when a
-        // response lands (no timer alignment). A 60 Hz timer + one-request-
-        // in-flight guard left 2-10 frame gaps whenever a round trip took
-        // two frames (p50 latency == one frame), and each gap showed up as
-        // freeze-then-catch-up stutter.
-        _stateHttpA = new HttpRequest { UseThreads = true, Timeout = 1.0 };
-        _stateHttpB = new HttpRequest { UseThreads = true, Timeout = 1.0 };
-        AddChild(_stateHttpA);
-        AddChild(_stateHttpB);
-        _stateHttpA.RequestCompleted += (id, code, hdr, body) =>
-            OnStateResponse(code, body, _stateHttpB);
-        _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
-            OnStateResponse(code, body, _stateHttpA);
-        RequestState(_stateHttpA);
+        if (!embedded)
+        {
+            // PIPLINED polling: the next request goes out IMMEDIATELY when a
+            // response lands (no timer alignment). A 60 Hz timer + one-request-
+            // in-flight guard left 2-10 frame gaps whenever a round trip took
+            // two frames (p50 latency == one frame), and each gap showed up as
+            // freeze-then-catch-up stutter.
+            _stateHttpA = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+            _stateHttpB = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+            AddChild(_stateHttpA);
+            AddChild(_stateHttpB);
+            _stateHttpA.RequestCompleted += (id, code, hdr, body) =>
+                OnStateResponse(code, body, _stateHttpB);
+            _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
+                OnStateResponse(code, body, _stateHttpA);
+            RequestState(_stateHttpA);
+        }
 
         // Test-runner UI + its own HTTP node (the map/state nodes are busy
         // with their pipelines).
@@ -289,35 +368,6 @@ public partial class MapRenderer : Node2D
             OnCmdResponse(code, body);
         BuildRunTestUi();
 
-
-        // User args after "--": --screenshot <path> saves the viewport a
-        // moment after the map is built (parity check vs pygame) and then
-        // QUITS — screenshot runs are self-terminating, so nothing has to
-        // be killed from outside (a SIGTERM kills .NET's exit path into an
-        // abort; see 2026-08-31 crash reports). --center <x> <y> and
-        // --zoom <z> override the initial fit view.
-        var args = OS.GetCmdlineUserArgs();
-        for (int i = 0; i + 1 < args.Length; i++)
-        {
-            if (args[i] == "--screenshot")
-                _screenshotPath = args[i + 1];
-            else if (args[i] == "--delay" && i + 1 < args.Length)
-                _shotDelay = float.Parse(args[i + 1]);
-            else if (args[i] == "--center" && i + 3 < args.Length)
-            {
-                _overrideCenter = W(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
-                i += 2;
-            }
-            else if (args[i] == "--zoom" && i + 1 < args.Length)
-                _overrideZoom = float.Parse(args[i + 1]);
-            else if (args[i] == "--test-pan")
-                _testPan = true;
-            else if (args[i] == "--motionlog")
-                _motionLogPath = args[i + 1];
-            else if (args[i] == "--run-test" && i + 1 < args.Length)
-                _autoRunTest = int.Parse(args[i + 1]);
-        }
-
         // --run-test <N>: fill the field and fire the same code path as a
         // button click, a moment after the UI is built.
         if (_autoRunTest > 0)
@@ -326,6 +376,12 @@ public partial class MapRenderer : Node2D
                 _testInput.Text = _autoRunTest.ToString();
                 RunTestFromUi();
             };
+
+        // --quit-on-test-done: watch /run_test from the start (the run may
+        // be launched by scripts/run_e2e.sh, not by this window) and quit
+        // in-app when it finishes.
+        if (_quitOnTestDone)
+            StartPolling();
 
         // --zoom also pins the follow-camera zoom (like a wheel-zoom at
         // start): without this, FollowCamera() overwrites the initial view
@@ -946,6 +1002,20 @@ public partial class MapRenderer : Node2D
 
     public override void _Process(double delta)
     {
+        // Embedded source (Phase 7): read the in-process snapshot every frame
+        // and feed it through the SAME ingest path as the HTTP pipeline
+        // (serialize + parse keeps state application single-sourced; the cost
+        // is negligible vs an HTTP round trip - profiled at G5 via the EMBED
+        // motionlog line).
+        if (_simHost != null)
+        {
+            long t0 = (long)Time.GetTicksUsec();
+            IngestState(JsonSerializer.SerializeToUtf8Bytes(
+                _simHost.Engine.StateSnapshot()), "embedded /state");
+            if (_motionLog != null)
+                _motionLog.WriteLine($"EMBED {(long)Time.GetTicksUsec() - t0}us");
+        }
+
         var dir = Vector2.Zero;
         if (_keys.Contains(Key.A) || _keys.Contains(Key.Left)) dir.X -= 1;
         if (_keys.Contains(Key.D) || _keys.Contains(Key.Right)) dir.X += 1;
@@ -1018,6 +1088,15 @@ public partial class MapRenderer : Node2D
             // the sim is down), then continue the pipeline.
             GetTree().CreateTimer(0.1).Timeout += () => RequestState(next);
         if (responseCode != 200) return;   // keep last state
+        IngestState(body, "GET /state");
+    }
+
+    /// <summary>Parse + apply one state frame. BOTH sources feed this single
+    /// code path: the HTTP pipeline ("http" source) and the per-frame
+    /// in-process snapshot read ("embedded" source, Phase 7) - no divergence.
+    /// </summary>
+    private void IngestState(byte[] body, string origin)
+    {
         try
         {
             var root = JsonDocument.Parse(body).RootElement;
@@ -1184,7 +1263,7 @@ public partial class MapRenderer : Node2D
             // A state frame always has "time" (checked above), so anything
             // that still throws is an unexpected payload shape - log and
             // keep the last good state.
-            GD.PrintErr($"GET /state: bad payload: {e.Message}");
+            GD.PrintErr($"{origin}: bad payload: {e.Message}");
         }
     }
 
@@ -1291,6 +1370,7 @@ public partial class MapRenderer : Node2D
         // refreshed once per second from a 1 s window, so bursty arrivals
         // (2 samples in one frame, then 3 empty ones) cannot wiggle it.
         double nowWall = Time.GetTicksMsec() / 1000.0;
+        double frameDt = Math.Max(0, nowWall - _lastFrameWall);
         if (_simNow > double.NegativeInfinity)
         {
             if (nowWall - _rateRefWall >= 1.0 && _rateRefSim > 0)
@@ -1300,8 +1380,27 @@ public partial class MapRenderer : Node2D
                 _rateRefSim = _lastMaxTime;
                 _rateRefWall = nowWall;
             }
-            _simNow += Math.Max(0, nowWall - _lastFrameWall)
-                       * Mathf.Clamp(_simRate, 0.0, 1.5);
+            _simNow += frameDt * Mathf.Clamp(_simRate, 0.0, 1.5);
+            // Re-sync the clock to the data (measured 2026-09-06): a
+            // one-off offset - e.g. the sim stutters while spawning 150
+            // cars and the free-running clock races ~400 ms ahead - used
+            // to stick FOREVER, because both sides then run at the same
+            // rate. Stuck forward, rt sits past the newest sample: cars
+            // degrade to hold-and-jump and FollowCamera falls into its
+            // raw-packet branch (no interpolation) -> the whole track
+            // snaps on every /state response (visible jitter).
+            // Bounded exponential pull (time constant ~0.3 s, max 3x wall
+            // per frame): converges any stuck offset invisibly; during a
+            // data stall it settles ~0.3 s ahead (cars hold, no snap)
+            // and re-converges when the stream resumes.
+            if (_lastMaxTime > double.NegativeInfinity)
+            {
+                double desired = _lastMaxTime + RenderDelaySec;
+                float err = (float)(desired - _simNow);
+                float maxStep = (float)(frameDt * 3.0);
+                _simNow += Mathf.Clamp(err * Math.Min(1.0f, frameDt * 3.0),
+                                       -maxStep, maxStep);
+            }
         }
         _lastFrameWall = nowWall;
         // Render target: the smooth estimate minus the delay buffer.
@@ -1822,8 +1921,16 @@ public partial class MapRenderer : Node2D
         }
         else if (!haveNumber)
         {
-            // No run has ever been recorded - nothing to track.
-            _pollActive = false;
+            if (_quitOnTestDone)
+            {
+                // Run not started yet - keep watching.
+                GetTree().CreateTimer(3.0).Timeout += PollRunStatus;
+            }
+            else
+            {
+                // No run has ever been recorded - nothing to track.
+                _pollActive = false;
+            }
         }
         else if (!running && haveNumber)
         {
@@ -1832,6 +1939,12 @@ public partial class MapRenderer : Node2D
                 ? $"Test #{n} fertig ✅ (Log: {logFile})"
                 : $"Test #{n} beendet, rc={rc} ❌ (Log: {logFile})",
                 ok: rc == 0);
+            if (_quitOnTestDone)
+            {
+                // Let the status label render for a moment, then quit
+                // cleanly - no external kill needed (see field comment).
+                GetTree().CreateTimer(2.0).Timeout += () => GetTree().Quit();
+            }
         }
     }
 

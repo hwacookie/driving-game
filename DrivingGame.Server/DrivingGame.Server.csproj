@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../DrivingGame.Sim/DrivingGame.Sim.csproj" />
+    <ProjectReference Include="../DrivingGame.Api/DrivingGame.Api.csproj" />
   </ItemGroup>
 
 </Project>
