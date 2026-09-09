@@ -18,3 +18,8 @@ export.cfg
 ## e2e suite (regenerated on every run)
 tests/turning_results.json
 tests/run_test_*.log
+tests/twoway_repro_*.jsonl
+
+## OS / Python tooling junk
+.DS_Store
+__pycache__/
