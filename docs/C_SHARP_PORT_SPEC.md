@@ -160,9 +160,12 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 > per-car speedup, see Phase 6 below); A/B sanity done; full e2e suite 22/22
 > against a fresh C# host with the visible Godot window (`scripts/run_e2e.sh`).
 >
-> **Update (2026-09-06):** car-to-car collision + avoidance v1 implemented
-> (`CarCollisions.cs`), v2 design confirmed, driver profiles + new test-map
-> scenario scoped — all under Phase 9, started BEFORE G5 by user decision.
+> **Update (2026-09-07):** car-to-car collision + avoidance v1 AND v2 fully
+> implemented, wired into `SimEngine.Tick`, and verified (`CarCollisions.cs`,
+> `docs/C_SHARP_PORT_SPEC.md` "Collision detection & avoidance" — 3-scenario
+> crossroads test suite in `CollisionTests.cs`, 94/94 tests green). Driver
+> profiles + new test-map scenario still scoped, not started — all under
+> Phase 9, started BEFORE G5 by user decision.
 
 ### Phase 0 — Scaffolding ✅ (2026-09-04)
 - [x] Solution layout in this repo (Sim + Server projects, net8.0)
@@ -208,6 +211,92 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
 - **Gate: PASSED** (2026-09-05) — `dotnet test DrivingGame.Sim.Tests/`
   → 73/73 green.
 
+### Raceline rework — per-vehicle dimensions (TODO, decided 2026-09-08, NOT implemented)
+
+**Context.** Since 2026-09-08 the sprites have per-vehicle physical sizes
+(the two trucks are longer/wider than the sedan box). The footprint table
+lives in `Config.VEHICLE_SIZES` (single source of truth; renderer and sim
+both consume it) and car-to-car collision math is per-class (see DONE
+below). What still uses ONE global sedan GEOMETRY: `BicycleNav.WHEELBASE =
+2.7` ("shared by every car"), width-only corridor erosion in
+`Raceline.LegalCorridor` (`CAR_WIDTH/2 + ROAD_EDGE_TOLERANCE_M`), a
+`SolveLine` cache key WITHOUT any vehicle geometry, and the off-road / lane
+guard / bumper checks. Today a truck is rendered at its real size and
+collides with other cars as itself, but the raceline corridor, corner
+clearance and kinematics still assume a sedan.
+
+**DONE (2026-09-08, part of this work): per-class DYNAMICS.** Longitudinal
+and lateral dynamics are already vehicle-class specific:
+`Config.VEHICLE_CLASS_SPECS` maps each sprite to a class with (top speed,
+longitudinal acceleration, lateral-accel budget) - e.g. car 200 km/h /
+2.8 m/s² / 4.5 m/s² vs truck 80 km/h / 1.3 m/s² / 3.5 m/s² vs heavy_truck
+(loaded mixer) 80 km/h / 1.0 m/s² / 3.0 m/s² (values grounded in real
+figures: DE truck speed limit, UMTRI rollover thresholds ~0.4-0.5 g vs >1 g
+for cars, pickup skidpad ~0.7 g). `Car.Spec` exposes them; `BicycleNav`
+uses per-instance `A_CRUISE`/`V_MAX`/`A_LAT_MAX` (set in the ctor from
+`Car.Spec`) for the speed profile, corner speeds and understeer caps; FREE
+mode uses the same values. Verified live: mixer accelerates at 1.0 m/s²,
+profiles flat at 80 km/h, corners a 6 m fillet at ~12 km/h vs ~14.5 for
+the sedan (theory ratio √(4.5/3.0) = 1.22, measured 1.2). The e2e suite
+and the xunit collision tests pin spawns to the sedan class (`color:
+"blue"`) so all baselines stay comparable.
+
+**Why the wheelbase matters for the TARGET LINE (not just tracking).**
+The sim point is the REAR AXLE; in a steady turn of radius R the front
+axle traces √(R² + L²), i.e. off-tracking ≈ L²/2R:
+- sedan (L = 2.7 m, R = 20 m): ~0.18 m → negligible, which is why the
+  original width-only corridor "worked";
+- extreme case (L = 30 m, axles at both ends, R = 20 m): ~16 m → the front
+  swings far outside the reference line; the legal line is completely
+  different (much wider entry);
+- our trucks (L ≈ 7.0 / 8.4 m after the 2026-09-08 resize): ~0.6–1.2 m at
+  R = 20 m → no longer negligible. Rear overhang behind the reference point
+  cuts INWARD in corners (second effect of the same kind).
+
+**Work items (when we pick this up):**
+1. ~~Single source of truth for per-car geometry~~ **PARTIAL (2026-09-08):**
+   footprint width/length is shared (`Config.VEHICLE_SIZES`, `Car.WidthM`/
+   `LengthM`; renderer consumes the same table). Still global: Wheelbase,
+   FrontAxleOffsetM, RearAxleOffsetM per car.
+2. Raceline: `LegalCorridor`/`SolveLine` take the vehicle's half-width AND
+   overhangs; legality must constrain the SWEPT ENVELOPE — in particular
+   the derived front-axle path (√(R²+L²) per arc segment) / body corners —
+   not only the reference point. `SolveCacheKey` must include the geometry.
+3. ~~Collisions~~ **PARTIAL (2026-09-08):** car-to-car is per-class (v1
+   corridor gap uses `(L_c + L_o)/2`, v2 prediction boxes use each car's
+   real footprint, `Resolve`/`PlayerBodyCorners` use the real body). Still
+   sedan-sized: off-road / lane guard / bumper checks.
+4. Bicycle model: per-car wheelbase in kinematics (the corner-SPEED part is
+   done - A_LAT_MAX is already per class).
+5. Tests: keep the sedan as reference for existing e2e tolerances (spawns
+   are pinned to `color: "blue"`); truck scenarios need adjusted
+   expectations (or stay gated until this lands).
+
+**DONE (2026-09-08, part 2): per-class car-to-car collision footprints +
+fleet gridlock fix.** The fig8_cross mixed-fleet test (7 classes,
+simultaneous start) reproduced two physical impossibilities: truck pairs
+closing to real overlap (pickup+mixer −2.3 m, tan+tractor −1.3 m bumper
+contact at t≈50/63 s — the v1 gap math subtracted ONE global `CAR_LENGTH`
+instead of `(L_c + L_o)/2`) and a permanent gridlock of 6-7 cars (the v2
+crossing check read a same-lane FOLLOWER as "coming from my right +
+closing" and made the LEADER yield to its own tail; the closing test was
+heading-only, so stationary cars kept "closing" forever). Fixed:
+per-pair bumper gap in v1, per-car footprint boxes in v2 prediction,
+`PlayerBodyCorners` per-vehicle, a same-lane-following filter that keeps v2
+out of v1's domain, and a velocity-based (not heading-only) closing test in
+right-before-left. Verified: 96/96 unit tests incl. the new `Fig8FleetTests`
+regression (mixed fleet on fig8_cross, 90 s: no overlap, no standstill),
+and the live run shows all 7 cars circulating with a min pairwise gap of
+8.5 m centre distance and zero near-misses.
+
+**Status: raceline/kinematics geometry NOT implemented** (user decision
+2026-09-08: document first, implement later; per-class dynamics AND
+car-to-car collision footprints landed the same day - see above).
+Until then, non-sedan vehicles have realistic sizes, dynamics and
+car-to-car collision boxes but a sedan's body envelope in corridor /
+kinoematics — a known inconsistency that the "never physically impossible"
+rule will eventually force us to fix properly.
+
 ### Phase 3 — BicycleNav ✅ (2026-09-05)
 - [x] SmoothCurve, RefLine (+ bisect point_at/heading_at), projection
       refinement, speed profile, pursuit controller, parking / pull-over
@@ -240,8 +329,8 @@ imports are LOCAL (inside functions) and were caught in the re-audit on
       contact stop, per-map layouts save/load — all wired into SimEngine and
       covered by `SafetySystemsTests`, 13 tests)
 - Car-to-car collision & avoidance: **post-port feature**, started
-      2026-09-06 (user decision) — v1 in `CarCollisions.cs`; design, status
-      and remaining wiring in Phase 9 ("Collision detection & avoidance")
+      2026-09-06 (user decision) — v1 + v2 implemented, wired, verified
+      2026-09-07; full status in Phase 9 ("Collision detection & avoidance")
 - Gate: feature checks (breadcrumbs, reverse park, blinkers, u-turn)
   - **PASSED** (2026-09-05): reverse-in park ✓ (Phase 3 G2),
     u-turn ✓ (`Uturn_CompletesAndFlipsHeading`), breadcrumbs present
@@ -410,56 +499,133 @@ both per physics substep in `SimEngine.Tick`:
    car, so the pre-step poses were clear: no interpenetration, no teleport
    (the validator sees zero motion for them).
 
-**v1 — implemented** (`DrivingGame.Sim/CarCollisions.cs`, 2026-09-06):
+**v1 — implemented** (`DrivingGame.Sim/CarCollisions.cs`, 2026-09-06; wired +
+fixed 2026-09-07):
 - Broadphase: uniform grid, 20 m cells (look-ahead ring = 3 cells)
 - Forward corridor: lateral ±1.8 m of own axis (a car in the adjacent lane
   on a 7 m road sits ~3.5 m away and must NOT trigger), look-ahead 40 m,
   standstill gap 3 m
-- Cap: `min(v_ahead projected onto my axis, sqrt(2·CAR_BRAKING·max(gap−3 m, 0)))`;
-  boxes touching → cap 0. Geometric corridor only (no refline following) —
-  v1 scope: the curvature-limited speed profiles are conservative enough
-  that a straight 40 m look-ahead still gives ≥1.5 s detection in curves;
-  refline-following detection deferred to v2.
+- Cap: `v_ahead projected onto my axis + sqrt(2·CAR_BRAKING·max(gap−3 m, 0))`;
+  boxes touching → cap 0. **Fixed 2026-09-07**: the original formula was
+  `min(v_ahead, sqrt(...))`, which clamps the cap to `v_ahead` (0 for a
+  stationary lead) the INSTANT the corridor detects it, regardless of how
+  much gap is still open — forcing an immediate hard stop 40 m out instead
+  of a smooth approach-and-brake. It went uncaught until now because v1 was
+  never wired into `Tick` before. Corrected to the relative-motion braking
+  distance (`+`, not `min`): the fastest speed from which I can still match
+  the lead's speed (or stop, if it's stationary) within the remaining gap.
+  Geometric corridor only (no refline following) — v1 scope: the
+  curvature-limited speed profiles are conservative enough that a straight
+  40 m look-ahead still gives ≥1.5 s detection in curves; refline-following
+  detection deferred to v2.
 - `Resolve`: SAT body-box overlap → both cars roll back + stop; returns the
   contacted uids (the validator treats their motion as externally constrained)
 
-v1 remaining wiring:
-- [ ] `SimEngine.Tick` two-pass restructure — loop A (car Update + obstacle
-      contact + avoidance caps), then `Resolve`, then loop B (Validator +
-      LaneGuard). Ordering matters: the validator must check the FINAL
-      post-resolution state (single-pass was discarded for exactly this reason)
-- [ ] `CollisionsEnabled` flag on SimEngine + `--no-collisions` CLI arg
-- [ ] Cost measurement: Stopwatch µs per call for ComputeAvoidCaps + Resolve,
-      printed every 5 s (budget context: ~200 µs/car/substep total today)
-- [ ] Verify: head-on pair test + 150-car stress run (suite gates unchanged)
+v1 wiring (`SimEngine.Tick`, 2026-09-07):
+- [x] Two-pass restructure — loop A (car Update + obstacle contact +
+      avoidance caps), then `Resolve`, then loop B (Validator + LaneGuard).
+      Caps computed from a PRE-step snapshot of all cars, before any of them
+      move that substep. Legacy single-pass path kept for `CollisionsEnabled
+      = false` or a single car (verbatim old behavior, zero regression risk).
+- [x] `CollisionsEnabled` flag on SimEngine (default true) + `--no-collisions`
+      CLI arg (`DrivingGame.Server/Program.cs`)
+- [x] Cost measurement: Stopwatch µs/call for `ComputeAvoidCaps` + `Resolve`,
+      printed every 300 substeps (5 sim-s). Measured: 2 cars ~5-14 µs/call
+      combined; 150-car stress ~41-48 µs/car for `ComputeAvoidCaps` (~6-7 ms
+      total), `Resolve` ~0.6-0.7 µs/car — comfortably under the ~200 µs/car/
+      substep total budget.
+- [x] Two additional fixes surfaced by wiring it in for real (both silent
+      until an actual multi-car `Tick` run existed to expose them):
+      1. **Decel-limited braking now baselines off the PRE-`Update()` speed**,
+         not the driver's post-update output. The driver still tries to
+         accelerate every substep (it has no idea another car exists) and
+         bumps speed up a little BEFORE avoidance runs; braking from that
+         bumped value nets less than `CAR_BRAKING` of actual deceleration
+         (measured: ~7.2 m/s² instead of 10), causing the follower to
+         overshoot the intended ~3 m standstill gap toward ~0.
+      2. **Accelerate is suppressed in the control fed to a car's `Update()`**
+         when the pre-step avoidance cap already forbids exceeding its
+         current speed. Without this, `BicycleNav`'s standstill-creep
+         mechanic (`CREEP_SCALE`, meant to unstick a car from a stall) nudges
+         `X/Y` forward every substep BEFORE the post-`Update` cap ever runs,
+         creeping a "stopped" follower slowly through the lead car over many
+         seconds instead of resting.
+- [x] Verified: head-on pair test + 150-car stress run (no exceptions/NaN,
+      cost measured above; suite gates unchanged — 94/94 tests pass)
 
-**v2 — design confirmed (hauke, 2026-09-06):** time-window pair prediction
-for oblique/crossing conflicts (the corridor cap alone cannot see a car that
-is not yet in the forward tube):
-- **Hybrid two-pass avoidance:** keep the corridor cap for smooth continuous
-  car-following; ADD a symmetric pair check that predicts each car's position
-  at t ∈ {1 s, 3 s, 5 s} (advance along the refline when available — BICYCLE
-  cars with an active route — else linear extrapolation) and tests all nearby
-  pairs' body boxes per stage. TTC = earliest hit stage.
+**v2 — implemented** (`DrivingGame.Sim/CarCollisions.cs`, 2026-09-07): time-
+window pair prediction for oblique/crossing conflicts (the corridor cap alone
+cannot see a car that is not yet in the forward tube):
+- **Hybrid two-pass avoidance:** the corridor cap (v1) still handles smooth
+  continuous car-following; a symmetric pair check ADDS oblique/crossing
+  detection that predicts each car's position ahead (advancing along the
+  `BicycleNav.Ref` refline when available — a route exists even without an
+  explicit destination — else linear extrapolation) and tests all nearby
+  pairs' body boxes.
+- **Continuous sweep, not 3 fixed samples** (deviation from the originally
+  confirmed design): predicting at exactly `{1, 3, 5} s` and testing box
+  overlap at just those three points was found — empirically, via the
+  crossing test below — to miss fast-closing conflicts entirely. At cruise
+  speed (~20 m/s) the future position sampled at a FIXED stage overshoots
+  the actual crossing point, and the real-time window where a fixed-stage
+  sample would land exactly ON a car-length-wide conflict is narrower than
+  the gap between the stages themselves; two accelerating cars converging on
+  a junction sailed straight through undetected until they nearly collided
+  and `Resolve`'s rollback (not graceful avoidance) caught it at the last
+  instant. Fixed by sweeping every 0.1 s up to 5 s and classifying the
+  EARLIEST hit into the same graded 1 s / 3 s / 5 s response bands (still
+  re-evaluated fresh every substep — see `GradedCap`). Each car's sweep
+  trajectory is precomputed ONCE per substep (not once per pair it appears
+  in) to keep the O(pairs × 50 samples) cost bounded in dense traffic.
+- **Prediction boxes are LENGTH-padded (+2 m each end), not width-padded**:
+  the discrete sweep can still flicker (detect/miss on alternating substeps)
+  right at the decision boundary because the unpadded box's edge just clips
+  in and out between consecutive 0.1 s samples; widening along the direction
+  of travel closes that gap. Widening the WIDTH too was tried first and
+  reverted — it pushed the effective half-width past half the standard 7 m
+  road's lane separation (~1.75 m), so two cars safely 3.5 m apart in
+  opposite lanes on a straight road registered a false conflict.
 - **TTC stages 1 s / 3 s / 5 s, graded response:** earlier hit → stronger
-  reaction (1 s → stop, 3 s → cap to a safe speed, 5 s → mild anticipation).
+  reaction (≤1 s → stop, ≤3 s → cap to a safe speed, else → mild anticipation
+  at the gentler `PARK_BRAKING`).
 - **Prediction velocity: `max(current speed, planned target speed)`** per car
   — conservative; avoids phantom conflicts from cars that are slow NOW but
   will be at cruising speed by the crossing.
-- **Right-before-left priority** for oblique pairs (neither car is directly
-  ahead of the other): the car seeing the other come from its RIGHT yields.
-  Geometric test: other's position in my right half-plane AND other
-  approaches the meeting point (dot-product test). The local-frame derivation
-  was discarded — degenerate: two perpendicular cars can both see each other
-  as "ahead-right". Deterministic tie-breaker for equal-priority pairs:
-  lower uid yields.
-- Needs a `public RefLine? Ref` accessor on BicycleNav (null without an active
-  route; clamp the lookahead sample to `min(S + d, Total)`).
+- **Right-before-left priority** for oblique pairs: the car seeing the other
+  come from its RIGHT yields. Geometric test: other's position in my right
+  half-plane AND other is closing on me (dot-product test, world-frame - the
+  local-frame "ahead-right" derivation was discarded as degenerate: two
+  perpendicular cars can each read the other as ahead-right). Deterministic
+  tie-breaker for equal-priority pairs (both or neither see the other as
+  coming from their right): lower uid yields.
+- `public RefLine? Ref => _ref;` accessor added to `BicycleNav` (null without
+  an active route).
 
-v2 remaining:
-- [ ] Pair check + TTC grading in CarCollisions (ComputeAvoidCaps v2)
-- [ ] Right-before-left geometric test + uid tie-breaker
-- [ ] Cost measurement incl. pair pass (µs per car per substep, combined)
+v2 verification: `DrivingGame.Sim.Tests/CollisionTests.cs` (2026-09-07) — a
+headless `SimEngine` driven directly (no existing test did this before;
+`car.Update` alone bypasses the collision system entirely, which lives only
+in `Tick`), on the "basic" test map's crossroads (`cross_n/s/w/e` around
+`cross_center`):
+- `StationaryLeadCar_FollowerBrakesAndStopsBehind` — v1 corridor cap alone:
+  a following car brakes smoothly to a stop ~2-3 m behind a stationary lead
+  in the same lane, no `Resolve` rollback.
+- `HeadOnSeparateLanes_NeitherBrakes` — false-positive guard: two cars
+  approach head-on on the same straight road, each in its own lane (~3.5 m
+  apart, outside the 1.8 m corridor half-width). Asserted against a SOLO
+  baseline (each car driven alone first) rather than "speed never decreases"
+  — a lone car legitimately decelerates for the real junction ahead
+  regardless of the other car, so the meaningful claim is "no DIFFERENT than
+  driving it alone", not "never brakes at all".
+- `SimultaneousCrossing_EastYieldsToNorth_RightBeforeLeft` — the scenario
+  that needs v2: car A (north→south) and car B (east→west) approach the
+  crossing symmetrically (85 m out, equal speed profile). B sees A on its
+  right and yields (brakes hard, well before the junction); A proceeds
+  through without ever nearly stopping. Both eventually clear the junction
+  (B resumes once A has passed) — no deadlock, no mutual stop (the v1-only
+  failure mode this test exists to rule out).
+
+v2 remaining: none — pair check, RBL, and cost measurement are all done and
+verified above.
 
 ### Driver profiles (first Driver-axis instances, user request 2026-09-06)
 

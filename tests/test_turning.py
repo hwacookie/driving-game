@@ -598,11 +598,15 @@ class TurnTester:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        requests.post(f"{API_URL}/teleport", json={'random': True})
+        # color pinned to the sedan class: dynamics are per vehicle class
+        # (Config.VEHICLE_CLASS_SPECS) and every baseline in this suite was
+        # calibrated with sedan numbers.
+        requests.post(f"{API_URL}/teleport", json={'random': True, 'color': 'blue'})
         self._wait_for_new_car(old_uid)
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
-                                  speed_mps: float | None = None):
+                                  speed_mps: float | None = None,
+                                  color: str = "blue"):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -610,12 +614,17 @@ class TurnTester:
         only the LAST 20% of the start segment (see docs/TESTING.md).
         speed_mps: optional rolling start in m/s (running turn tests spawn
         already moving; parking tests start from rest).
+        color: pinned to the sedan class by default on purpose - dynamics
+        are per vehicle class (Config.VEHICLE_CLASS_SPECS) and every
+        baseline in this suite was calibrated with sedan numbers; without
+        an explicit color the uid-based palette cycle would hand out truck
+        classes (80 km/h top, 1 m/s^2) to later scenarios.
         """
         try:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        payload = {'start_point': name, 'progress': progress}
+        payload = {'start_point': name, 'progress': progress, 'color': color}
         if speed_mps is not None:
             payload['speed'] = speed_mps
         requests.post(f"{API_URL}/teleport", json=payload)
@@ -782,9 +791,11 @@ class TurnTester:
                 seg = (self.FIG8_FIRST_SEGMENT
                        + round(i * self.FIG8_N_SEGMENTS / n_cars)
                        % self.FIG8_N_SEGMENTS)
+                # Sedan class for every car: mixed classes would change the
+                # calibrated capacity baselines (see create_car_at_start_point).
                 self._api_session.post(f"{API_URL}/teleport", json={
                     'segment': seg, 'progress': 0.5,
-                    'speed': spawn_speed_mps, 'add': True}, timeout=5)
+                    'speed': spawn_speed_mps, 'add': True, 'color': 'blue'}, timeout=5)
             # Wait until all cars actually exist (queued teleports land
             # one per sim frame - ~17 ms each). Proportional budget: at
             # hundreds of cars a fixed 15 s would time out spuriously if

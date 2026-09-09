@@ -537,15 +537,18 @@ public static class Raceline
         for (int i = 0; i < n; i += stride) knots.Add(i);
         if (knots[^1] != n - 1) knots.Add(n - 1);
 
-        // FAITHFUL-PORT QUIRK (do not "fix"): in raceline.py the per-station
-        // loop below reads `nx, ny` that are never assigned inside it — they
-        // are STALE from the last iteration of the knot-probe loop,
-        // i.e. the normal at the LAST knot (station n-1). t_junc therefore
-        // uses the route-end normal at every station, not N[i]. The Python
-        // line has been shaped by this for a long time; changing it here
-        // would move the C# line away from the reference at every two-way
-        // junction (measured: lo 1.4 vs 2.234 m on tjunc_left[472]).
-        double staleNx = N[knots[^1]].X, staleNy = N[knots[^1]].Y;
+        // tJunc uses the STATION'S OWN normal (N[i]): "keep the junction
+        // centre on our left" means the node's lateral position relative to
+        // THIS station. The Python original read a stale variable here (the
+        // route-END normal at every station) - a bug, not a design choice:
+        // on routes whose end direction differs from the approach direction
+        // it projects the vector-to-node onto the wrong axis and pushes the
+        // line out by up to half a metre for a single station right before
+        // the node (measured +0.49 m spike at fig8_cross C). That kink cut
+        // the speed profile to ~2.7 m/s, stalled slow cars mid-crossing via
+        // the steering-demand throttle, and gridlocked the signed 50-car
+        // two-way demo. Fidelity to the reference bug is not worth a
+        // deadlock - fixed 2026-09-08.
 
         var probe = new Dictionary<int, (double?, double?)>();
         foreach (int i in knots)
@@ -642,8 +645,7 @@ public static class Raceline
             if (atJuncTwoWay)
             {
                 var (qx, qy) = jn!.Value;   // non-null: atJuncTwoWay implies it
-                // staleNx/staleNy — see FAITHFUL-PORT QUIRK above.
-                tJunc = ((qx - P[i].X) * staleNx + (qy - P[i].Y) * staleNy) / PPPM;
+                tJunc = ((qx - P[i].X) * N[i].X + (qy - P[i].Y) * N[i].Y) / PPPM;
                 if (!nodeIdxCache.TryGetValue((qx, qy), out int kq))
                 {
                     kq = NodeRouteIndex((qx, qy), P);

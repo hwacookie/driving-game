@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DrivingGame.Sim;
 using NetTopologySuite.Geometries;
 using NetTopologySuite.Geometries.Prepared;
@@ -450,6 +451,104 @@ public class RacelineReferenceTests
     }
 
     // ------------------------------------------------------------------
+    // re-baseline tool
+    // ------------------------------------------------------------------
+
+    /// <summary>RE-BASELINE: rewrites data/raceline_reference/basic.json from the
+    /// CURRENT C# implementation. The original dump came from the retired pygame
+    /// repo (tools/raceline_reference.py); per user decision the C# codebase is
+    /// now its own reference, so this test pins current behaviour as a regression
+    /// guard instead of Python parity. Run on purpose after intentional raceline
+    /// changes, then re-run the suite:
+    ///   dotnet test DrivingGame.Sim.Tests/ --filter "FullyQualifiedName~RebaselineReferenceFile"
+    /// </summary>
+    [Fact(Skip = "manual re-baseline tool - run on purpose, then re-run the reference tests")]
+    public void RebaselineReferenceFile()
+    {
+        var reference = LoadReference();
+        var network = TestMaps.BuildBasicTestMap();
+        InjectPythonGeometry(network);
+
+        using var origDoc = JsonDocument.Parse(File.ReadAllText(FindReferenceFile()));
+        var root = origDoc.RootElement;
+
+        JsonArray PtsJson(List<(double X, double Y)> pts) =>
+            new(pts.Select(p => (JsonNode)new JsonArray(p.X, p.Y)).ToArray());
+        JsonArray Arr(double[] a) =>
+            new(a.Select(v => (JsonNode)v).ToArray());
+
+        var casesJson = new JsonArray();
+        foreach (var c in reference.Cases)
+        {
+            // Same pipeline as the gate tests: solve on the injected geometry,
+            // intermediates from the resampled rounded centerline.
+            var result = Raceline.SolveLine(
+                network, c.Rounded, c.SegIdx.ToList(),
+                baseOffset: c.BaseOffset, autoBase: c.AutoBase,
+                mergeFromM: c.MergeFromM, mergeS0: c.MergeS0, mergeS1: c.MergeS1);
+
+            var (P, S, _) = Raceline.Resample(c.Rounded, Raceline.SampleM);
+            var props = Raceline.StationSegments(network, c.SegIdx.ToList(), P);
+            var (N, K) = Raceline.NormalsAndCurvature(P, Raceline.SampleM);
+            var junction = Raceline.JunctionNodePerStation(network, P);
+            var (lo, hi) = Raceline.LegalCorridor(network, P, N, props, junction);
+            double[] baseProf = c.AutoBase
+                ? Raceline.AutoBaseProfile(props, S, lo, hi)
+                : Array.Empty<double>();
+
+            var kwargs = new JsonObject();
+            if (c.BaseOffset is double bo) kwargs["base_offset"] = bo;
+            if (c.AutoBase) kwargs["auto_base"] = true;
+            if (c.MergeFromM is double mf) kwargs["merge_from_m"] = mf;
+            if (c.MergeS0 != 0.0) kwargs["merge_s0"] = c.MergeS0;
+            if (c.MergeS1 != 0.0) kwargs["merge_s1"] = c.MergeS1;
+
+            casesJson.Add(new JsonObject
+            {
+                ["name"] = c.Name,
+                ["nodes"] = new JsonArray(c.Nodes.Select(n => (JsonNode)n).ToArray()),
+                ["seg_idx"] = new JsonArray(c.SegIdx.Select(i => (JsonNode)i).ToArray()),
+                ["kwargs"] = kwargs,
+                ["rounded"] = PtsJson(c.Rounded),
+                ["P"] = PtsJson(result.Points),
+                ["N"] = PtsJson(result.Normals),
+                ["offsets"] = Arr(result.Offsets),
+                ["cum"] = Arr(result.Cum),
+                ["K"] = Arr(K),
+                ["lo"] = Arr(lo),
+                ["hi"] = Arr(hi),
+                ["base_prof"] = Arr(baseProf),
+                ["props"] = new JsonArray(c.Props.Select(p =>
+                    (JsonNode)new JsonArray(p.Oneway ? 1 : 0, p.Width, p.Lanes, p.Parking)).ToArray()),
+                ["junction"] = new JsonArray(c.Junction.Select(j =>
+                    j is null ? (JsonNode?)null
+                              : new JsonArray(j.Value.X, j.Value.Y)).ToArray()),
+            });
+        }
+
+        var outDoc = new JsonObject
+        {
+            ["map"] = root.GetProperty("map").GetString()!,
+            ["pppm"] = root.GetProperty("pppm").GetDouble(),
+            ["corner_radius_m"] = root.GetProperty("corner_radius_m").GetDouble(),
+            ["corner_arc_steps"] = root.GetProperty("corner_arc_steps").GetInt32(),
+            ["node_count"] = reference.NodeCount,
+            ["segment_count"] = reference.SegmentCount,
+            ["nodes"] = new JsonObject(reference.Nodes.ToDictionary(
+                kv => kv.Key, kv => (JsonNode)new JsonArray(kv.Value.X, kv.Value.Y))),
+            ["node_degree"] = new JsonObject(reference.NodeDegree.ToDictionary(
+                kv => kv.Key, kv => (JsonNode)kv.Value)),
+            ["paved"] = JsonNode.Parse(root.GetProperty("paved").GetRawText())!,
+            ["safe"] = JsonNode.Parse(root.GetProperty("safe").GetRawText())!,
+            ["cases"] = casesJson,
+        };
+
+        string path = FindReferenceFile();
+        using var fs = new FileStream(path, FileMode.Create);
+        using (var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            outDoc.WriteTo(writer);
+        _reference = null;   // force reload on the next test run
+    }
 
     static void InjectPythonGeometry(RoadNetwork network)
     {

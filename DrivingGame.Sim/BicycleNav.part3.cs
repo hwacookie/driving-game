@@ -1358,11 +1358,43 @@ public sealed partial class BicycleNav
         if (accel && car.Speed < CREEP_SPEED && plan is null)
             accelScale = Math.Max(accelScale, CREEP_SCALE);
 
+        string? dbgPlanPhase = plan is { } pp ? pp.Phase : null;     // TEMPORARY debug
+        DbgState = (S, _ref?.Total ?? -1.0, dbgPlanPhase,
+                    Math.Degrees(Math.Abs(delta)), TargetSpeed(S),
+                    accel, vTarget, accelScale);                     // TEMPORARY debug
+
         // Ease speed toward the target (accel / brake rates).
+        bool braked = false;   // real brake pedal applied this tick (lights)
         if (accel && car.Speed < vTarget)
             car.Speed = Math.Min(vTarget, car.Speed + A_CRUISE * accelScale * dt);
         else if (car.Speed > vTarget)
-            car.Speed = Math.Max(vTarget, car.Speed - brakeRate * dt);
+        {
+            double gap = car.Speed - vTarget;
+            // SAILING: shed speed with the throttle OFF - rolling resistance +
+            // aero drag, no pedal, no lights. A driver sails when coasting alone
+            // keeps up with the profile (steady state, gentle ramps) and presses
+            // the brake (lights on) only when it doesn't (sharp corner entry).
+            // The old code "braked" whenever Speed was 5 cm/s above target, so
+            // the brake light flickered at tick rate in every braking ramp.
+            double sLook = Math.Min(S + car.Speed * SAIL_LOOKAHEAD_S,
+                                    _ref?.Total ?? double.PositiveInfinity);
+            double reqDecel = Math.Max(0.0,
+                (car.Speed - TargetSpeed(sLook)) / SAIL_LOOKAHEAD_S);
+            // U-turns are excluded like plans: their cusp stops need the full
+            // A_BRAKE (0.1 m stopping distance at creep) - sailing would
+            // overshoot by ~2 m and the stop-skip safety net would drop them.
+            bool sail = !brake && plan is null && !_uturnActive &&
+                        (!accel ||
+                         (gap <= Config.SAIL_BAND_MPS &&
+                          reqDecel <= Config.CoastDecel(car.Speed)));
+            if (sail)
+                car.Speed = Math.Max(vTarget, car.Speed - Config.CoastDecel(car.Speed) * dt);
+            else
+            {
+                car.Speed = Math.Max(vTarget, car.Speed - brakeRate * dt);
+                braked = true;
+            }
+        }
         car.Speed = Math.Max(0.0, Math.Min(V_MAX, car.Speed));
 
         // End of the parking roll-out: the distance-proportional target decays
@@ -1372,7 +1404,9 @@ public sealed partial class BicycleNav
             dStop <= 0.3 && car.Speed < PARK_STANDSTILL_M_S)
             car.Speed = 0.0;
         car.TargetSpeed = car.Speed;
-        car.IsBraking = brake || car.Speed > vTarget + 0.05;
+        // The brake light follows the PEDAL, not the speed error: sailing
+        // (throttle off, drag does the work) keeps it dark.
+        car.IsBraking = brake || braked;
 
         // End-of-stop wheel straightening (parking only): below the yaw-clamp threshold
         // (0.3 m/s, see the kinematics below) the car physically cannot rotate, so a large
@@ -1398,6 +1432,8 @@ public sealed partial class BicycleNav
         double rad = Math.Radians(car.Heading);
         car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.PPPM;
         car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.PPPM;
+
+        DbgSpeedAtEnd = car.Speed;   // TEMPORARY debug
 
         // --- keep seg_idx / progress / forward in sync (for the API) ---
         SyncSegment();

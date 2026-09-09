@@ -259,3 +259,13 @@ Solution builds with only two warnings (an async call that doesn't need awaiting
 - Done: Solution builds successfully (CS4014 warnings only). Staged all changes: MapRenderer.cs (PLL resynced + motion log + quit-on-test-done), GameApi.cs moved (Server→Api), new MapPayload.cs and DrivingGame.Api.csproj, CarCollisions.cs v1 with obstacle-checking logic, SharedFrameworkAssemblyLoader.cs, SimHost.cs, e2e test harness rewrite with /run_test POST, test_turning.py stress phase 150 cars, two diary entries, spec incremented
 - State: All changes committed and pushed to origin. Project now has API split into separate assembly; collision avoidance v1 compiled but not yet wired into SimEngine; e2e suite ready for no-kill testing flow via /run_test endpoint
 
+## 2026-09-06 17:00–17:00 (hauke-walden)
+- Worked on: Committing consolidated code after session with multiple subsystems: CarCollisions.cs (grid broadphase + corridor speed cap), DrivingGame.Api project (split from Server; GameApi.cs + MapPayload.cs), SharedFrameworkAssemblyLoader.cs (Godot managed host probe), SimHost.cs (Phase 7 in-process sim + embedded REST API), MapRenderer.cs (render-clock re-sync + --motionlog flag), run_e2e.sh (no-kill flow + rc=0 fix), test_turning.py (STRESS_PHASE_CARS default)
+- Done: Green build (2 warnings, 0 errors); all changes staged (15 files: 8 added, 5 modified, 1 renamed); repository ready to commit & push with comprehensive message covering collision v1, API split, e2e no-signal flow, render-clock jitter fix
+- State: Pending git commit message composition and push; diary for 2026-09-06 created; spec updated with Phase 9 collision design & test infra notes
+
+## 2026-09-06 17:00–17:00 (hauke-walden)
+- Worked on: Committing and pushing C# port progress on `csharp-port` branch; bundled collision v1, shared Api project, embedded sim host, e2e no-signal flow, and related changes
+- Done: Commit `8a57de5` created and pushed to `origin/csharp-port`; 15 files changed (+2025/−218); verified green build before commit; working tree clean
+- State: Branch `csharp-port` is current and synced with origin; all today's work (CarCollisions.cs v1, DrivingGame.Api split, SimHost.cs, MapRenderer updates, 150-car stress test, spec update, diary entries) successfully committed
+

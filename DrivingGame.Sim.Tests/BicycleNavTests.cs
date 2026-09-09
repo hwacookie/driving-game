@@ -178,10 +178,13 @@ public class BicycleNavTests
 
         // Drive south ~25 m first: at the dead-end node itself there is no room
         // behind for the U-turn tail (correctly rejected), and the entry speed cap
-        // (18 km/h) needs a stop anyway. Coast to a standstill, then request.
+        // (18 km/h) needs a stop anyway. Brake to a standstill, then request.
+        // (A deliberate S-brake keeps the stop position deterministic - passive
+        // sailing from 50 km/h would roll ~120 m before stopping, like a real
+        // car left in gear, and start the U-turn too close to the dead end.)
         Drive(car, net, driver, Keys("w"), 6.0);
-        Drive(car, net, driver, Keys(), 20.0, done: c => Math.Abs(c.Speed) < 0.3);
-        Assert.True(Math.Abs(car.Speed) < 0.3, "car did not coast to a stop");
+        Drive(car, net, driver, Keys("s"), 30.0, done: c => Math.Abs(c.Speed) < 0.3);
+        Assert.True(Math.Abs(car.Speed) < 0.3, "car did not brake to a stop");
         driver.UteturnRequested = true;
 
         bool wasActive = false, finished = false;

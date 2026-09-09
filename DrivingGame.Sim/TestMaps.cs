@@ -25,6 +25,7 @@ public sealed class MapBuilder
     private readonly double Pppm = Config.PIXELS_PER_METER;
     private readonly Dictionary<string, (double X, double Y)> _nodesM = new();
     private readonly List<RoadSegment> _segments = new();
+    private readonly List<(int SegIdx, string NodeId, SignType Type)> _signs = new();
     private int _nextSegId = 1;
     // name -> (node_id, lateral_offset_m, facing); degree-1 nodes or loops
     // with an explicit facing neighbour.
@@ -72,6 +73,25 @@ public sealed class MapBuilder
             Shoulder = shoulder,
             Level = level,
         });
+    }
+
+    /// <summary>Place a road sign: cars on the segment between `fromNode`
+    /// and `toNode` that drive TOWARD `toNode` must obey it before entering
+    /// the node (yield to priority-road traffic, or carry the priority
+    /// marker themselves).</summary>
+    public void Sign(string fromNode, string toNode, SignType type)
+    {
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            var s = _segments[i];
+            if ((s.StartNode == fromNode && s.EndNode == toNode) ||
+                (s.StartNode == toNode && s.EndNode == fromNode))
+            {
+                _signs.Add((i, toNode, type));
+                return;
+            }
+        }
+        throw new ArgumentException($"Sign: no segment between '{fromNode}' and '{toNode}'");
     }
 
     /// <summary>Register a named, deterministic start point at a node. The
@@ -201,6 +221,7 @@ public sealed class MapBuilder
         var net = RoadNetwork.CreateFromParts(nodes, _segments, 0.0, 0.0,
             maxX, maxY, nodeConnections, nodeDegree, nodeInfo);
         foreach (var kv in startPoints) net.StartPoints[kv.Key] = kv.Value;
+        foreach (var (idx, nodeId, type) in _signs) net.Signs[(idx, nodeId)] = type;
         return net;
     }
 }
@@ -212,6 +233,8 @@ public static class TestMaps
     private static readonly Dictionary<string, Func<RoadNetwork>> Registry = new()
     {
         ["basic"] = BuildBasicTestMap,
+        ["fig8_cross"] = BuildFig8CrossTestMap,
+        ["fig8_plain"] = BuildFig8PlainTestMap,
     };
 
     /// <summary>Build a named synthetic test map.</summary>
@@ -585,4 +608,66 @@ public static class TestMaps
 
         return b.Build();
     }
+
+    /// <summary>The planar figure-8 family: a lemniscate (same curve as the
+    /// basic map's tile (1,3)) whose self-crossing is a REAL degree-4
+    /// junction (all segments ground level) instead of two coincident
+    /// degree-2 nodes + a bridge. A driver with no destination and throttle
+    /// held takes the straight continuation at the crossing, so it drives the
+    /// full figure-8 loop forever - both lobes, crossing in the middle like
+    /// real traffic. 48 segments; the four spokes of the crossing are
+    /// n11->C, C->n13, n35->C, C->n37. The crossing's right-of-way is a
+    /// parameter: BuildFig8CrossTestMap is the right-of-way-signs variant,
+    /// BuildFig8PlainTestMap the no-signs (right-before-left) variant.</summary>
+
+    /// <summary>Shared geometry for the planar figure-8 family. When
+    /// rightOfWay is true, adds the Vorfahrt signs (SE-NW diagonal = Priority,
+    /// SW-NE = Yield); false leaves the crossing un-signalled so the engine's
+    /// right-before-left (ComesFromMyRight) governs. A traffic-light variant
+    /// is planned (DRIVING_MANEUVERS.md R5) but not built.</summary>
+    static RoadNetwork BuildPlanarFig8(string prefix, string startName, bool rightOfWay)
+    {
+        var b = new MapBuilder();
+        double px = 250, py = 250;   // the crossing point P
+        const int N = 48;
+        for (int i = 0; i < N; i++)
+        {
+            if (i == 12 || i == 36) continue;   // both replaced by C below
+            double t = 2 * Math.PI * i / N;
+            b.Node($"{prefix}n{i}",
+                   Math.Round(px + 245 * Math.Cos(t), 1),
+                   Math.Round(py + 230 * Math.Sin(t) * Math.Cos(t), 1));
+        }
+        string c = $"{prefix}c";
+        b.Node(c, px, py);
+        string Id(int i) => i is 12 or 36 ? c : $"{prefix}n{i}";
+        for (int i = 0; i < N; i++)
+            b.Road(Id(i), Id((i + 1) % N));
+        if (rightOfWay)
+        {
+            // Road signs at the self-crossing: the SE-NW diagonal (arms
+            // n11/n13) is the PRIORITY road; cars entering C from the SW-NE
+            // diagonal (arms n35/n37) must YIELD. Without this, dense two-way
+            // flow deadlocks at C (right-before-left alone cannot untangle
+            // leaders stopped at the mouth with followers packed behind).
+            b.Sign($"{prefix}n11", c, SignType.Priority);
+            b.Sign($"{prefix}n13", c, SignType.Priority);
+            b.Sign($"{prefix}n35", c, SignType.Yield);
+            b.Sign($"{prefix}n37", c, SignType.Yield);
+        }
+        b.Start(startName, $"{prefix}n24", facing: $"{prefix}n25");   // leftmost point
+        return b.Build();
+    }
+
+    /// <summary>Planar figure-8 with right-of-way (Vorfahrt) signs at the
+    /// crossing (C = fig8c_c). Used by tests/fig8_fleet_check.py and the
+    /// two-way deadlock repro.</summary>
+    public static RoadNetwork BuildFig8CrossTestMap() =>
+        BuildPlanarFig8("fig8c_", "fig8_cross", rightOfWay: true);
+
+    /// <summary>Planar figure-8 with NO signs at the crossing: right-of-way
+    /// is the default right-before-left (Rechts vor Links). Same geometry as
+    /// BuildFig8CrossTestMap (C = fig8p_c).</summary>
+    public static RoadNetwork BuildFig8PlainTestMap() =>
+        BuildPlanarFig8("fig8p_", "fig8_plain", rightOfWay: false);
 }

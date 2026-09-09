@@ -11,9 +11,14 @@ public abstract record SimCommand;
 
 /// <summary>Teleport: default REPLACES the current car(s) (legacy behavior -
 /// e2e suite, cockpit); Add=true ADDS a fresh car alongside them (parallel
-/// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).</summary>
+/// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).
+/// Color (validated against Config.CAR_COLORS at the API layer) overrides
+/// the default uid-based color of the spawned car. Reverse=true spawns the
+/// car facing the OTHER way along the segment (two-way traffic); it starts
+/// in its own right-hand lane and drives the loop backwards.</summary>
 public sealed record TeleportCommand(string? StartPoint, int? Segment,
-                                     double? Progress, bool Add, double? Speed) : SimCommand;
+                                     double? Progress, bool Add, double? Speed,
+                                     string? Color = null, bool Reverse = false) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -21,7 +26,9 @@ public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
 /// <summary>"validator" is global; "breadcrumbs"/"mode" are per-car when a
 /// Uid is given (omit = primary/followed car).</summary>
 public sealed record ToggleCommand(bool? Breadcrumbs, bool? Validator,
-                                   string? Mode, int? Uid) : SimCommand;
+                                   string? Mode, int? Uid,
+                                   bool? Headlights = null, bool? Taillights = null,
+                                   bool? ClearBlinker = null) : SimCommand;
 
 /// <summary>Short per-car HUD text (e.g. "2/3"); Text=null clears.</summary>
 public sealed record LabelCommand(int? Uid, string? Text) : SimCommand;
@@ -86,12 +93,24 @@ public sealed class SimEngine
     private int? _followUid;                                       // PRIMARY car
     private bool _frozen;
 
+    /// <summary>Master switch for car-to-car collision detection + avoidance.
+    /// OFF = the two-pass collision machinery is skipped entirely (the legacy
+    /// single-pass loop). Toggled via --no-collisions.</summary>
+    public bool CollisionsEnabled = true;
+
     /// <summary>SIM CLOCK = total physics substeps executed (NOT the frame
     /// counter). A slow wall-clock frame runs 2 substeps in one iteration; if
     /// the exported clock only advanced per iteration, position and time would
     /// decouple. Tying the clock to the substeps keeps them consistent by
     /// construction.</summary>
     private long _simStepsTotal;
+
+    // Collision cost measurement (spec: microseconds/call, printed every 5s;
+    // budget context ~200 us/car/substep total). Stopwatch ticks accumulated
+    // per call, printed + reset every 300 substeps (5 sim-seconds at 60 Hz).
+    private long _avoidCapsTicks, _resolveTicks;
+    private int _avoidCapsCalls, _resolveCalls;
+    private const long CostReportEverySteps = 300;
     private double _physicsAccum;
     private readonly Dictionary<int, (double X, double Y, double Heading)> _prevRender = new();
 
@@ -242,12 +261,16 @@ public sealed class SimEngine
     /// Chord-based placement: exact on smooth tracks, but do NOT use it for
     /// sharp-corner segments - see SpawnPosition's note on why chord spawns
     /// sit off-pavement near hairpins. Used by POST /teleport {"segment": N}.</summary>
-    public Car CreateCarAtSegment(int segIdx, double progress = 0.5)
+    public Car CreateCarAtSegment(int segIdx, double progress = 0.5, bool reverse = false)
     {
         var seg = Network.Segments[segIdx];
         double x = seg.X1 + (seg.X2 - seg.X1) * progress;
         double y = seg.Y1 + (seg.Y2 - seg.Y1) * progress;
         double h = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
+        // Reverse spawn: face the other way along the same two-way road.
+        // The lane offset below is applied relative to the ACTUAL heading,
+        // so the car still starts in its own right-hand lane.
+        if (reverse) h = PosMod(h + 180.0, 360.0);
         double offsetM = Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
                                                 seg.ParkingLaneWidth, seg.Oneway);
         double rad = Math.Radians(h);
@@ -255,7 +278,7 @@ public sealed class SimEngine
         y -= Math.Sin(rad) * offsetM * Config.PIXELS_PER_METER;
         var car = new Car(x, y, h, segIdx, new BicycleDriver());
         car.Progress = progress;
-        car.Forward = true;
+        car.Forward = !reverse;
         car.LaneOffsetOverrideM = offsetM;
         car.TrailEnabled = true;
         car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
@@ -317,7 +340,8 @@ public sealed class SimEngine
             {
                 Car newCar;
                 if (tp.Segment is not null)
-                    newCar = CreateCarAtSegment(tp.Segment.Value, tp.Progress ?? 0.5);
+                    newCar = CreateCarAtSegment(tp.Segment.Value, tp.Progress ?? 0.5,
+                                                tp.Reverse);
                 else
                 {
                     if (!tp.Add)
@@ -327,6 +351,9 @@ public sealed class SimEngine
                 // Optional rolling start (m/s): the running turn tests spawn
                 // already moving instead of accelerating from a standstill.
                 if (tp.Speed is not null) newCar.Speed = tp.Speed.Value;
+                // Explicit color override (validated at the API layer);
+                // otherwise the uid-based palette assignment above stands.
+                if (!string.IsNullOrEmpty(tp.Color)) newCar.Color = tp.Color;
                 _cars[newCar.Uid] = newCar;
                 _carFlags[newCar.Uid] = new TestFlags();
                 // Unaddressed flags/label (legacy clients that set them before
@@ -366,6 +393,21 @@ public sealed class SimEngine
                 {
                     tcar.TrailEnabled = tg.Breadcrumbs.Value;
                     Console.WriteLine($"API: Breadcrumbs {(tcar.TrailEnabled ? "ON" : "OFF")} (car #{tuid})");
+                }
+                if (tg.Headlights is not null && tcar is not null)
+                {
+                    tcar.HeadlightsOn = tg.Headlights.Value;
+                    Console.WriteLine($"API: Headlights {(tcar.HeadlightsOn ? "ON" : "OFF")} (car #{tuid})");
+                }
+                if (tg.Taillights is not null && tcar is not null)
+                {
+                    tcar.TaillightsOn = tg.Taillights.Value;
+                    Console.WriteLine($"API: Taillights {(tcar.TaillightsOn ? "ON" : "OFF")} (car #{tuid})");
+                }
+                if (tg.ClearBlinker == true && tcar?.Driver is BicycleDriver clearDrv)
+                {
+                    clearDrv.ClearTurnSignal();
+                    Console.WriteLine($"API: Blinker cleared (car #{tuid})");
                 }
                 if (tg.Validator is not null)
                 {
@@ -595,54 +637,183 @@ public sealed class SimEngine
                 _physicsAccum -= DtFixed;
                 stepsThisFrame++;
                 _simStepsTotal++;
-                // ALL cars step together in the same substep (shared
-                // accumulator): every car advances exactly DtFixed per
-                // substep, so a multi-car run is deterministic like the
-                // single-car one.
-                foreach (var c in _cars.Values)
+                if (CollisionsEnabled && _cars.Count > 1)
                 {
-                    _prevRender[c.Uid] = (c.X, c.Y, c.Heading);
-                    double preX = c.X, preY = c.Y, preH = c.Heading;
-                    c.Update(DtFixed, Network, carControl.GetValueOrDefault(c.Uid, ControlInput.Empty));
-
-                    // Stop-on-contact with obstacles (ALL modes): brake at
-                    // full braking and clamp so the body box never
-                    // interpenetrates an obstacle - the car rests against it.
-                    bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH);
-
-                    // Physics validation (independent check). While in contact
-                    // the motion is externally constrained by a solid object,
-                    // so the validator suspends the turning-radius invariant
-                    // for that frame - jump/snap/off-road checks keep running.
-                    Validator.Check(c, DtFixed, Network, inContact: inContact);
-
-                    // Lane guard: wrong-side driving (skipped during active
-                    // turns - lateral offset from the incoming centreline is
-                    // expected; and for the whole U-turn, where crossing the
-                    // centreline is INTENDED).
-                    var nav = c.BicycleNav;
-                    bool inTurn = nav is not null && nav.InTurnBlendZone(nav.S);
-                    bool uturnNow = nav is not null && nav.UturnActive;
-                    bool onWrongSide = false;
-                    if (!inTurn && !uturnNow)
-                        onWrongSide = LaneGuard.Check(c, DtFixed, Network);
-
-                    // Off-road check (FREE mode only): stop the car + warning.
-                    bool freeOffRoad = false;
-                    if (c.Driver!.GetName() == "FREE")
+                    // TWO-PASS collision substep. Loop A advances every car and
+                    // applies the avoidance speed cap + obstacle contact; then
+                    // Resolve rolls back any overlapping pair to its pre-step
+                    // pose and stops it; loop B validates + lane-guards the
+                    // FINAL post-resolution state (the validator must never see
+                    // a transient overlap - single-pass was discarded for this).
+                    var prevPose = new Dictionary<int, (double X, double Y, double Heading)>(
+                        _cars.Count);
+                    foreach (var c in _cars.Values)
                     {
-                        freeOffRoad = !c.IsOnRoad(Network);
-                        if (freeOffRoad) c.Speed = 0;
-                        // Map edge check.
-                        if (c.X < 0 || c.X > Network.WorldWidth ||
-                            c.Y < 0 || c.Y > Network.WorldHeight)
-                        {
-                            c.Speed = 0;
-                            c.X = Math.Clamp(c.X, 0, Network.WorldWidth);
-                            c.Y = Math.Clamp(c.Y, 0, Network.WorldHeight);
-                        }
+                        _prevRender[c.Uid] = (c.X, c.Y, c.Heading);
+                        prevPose[c.Uid] = (c.X, c.Y, c.Heading);
                     }
-                    _perCarState[c.Uid] = (onWrongSide, freeOffRoad);
+                    long tAvoid0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var avoidCaps = CarCollisions.ComputeAvoidCaps(_cars.Values, Network,
+                                                                   _simStepsTotal * DtFixed);
+                    _avoidCapsTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tAvoid0;
+                    _avoidCapsCalls++;
+                    foreach (var c in _cars.Values)
+                    {
+                        double preX = c.X, preY = c.Y, preH = c.Heading;
+                        double preSpeed = c.Speed;
+                        var control = carControl.GetValueOrDefault(c.Uid, ControlInput.Empty);
+                        // If avoidance already forbids exceeding my CURRENT
+                        // speed, don't hand the driver an accelerate signal
+                        // at all: Update() advances X/Y using whatever speed
+                        // IT sets internally (e.g. BicycleNav's standstill
+                        // creep, which nudges forward while accelerate is
+                        // held even at the speed cap) BEFORE the cap below
+                        // ever runs - so a persistent throttle would creep
+                        // the car forward every substep instead of resting.
+                        if (avoidCaps.TryGetValue(c.Uid, out double preCap) && preSpeed >= preCap - 0.02)
+                            control = new ControlInput
+                            {
+                                Accelerate = false, Brake = control.Brake,
+                                SteerLeft = control.SteerLeft, SteerRight = control.SteerRight,
+                                BlinkerLeft = control.BlinkerLeft, BlinkerRight = control.BlinkerRight,
+                                AcceleratePressed = control.AcceleratePressed,
+                                BrakePressed = control.BrakePressed,
+                            };
+                        c.Update(DtFixed, Network, control);
+                        if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
+                            Console.WriteLine($"POST-UPD uid{c.Uid} v={c.Speed:F4}");
+
+                        // Stop-on-contact with obstacles (ALL modes): brake at
+                        // full braking and clamp so the body box never
+                        // interpenetrates an obstacle - the car rests against it.
+                        Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH);
+                        if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
+                            Console.WriteLine($"POST-CONTACT uid{c.Uid} v={c.Speed:F4}");
+
+                        // Car-to-car avoidance: cap to the fastest speed from
+                        // which CAR_BRAKING still stops behind the nearest car
+                        // in my forward corridor (pre-step positions). Applied
+                        // AFTER the driver's own longitudinal logic ran, so it
+                        // works for every driver without touching their code.
+                        // Decel-limited from the PRE-UPDATE speed, not the
+                        // driver's output: the driver still thinks it can
+                        // accelerate (it doesn't know about the other car) and
+                        // adds a small amount BEFORE this runs; braking from
+                        // its bumped-up output nets less than CAR_BRAKING of
+                        // actual deceleration and overshoots the standstill
+                        // gap. Braking from the pre-substep speed guarantees
+                        // the full CAR_BRAKING rate whenever the cap binds.
+                        if (avoidCaps.TryGetValue(c.Uid, out double cap))
+                        {
+                            double ceiling = Math.Max(cap, preSpeed - Config.CAR_BRAKING * DtFixed);
+                            if (c.Speed > ceiling) c.Speed = ceiling;
+                            // The cap IS this car's brake: when it actively holds
+                            // the car down - clamping speed, or holding it at rest
+                            // against a stopped leader / yield line - the driver
+                            // has their foot on the brake, so the light comes on.
+                            // The cap is a smooth function of gap, so the light
+                            // stays steady (no tick-rate flicker); free flow has
+                            // no binding cap and stays dark.
+                            bool held = c.Speed >= ceiling - 0.02;
+                            if (held && (preSpeed > ceiling + 0.02 || ceiling < 1.0))
+                                c.IsBraking = true;
+                        }
+                        if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
+                            Console.WriteLine($"POST-CAP uid{c.Uid} v={c.Speed:F4}");
+                    }
+                    // Speed of every car AFTER the step + cap but BEFORE
+                    // Resolve's rollback zeroes it - this is the impact speed
+                    // the crash decision log reports.
+                    var impactSpeed = new Dictionary<int, double>(_cars.Count);
+                    foreach (var c in _cars.Values) impactSpeed[c.Uid] = c.Speed;
+                    long tResolve0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    HashSet<int> inContact = CarCollisions.Resolve(_cars.Values, prevPose,
+                                                                   _simStepsTotal * DtFixed,
+                                                                   impactSpeed);
+                    if ((inContact.Contains(37) || inContact.Contains(38)) && Frame is >= 845 and <= 852)   // TEMPORARY
+                        Console.WriteLine($"RESOLVE-STOPPED 37/38: {string.Join(",", inContact)}");
+                    _resolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tResolve0;
+                    _resolveCalls++;
+
+                    foreach (var c in _cars.Values)
+                        Validator.Check(c, DtFixed, Network,
+                                        inContact: inContact.Contains(c.Uid));
+                    foreach (var c in _cars.Values)
+                    {
+                        var nav = c.BicycleNav;
+                        bool inTurn = nav is not null && nav.InTurnBlendZone(nav.S);
+                        bool uturnNow = nav is not null && nav.UturnActive;
+                        bool onWrongSide = false;
+                        if (!inTurn && !uturnNow)
+                            onWrongSide = LaneGuard.Check(c, DtFixed, Network);
+
+                        // Off-road check (FREE mode only): stop the car + warning.
+                        bool freeOffRoad = false;
+                        if (c.Driver!.GetName() == "FREE")
+                        {
+                            freeOffRoad = !c.IsOnRoad(Network);
+                            if (freeOffRoad) c.Speed = 0;
+                            // Map edge check.
+                            if (c.X < 0 || c.X > Network.WorldWidth ||
+                                c.Y < 0 || c.Y > Network.WorldHeight)
+                            {
+                                c.Speed = 0;
+                                c.X = Math.Clamp(c.X, 0, Network.WorldWidth);
+                                c.Y = Math.Clamp(c.Y, 0, Network.WorldHeight);
+                            }
+                        }
+                        _perCarState[c.Uid] = (onWrongSide, freeOffRoad);
+                    }
+                    if (_simStepsTotal % CostReportEverySteps == 0) ReportCollisionCost();
+                }
+                else
+                {
+                    // Legacy single pass (collisions disabled or one car).
+                    foreach (var c in _cars.Values)
+                    {
+                        _prevRender[c.Uid] = (c.X, c.Y, c.Heading);
+                        double preX = c.X, preY = c.Y, preH = c.Heading;
+                        c.Update(DtFixed, Network, carControl.GetValueOrDefault(c.Uid, ControlInput.Empty));
+
+                        // Stop-on-contact with obstacles (ALL modes): brake at
+                        // full braking and clamp so the body box never
+                        // interpenetrates an obstacle - the car rests against it.
+                        bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH);
+
+                        // Physics validation (independent check). While in contact
+                        // the motion is externally constrained by a solid object,
+                        // so the validator suspends the turning-radius invariant
+                        // for that frame - jump/snap/off-road checks keep running.
+                        Validator.Check(c, DtFixed, Network, inContact: inContact);
+
+                        // Lane guard: wrong-side driving (skipped during active
+                        // turns - lateral offset from the incoming centreline is
+                        // expected; and for the whole U-turn, where crossing the
+                        // centreline is INTENDED).
+                        var nav = c.BicycleNav;
+                        bool inTurn = nav is not null && nav.InTurnBlendZone(nav.S);
+                        bool uturnNow = nav is not null && nav.UturnActive;
+                        bool onWrongSide = false;
+                        if (!inTurn && !uturnNow)
+                            onWrongSide = LaneGuard.Check(c, DtFixed, Network);
+
+                        // Off-road check (FREE mode only): stop the car + warning.
+                        bool freeOffRoad = false;
+                        if (c.Driver!.GetName() == "FREE")
+                        {
+                            freeOffRoad = !c.IsOnRoad(Network);
+                            if (freeOffRoad) c.Speed = 0;
+                            // Map edge check.
+                            if (c.X < 0 || c.X > Network.WorldWidth ||
+                                c.Y < 0 || c.Y > Network.WorldHeight)
+                            {
+                                c.Speed = 0;
+                                c.X = Math.Clamp(c.X, 0, Network.WorldWidth);
+                                c.Y = Math.Clamp(c.Y, 0, Network.WorldHeight);
+                            }
+                        }
+                        _perCarState[c.Uid] = (onWrongSide, freeOffRoad);
+                    }
                 }
             }
         }
@@ -726,6 +897,23 @@ public sealed class SimEngine
         UpdateState(followed, stepsThisFrame);
     }
 
+    /// <summary>Stopwatch-based cost of the collision system, printed every
+    /// CostReportEverySteps substeps (5 sim-seconds at 60 Hz) then reset.
+    /// Budget context: ~200 us/car/substep total (spec).</summary>
+    private void ReportCollisionCost()
+    {
+        double freq = System.Diagnostics.Stopwatch.Frequency;
+        double usAvoid = _avoidCapsCalls > 0
+            ? _avoidCapsTicks / freq * 1_000_000.0 / _avoidCapsCalls : 0.0;
+        double usResolve = _resolveCalls > 0
+            ? _resolveTicks / freq * 1_000_000.0 / _resolveCalls : 0.0;
+        Console.WriteLine($"[collision cost] ComputeAvoidCaps {usAvoid:F1} us/call, " +
+                          $"Resolve {usResolve:F1} us/call ({_cars.Count} cars, " +
+                          $"{_avoidCapsCalls} substeps)");
+        _avoidCapsTicks = 0; _resolveTicks = 0;
+        _avoidCapsCalls = 0; _resolveCalls = 0;
+    }
+
     // --- State export (the /state payload) ------------------------------------------
 
     private static double DistanceToJunction(Car car, RoadNetwork net)
@@ -800,7 +988,12 @@ public sealed class SimEngine
                 ["blinker_left"] = c.Driver is BicycleDriver bl ? bl.BlinkerLeft : false,
                 ["blinker_right"] = c.Driver is BicycleDriver br ? br.BlinkerRight : false,
                 ["hazard"] = hazard,
+                ["braking"] = c.IsBraking,
+                ["headlights_on"] = c.HeadlightsOn,
+                ["taillights_on"] = c.TaillightsOn,
                 ["color"] = c.Color,
+                // Driver class for the renderer's click-to-inspect info window.
+                ["driver"] = c.Driver?.GetName() ?? "NONE",
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(c.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(c.Uid, out var tf) ? tf.HudLabel : null,
             });
@@ -846,6 +1039,7 @@ public sealed class SimEngine
                 ["heading"] = car.Heading,
                 ["speed"] = car.Speed,
                 ["speed_kmh"] = car.Speed * 3.6,
+                ["driver"] = car.Driver?.GetName() ?? "NONE",
                 ["segment"] = car.SegIdx,
                 // Vertical level of the current segment (0 = ground, 1 =
                 // bridge): the renderer z-orders the car above its own deck

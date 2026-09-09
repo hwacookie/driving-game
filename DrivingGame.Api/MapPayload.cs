@@ -61,6 +61,38 @@ public static class MapPayload
             });
         }
 
+        // Road signs: precomputed screen position (metres) + approach
+        // heading so the renderer just draws. Placed 8 m before the signed
+        // node, OUTSIDE the curb on the right of the direction of travel -
+        // signs are painted on the side of the road, never on the pavement
+        // (a sign in the driving lane reads as an obstacle).
+        var signs = new List<Dictionary<string, object?>>();
+        foreach (var ((segIdx, nodeId), type) in net.Signs)
+        {
+            if (!net.Nodes.TryGetValue(nodeId, out var nxy)) continue;
+            var s = net.Segments[segIdx];
+            // Direction of travel toward the signed node.
+            double dx = (nodeId == s.EndNode ? s.X2 - s.X1 : s.X1 - s.X2) / pppm;
+            double dy = (nodeId == s.EndNode ? s.Y2 - s.Y1 : s.Y1 - s.Y2) / pppm;
+            double len = Math.Max(Math.Sqrt(dx * dx + dy * dy), 1e-6);
+            double fx = dx / len, fy = dy / len;          // forward (toward node)
+            double rx = fy, ry = -fx;                     // right of travel
+            // CurbGapM keeps the (oversized, ~2.5 m wide) sign fully OFF the
+            // pavement: half road width + gap - signHalfWidth > 0.
+            const double BeforeNodeM = 8.0, CurbGapM = 1.5;
+            // Right of the curb: half the road width plus a small gap onto
+            // the shoulder, so the sign sits beside the lane, not in it.
+            double sideOffsetM = s.Width / 2.0 + CurbGapM;
+            double x = nxy.X / pppm - fx * BeforeNodeM + rx * sideOffsetM;
+            double y = nxy.Y / pppm - fy * BeforeNodeM + ry * sideOffsetM;
+            signs.Add(new Dictionary<string, object?>
+            {
+                ["x"] = Math.Round(x, 2), ["y"] = Math.Round(y, 2),
+                ["heading_deg"] = Math.Round(Math.Atan2(fx, fy) * 180.0 / Math.PI, 1),
+                ["type"] = type == SignType.Yield ? "yield" : "priority",
+            });
+        }
+
         var startPoints = new Dictionary<string, object?>();
         foreach (var (name, (x, y, hdg, seg, fwd, lat)) in net.StartPoints)
             startPoints[name] = new Dictionary<string, object?>
@@ -118,6 +150,7 @@ public static class MapPayload
             ["oneway_arrows"] = net.GetOnewayArrows().Select(M).ToList(),
             ["parking_marks"] = net.GetParkingMarks().Select(M).ToList(),
             ["junctions"] = junctions,
+            ["signs"] = signs,
             ["junction_dot_radius_m"] = Config.JUNCTION_DOT_RADIUS_M,
             ["marking_style"] = new Dictionary<string, object?>
             {

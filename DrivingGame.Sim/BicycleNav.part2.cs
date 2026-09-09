@@ -162,6 +162,8 @@ public sealed partial class BicycleNav
         var rounded = RoadNetworkGeometry.RoundPolylineCorners(
             raw, CORNER_RADIUS_M * RefLineMath.PPPM,
             arcSteps: CORNER_ARC_STEPS, fitEdges: true);
+        if (_car.Uid is 37 or 38)   // TEMPORARY kink hunt
+            DbgDumpStage("rounded", rounded, "fig8c_c");
         if (_dest is not null)
         {
             // Cut BEFORE solve_line: the pull-over drift blend in
@@ -192,9 +194,16 @@ public sealed partial class BicycleNav
         var sol = Raceline.SolveLine(_network, rounded, RouteSegments().ToList(),
                                      baseOffset: autoBase ? null : baseOffset,
                                      autoBase: autoBase);
+        if (_car.Uid is 37 or 38)   // TEMPORARY kink hunt
+        {
+            DbgDumpStage("solved", sol.Points, "fig8c_c");
+            DbgDumpPN("pn", sol.Points, sol.Normals, sol.Offsets, "fig8c_c");
+        }
         var lane = ApplyEndBlends(sol.Points, sol.Normals, sol.Offsets, sol.Cum,
                                   edgeOffset: maxOffset,
                                   pullingOver: pullingOver, pullingOut: pullingOut);
+        if (_car.Uid is 37 or 38)   // TEMPORARY kink hunt
+            DbgDumpStage("lane", lane, "fig8c_c");
         if (_dest is not null)
         {
             // Red-flag destination: the line ENDS there - parking ramp, kerb
@@ -318,6 +327,30 @@ public sealed partial class BicycleNav
                 RebuildStraightPast(pullingOver, pullingOut);
             }
         }
+    }
+
+    // TEMPORARY kink hunt: dump line points near a node after each stage.
+    private void DbgDumpStage(string stage, List<(double X, double Y)> pts, string nodeId)
+    {
+        if (!_network.Nodes.TryGetValue(nodeId, out var cxy)) return;
+        var near = new List<string>();
+        for (int i = 0; i < pts.Count; i++)
+            if (Math.Hypot(pts[i].X - cxy.X, pts[i].Y - cxy.Y) < 12.0 * RefLineMath.PPPM)
+                near.Add($"({pts[i].X / RefLineMath.PPPM:F2},{pts[i].Y / RefLineMath.PPPM:F2})");
+        Console.WriteLine($"[DBGLINE uid{_car.Uid} {stage}] " + string.Join(" ", near));
+    }
+
+    // TEMPORARY kink hunt: dump P/N/offsets near a node.
+    private void DbgDumpPN(string stage, List<(double X, double Y)> P,
+        List<(double X, double Y)> N, double[] offs, string nodeId)
+    {
+        if (!_network.Nodes.TryGetValue(nodeId, out var cxy)) return;
+        var near = new List<string>();
+        for (int i = 0; i < P.Count; i++)
+            if (Math.Hypot(P[i].X - cxy.X, P[i].Y - cxy.Y) < 8.0 * RefLineMath.PPPM)
+                near.Add($"i{i}:P({P[i].X / RefLineMath.PPPM:F2},{P[i].Y / RefLineMath.PPPM:F2})" +
+                         $"N({N[i].X:F3},{N[i].Y:F3})o{offs[i]:F3}");
+        Console.WriteLine($"[DBGPN uid{_car.Uid} {stage}] " + string.Join(" ", near));
     }
 
     /// <summary>Re-plan through the upcoming junction WITHOUT the signalled

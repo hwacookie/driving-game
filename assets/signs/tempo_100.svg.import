@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bv7lpbpu60wyl"
-path="res://.godot/imported/car_64x128_white.png-a9a9a0c85fa3aae84361daed3fcdebff.ctex"
+uid="uid://cwcd1sns52lfw"
+path="res://.godot/imported/tempo_100.svg-c5539d418e52e2e86550dd8a0f89692d.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/car_64x128_white.png"
-dest_files=["res://.godot/imported/car_64x128_white.png-a9a9a0c85fa3aae84361daed3fcdebff.ctex"]
+source_file="res://assets/signs/tempo_100.svg"
+dest_files=["res://.godot/imported/tempo_100.svg-c5539d418e52e2e86550dd8a0f89692d.ctex"]
 
 [params]
 
@@ -38,3 +38,6 @@ process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
 detect_3d/compress_to=1
+svg/scale=1.0
+editor/scale_with_editor_scale=false
+editor/convert_colors_with_editor_theme=false

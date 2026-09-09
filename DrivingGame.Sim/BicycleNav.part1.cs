@@ -50,20 +50,29 @@ public sealed partial class BicycleNav
 
     public static readonly double MAX_STEER = Math.Radians(38.0);   // mechanical steering limit
 
-    /// <summary>Lateral-accel budget. Sets BOTH the cornering speed the
-    /// profile plans (v = sqrt(A_LAT_MAX / kappa)) and the understeer cap on
-    /// the heading rate, so the car is never handed a speed it cannot hold.
-    /// Well under the ~8 m/s^2 the tyres could actually give.</summary>
-    public const double A_LAT_MAX = 4.5;           // m/s^2 lateral-accel cap (understeer)
+    /// <summary>Lateral-accel budget of THIS car's class. Sets BOTH the
+    /// cornering speed the profile plans (v = sqrt(A_LAT_MAX / kappa)) and
+    /// the understeer cap on the heading rate, so the car is never handed a
+    /// speed it cannot hold. Well under the ~8 m/s^2 the tyres could actually
+    /// give; trucks get a clearly lower budget (rollover threshold ~0.4-0.5 g
+    /// vs >1 g for cars - see Config.VEHICLE_CLASS_SPECS). Set in the ctor.</summary>
+    private readonly double A_LAT_MAX;
 
     /// <summary>The speed profile plans against only a FRACTION of that cap,
     /// leaving the controller authority to correct with: any tracking error
     /// becomes permanent at the full value.</summary>
     public const double A_LAT_PLAN_FRACTION = 0.7;
 
-    public static readonly double A_CRUISE = Config.CAR_ACCELERATION;   // m/s^2 (2.8)
-    public static readonly double A_BRAKE = Config.CAR_BRAKING;         // m/s^2 (10.0)
-    public static readonly double V_MAX = Config.CAR_SPEED;             // m/s (55.6)
+    /// <summary>Longitudinal acceleration of THIS car's class (m/s²) - set in
+    /// the ctor from Car.Spec (was the shared Config.CAR_ACCELERATION).</summary>
+    private readonly double A_CRUISE;
+    public static readonly double A_BRAKE = Config.CAR_BRAKING;         // m/s^2 (10.0) - same for all classes
+    /// <summary>How far ahead the sailing decision looks at the speed profile
+    /// when asking "can coasting keep up?" (s).</summary>
+    public const double SAIL_LOOKAHEAD_S = 0.5;
+    /// <summary>Top speed of THIS car's class (m/s) - set in the ctor from
+    /// Car.Spec (was the shared Config.CAR_SPEED).</summary>
+    private readonly double V_MAX;
 
     /// <summary>Speed the car arrives at any real junction (degree >= 3).
     /// Slow enough that a turn signaled ANYWHERE inside the approach ramp is
@@ -225,6 +234,11 @@ public sealed partial class BicycleNav
     private readonly RoadNetwork _network;
 
     private RefLine? _ref;
+
+    /// <summary>The car's active reference line (null without a route).
+    /// Collision avoidance v2 advances along it when predicting positions;
+    /// callers clamp the sample to <c>min(S + d, Total)</c>.</summary>
+    public RefLine? Ref => _ref;
     private List<string> _route = new();
     private (int SegIdx, string Turn, bool PullingOver, bool PullingOut)? _routeKey;
     public HashSet<int> RouteSegSet { get; private set; } = new();
@@ -242,6 +256,27 @@ public sealed partial class BicycleNav
     private double[] _profile = Array.Empty<double>();
     /// <summary>The car's arc position on the reference line (m).</summary>
     public double S { get; private set; }
+
+    // TEMPORARY debug hook (remove after use): longitudinal state snapshot,
+    // refreshed every Update() - for diagnosing unexplained standstills.
+    public (double S, double Total, string? PlanPhase, double DeltaDeg, double ProfileV,
+            bool AccelIn, double VTargetUsed, double AccelScaleFinal)
+        DbgState { get; private set; }
+
+    // TEMPORARY debug: speed left by Update() (vs. post-tick value).
+    public double DbgSpeedAtEnd { get; private set; }
+
+    /// <summary>Speed profile (m/s) at arc position s - the speed this car
+    /// would hold there if accelerating freely. Used by the sign rule's gap
+    /// acceptance to estimate crossing time.</summary>
+    public double SpeedProfileAt(double s) => TargetSpeed(s);
+
+    // TEMPORARY debug: route + local refline geometry at S.
+    public List<string> DbgRoute => _route;
+    public double DbgCurvAtS => _ref?.CurvatureAt(S) ?? 0.0;
+    public (double X, double Y) DbgPointAtS =>
+        _ref is null ? (0.0, 0.0) : _ref.PointAt(S);
+    public double DbgHeadingAtS => _ref?.HeadingAt(S) ?? 0.0;
 
     /// <summary>Frames of pull-out left (0 = not pulling out). Spawn is in
     /// the driving position, so this starts at 0 - the machinery stays for
@@ -286,8 +321,8 @@ public sealed partial class BicycleNav
     /// lane change is pending/active (null = no lane-change signal).</summary>
     public string? LaneChangeSignal { get; private set; }
 
-    // Cruise at the car's top speed on straights.
-    private readonly double _cruise = V_MAX;
+    // Cruise at the car's class top speed on straights (set in the ctor).
+    private double _cruise;
 
     // Explicit destination (world coords, e.g. the red end flag).
     private (double X, double Y)? _dest;
@@ -310,6 +345,10 @@ public sealed partial class BicycleNav
     {
         _car = car;
         _network = network;
+        A_CRUISE = car.AccelMps2;
+        V_MAX = car.TopSpeedMps;
+        A_LAT_MAX = car.LatAccelMax;
+        _cruise = car.TopSpeedMps;
     }
 
     // ====================================================================

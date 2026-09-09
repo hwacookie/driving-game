@@ -53,6 +53,14 @@ public sealed record PolygonRing(List<(double X, double Y)> Exterior,
 /// <summary>A color group of road polygons for rendering.</summary>
 public sealed record RoadPolygonGroup((int R, int G, int B) Color, List<PolygonRing> Rings);
 
+/// <summary>Road sign types. Yield = "Vorfahrt gewähren": a car driving
+/// on the signed segment toward the signed node must yield to traffic on
+/// the priority road at that node before entering it (deterministic
+/// resolution of uncontrolled crossings - right-before-left alone deadlocks
+/// under dense two-way flow). Priority = marker for the main road itself
+/// (rendering + the yield rule's reference).</summary>
+public enum SignType { Yield, Priority }
+
 /// <summary>
 /// The road graph with nodes, segments and connectivity. Ported from
 /// /Users/hauke/prj/car/src/road_network.py.
@@ -60,6 +68,10 @@ public sealed record RoadPolygonGroup((int R, int G, int B) Color, List<PolygonR
 public class RoadNetwork
 {
     public Dictionary<string, (double X, double Y)> Nodes { get; private set; } = new();
+    /// <summary>Road signs keyed by (segment index, node being approached):
+    /// a car on that segment driving TOWARD that node must obey the sign
+    /// before entering it. Empty for maps without signs.</summary>
+    public Dictionary<(int SegIdx, string NodeId), SignType> Signs { get; } = new();
     public List<RoadSegment> Segments { get; private set; } = new();
     public double OriginLat { get; init; }
     public double OriginLon { get; init; }

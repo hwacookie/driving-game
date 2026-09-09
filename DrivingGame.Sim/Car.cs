@@ -30,8 +30,21 @@ public class Car
     public int Uid { get; }
 
     /// <summary>Display color (multi-car): assigned deterministically from
-    /// the uid by the main loop; "red" is the player default.</summary>
-    public string Color { get; set; } = "red";
+    /// the uid by the main loop; "blue" (the sedan) is the default.</summary>
+    public string Color { get; set; } = "blue";
+
+    /// <summary>Dynamics of this car's vehicle class (top speed, accel,
+    /// cornering budget) - see Config.VEHICLE_CLASS_SPECS.</summary>
+    public Config.VehicleSpec Spec => Config.SpecForColor(Color);
+    public double TopSpeedMps => Spec.TopSpeedMps;
+    public double AccelMps2 => Spec.AccelMps2;
+    public double LatAccelMax => Spec.LatAccelMax;
+
+    /// <summary>Physical footprint of this car's sprite class (width × length,
+    /// metres) - the same table the renderer draws from (Config.VEHICLE_SIZES).</summary>
+    public (double WidthM, double LengthM) Size => Config.SizeForColor(Color);
+    public double WidthM => Size.WidthM;
+    public double LengthM => Size.LengthM;
 
     // Position and orientation (world pixels; heading degrees, 0 = north)
     public double X { get; internal set; }
@@ -73,6 +86,81 @@ public class Car
     // Visual state
     public bool IsBraking { get; internal set; }
     public bool IsAccelerating { get; internal set; }
+    /// <summary>Headlights (front, white) on/off - test + REST /toggle only,
+    /// no gameplay effect. Independent of TaillightsOn so a QA script can
+    /// isolate each light.</summary>
+    public bool HeadlightsOn { get; set; }
+    /// <summary>Taillights (rear, dark red) on/off - independent of
+    /// HeadlightsOn. Shows bright red instead while IsBraking, regardless
+    /// of this flag (a real brake light works even with the lights off).</summary>
+    public bool TaillightsOn { get; set; }
+
+    // --- Driver decision log -------------------------------------------------
+    // EVENTS, not per-frame samples: one entry each time the reason this car
+    // is being held back CHANGES (new threat, threat gone, ...). The
+    // frontend's car-detail window shows the tail of this list, so a stuck
+    // car always answers "why am I stopped?".
+    public sealed class CarDecision
+    {
+        public double T;      // sim time (s)
+        public string Msg = "";
+    }
+    private readonly object _decLock = new();
+    public const int MaxDecisions = 100;
+    public List<CarDecision> Decisions { get; } = new();
+
+    public void RecordDecision(double simTime, string msg)
+    {
+        lock (_decLock)
+        {
+            Decisions.Add(new CarDecision { T = simTime, Msg = msg });
+            if (Decisions.Count > MaxDecisions) Decisions.RemoveAt(0);
+        }
+    }
+
+    /// <summary>Copy for API consumers - the sim thread mutates the list at
+    /// 60 Hz while HTTP threads read it.</summary>
+    public List<CarDecision> DecisionsSnapshot()
+    {
+        lock (_decLock) return new List<CarDecision>(Decisions);
+    }
+
+    /// <summary>Key of the avoidance cap active on the PREVIOUS substep
+    /// ("avoid#12" = car 12 in my path - following, head-on or predicted
+    /// crossing; "sign#C#12" = yield sign, car 12 at the crossing);
+    /// null = free. Maintained by CarCollisions.ComputeAvoidCaps, which
+    /// logs a decision only when this key TRANSITIONS.</summary>
+    public string? ActiveCapKey { get; internal set; }
+
+    /// <summary>Node id of the last crossing this car committed to (nose
+    /// past the yield stop line) - logs one decision entry per crossing,
+    /// not per tick. Set by CarCollisions.ComputeAvoidCaps.</summary>
+    public string? CrossingCommittedNode { get; internal set; }
+
+    /// <summary>True while this car is in body contact with another car
+    /// (car-to-car Resolve). Lets Resolve log the crash + flash the hazard
+    /// lights ONCE per contact episode instead of every 60 Hz substep while
+    /// a pair stays pinned in contact.</summary>
+    public bool InContact { get; internal set; }
+    public int ContactWith { get; internal set; }
+
+    // --- Staged (human-like) PRIORITY response --------------------------
+    // A priority-road car that detects a predicted crossing conflict does NOT
+    // brake immediately: it becomes alert and watches AlertOtherUid. It only
+    // brakes if that car fails to yield (the TTC stops improving) for the
+    // grace period, or if it is already too late to stop (self-protection).
+    // Holding a stable state instead of flickering is what stops the
+    // tick-to-tick brake/resume flutter that gridlocked the signed crossing.
+    /// <summary>Uid of the car this car is watching (0 = not alert).</summary>
+    public int AlertOtherUid { get; internal set; }
+    public double AlertStartT { get; internal set; }
+    public double AlertLastTtc { get; internal set; }
+    internal void ClearAlert()
+    {
+        AlertOtherUid = 0;
+        AlertStartT = 0.0;
+        AlertLastTtc = 0.0;
+    }
 
     // Debug trail (breadcrumbs)
     public List<(double X, double Y, double Heading)> Trail { get; } = new();
@@ -147,24 +235,24 @@ public class Car
         if (Speed > 0)                         // moving forward
         {
             if (brake) Speed -= Config.CAR_BRAKING * dt;
-            else if (accel) Speed += Config.CAR_ACCELERATION * dt;
+            else if (accel) Speed += AccelMps2 * dt;
             if (Speed < 0) Speed = 0.0;        // braking ends exactly at zero
         }
         else if (Speed < 0)                    // moving backward
         {
             if (accel) Speed += Config.CAR_BRAKING * dt;   // W is the brake in reverse
-            else if (brake) Speed -= Config.CAR_ACCELERATION * dt; // S is the throttle in reverse
+            else if (brake) Speed -= AccelMps2 * dt; // S is the throttle in reverse
             if (Speed > 0) Speed = 0.0;        // ...and ends exactly at zero
         }
         else                                   // standstill: shifting + throttle
         {
             if (control.BrakePressed) _gear = "rev";
             else if (control.AcceleratePressed) _gear = "fwd";
-            if (_gear == "rev" && brake) Speed -= Config.CAR_ACCELERATION * dt;
-            else if (_gear == "fwd" && accel) Speed += Config.CAR_ACCELERATION * dt;
+            if (_gear == "rev" && brake) Speed -= AccelMps2 * dt;
+            else if (_gear == "fwd" && accel) Speed += AccelMps2 * dt;
         }
 
-        Speed = Math.Max(-Config.REVERSE_MAX_SPEED_M, Math.Min(Config.CAR_SPEED, Speed));
+        Speed = Math.Max(-Config.REVERSE_MAX_SPEED_M, Math.Min(TopSpeedMps, Speed));
         // Deadband so the car doesn't oscillate around 0 when neither gear
         // input is held.
         if (!accel && !brake && Math.Abs(Speed) < 0.05) Speed = 0.0;
@@ -187,7 +275,7 @@ public class Car
         if (Math.Abs(Speed) > 0 && Math.Abs(_steerPos) > 1e-6)
         {
             double speedAbs = Math.Abs(Speed);
-            double turnFactor = Math.Max(0.3, 1.0 - speedAbs / Config.CAR_SPEED * 0.7);
+            double turnFactor = Math.Max(0.3, 1.0 - speedAbs / TopSpeedMps * 0.7);
             double turnRate = Config.CAR_TURN_SPEED * turnFactor * dt;
             // A real car's yaw rate at FULL lock is v / R_min (the bicycle
             // model): the fixed arcade rate above would imply a turning

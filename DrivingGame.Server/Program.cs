@@ -14,6 +14,7 @@ using DrivingGame.Api;
 string? mapName = null, startName = null;
 int apiPort = 5000, smokeFrames = 0;
 bool measureSleep = false;
+bool collisionsEnabled = true;
 // NB: C# top-level `args` does NOT include the program name (unlike Python's
 // sys.argv) - start at 0.
 for (int i = 0; i < args.Length; i++)
@@ -25,6 +26,7 @@ for (int i = 0; i < args.Length; i++)
         case "--port": if (i + 1 < args.Length) apiPort = int.Parse(args[++i]); break;
         case "--smoke": if (i + 1 < args.Length) smokeFrames = int.Parse(args[++i]); break;
         case "--measure-sleep": measureSleep = true; break;
+        case "--no-collisions": collisionsEnabled = false; break;
     }
 }
 
@@ -101,7 +103,7 @@ var obstacleMgr = new ObstacleManager(mapLabel);
 
 // --- Engine + initial car(s) ------------------------------------------------------
 
-var engine = new SimEngine(network, obstacleMgr);
+var engine = new SimEngine(network, obstacleMgr) { CollisionsEnabled = collisionsEnabled };
 
 Car? initialCar = null;
 double? focusX = null, focusY = null;   // (x, y) world position for the initial camera view

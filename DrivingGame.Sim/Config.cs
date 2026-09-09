@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace DrivingGame.Sim;
 
 /// <summary>
@@ -56,6 +58,19 @@ public static class Config
     public const double CAR_ACCELERATION = 2.8;    /// <summary>m/s² — strong ABS braking (~1 g).</summary>
     public const double CAR_BRAKING = 10.0;    /// <summary>m/s² — comfortable parking brake (~0.35 g, no full braking).</summary>
     public const double PARK_BRAKING = 3.5;    /// <summary>Creep speed m/s (7 km/h) in the parking swing zone.</summary>
+
+    // --- Sailing (coasting) -------------------------------------------------
+    // With the throttle off a real car slows down on its own: rolling
+    // resistance + aero drag (+ engine braking in gear). Coasting deceleration
+    // of a ~1.5 t sedan: ~1.2 m/s^2 at 50 km/h, ~0.6 at 30, ~0.5 at 10 ->
+    // a_roll + c_aero * v^2 with the values below.
+    public const double COAST_ROLL_DECEL = 0.5;   // m/s^2 (rolling + engine drag)
+    public const double COAST_AERO_COEF = 0.004;  // 1/m  (aero term: c * v^2)
+    /// <summary>Coasting deceleration at speed v (m/s).</summary>
+    public static double CoastDecel(double v) => COAST_ROLL_DECEL + COAST_AERO_COEF * v * v;
+    /// <summary>Speed excess over the target that sailing alone sheds - above
+    /// this the driver presses the brake pedal (lights on).</summary>
+    public const double SAIL_BAND_MPS = 1.5;      // ~5 km/h
     public const double PARK_CREEP_SPEED_M = 2.0;    /// <summary>Degrees/second (FREE-mode arcade feel, capped below).</summary>
     public const double CAR_TURN_SPEED = 180;
     /// <summary>Mechanical minimum turning radius: wheelbase / tan(max steer
@@ -71,9 +86,76 @@ public static class Config
     public const double REVERSE_MAX_SPEED_M = 30.0 / 3.6; // ~8.33 m/s
 
     public const double CAR_LENGTH = 4.4;    public const double CAR_WIDTH = 1.8;
-    /// <summary>Multi-car colors: car N gets CAR_COLORS[(N-1) % 4]. Red is the
-    /// player color; blue/yellow/white are the old pygame obstacle palette.</summary>
-    public static readonly string[] CAR_COLORS = { "red", "blue", "yellow", "white" };
+    /// <summary>Car sprite palette: names the vehicle model each car renders
+    /// (the seven vehicles extracted by tools/make_car_sprites.py; the old
+    /// classic red sprite was dropped - style mismatch, user decision).
+    /// Default assignment for spawned cars: car N gets CAR_COLORS[(N-1) % 7];
+    /// POST /teleport may override it via "color" (validated against this
+    /// list).</summary>
+    public static readonly string[] CAR_COLORS =
+        { "blue", "silver", "police", "tan", "tractor", "pickup", "mixer" };
+
+    // --- Per-class dynamics (user decision 2026-09-08: trucks accelerate
+    // slower and are slower than normal cars - top speed, acceleration and
+    // the cornering budget are vehicle-class specific) ---
+    /// <summary>Dynamics of a vehicle class: (top speed m/s, longitudinal
+    /// acceleration m/s², lateral-acceleration budget m/s²). Values grounded
+    /// in real-world figures per class:
+    ///  - car: 200 km/h sim limit (real sedans 220-250), 0-100 ~6.5 s;
+    ///  - compact: 180 km/h, 0-100 ~10 s;
+    ///  - pickup: 180 km/h, 0-100 ~10 s, skidpad ~0.7 g (higher CG than a
+    ///    sedan -> lower cornering budget);
+    ///  - truck (empty tractor unit): legally 80 km/h in DE, 0-80 ~17 s;
+    ///    rollover threshold of heavy vehicles ~0.4-0.5 g (UMTRI) vs >1 g
+    ///    for passenger cars -> clearly lower cornering budget;
+    ///  - heavy_truck (loaded mixer): slowest and lowest cornering budget
+    ///    (high CG, cargo shift).
+    /// The "car" row equals the legacy globals, so sedan behavior (and all
+    /// existing tests) is unchanged.</summary>
+    public readonly record struct VehicleSpec(double TopSpeedMps, double AccelMps2, double LatAccelMax);
+
+    public static readonly Dictionary<string, string> VEHICLE_CLASS = new()
+    {
+        ["blue"] = "car", ["police"] = "car", ["tan"] = "car",
+        ["silver"] = "compact",
+        ["pickup"] = "pickup",
+        ["tractor"] = "truck", ["mixer"] = "heavy_truck",
+    };
+
+    //             top speed   accel    lat budget (m/s²)
+    public static readonly Dictionary<string, VehicleSpec> VEHICLE_CLASS_SPECS = new()
+    {
+        ["car"]         = new(CAR_SPEED, CAR_ACCELERATION, 4.5),
+        ["compact"]     = new(50.0,      2.5,              4.5),
+        ["pickup"]      = new(50.0,      2.4,              4.0),
+        ["truck"]       = new(22.2,      1.3,              3.5),
+        ["heavy_truck"] = new(22.2,      1.0,              3.0),
+    };
+
+    /// <summary>Dynamics for a sprite color (unknown colors fall back to the
+    /// sedan class).</summary>
+    public static VehicleSpec SpecForColor(string? color) =>
+        VEHICLE_CLASS_SPECS[VEHICLE_CLASS.GetValueOrDefault(color ?? "", "car")];
+
+    // --- Vehicle footprint (width × length, metres) -------------------------
+    // Single source of truth for each sprite's physical size, shared by the
+    // renderer (MapRenderer stretches textures to these) and the simulation
+    // (CarCollisions gap math + body boxes). Measured from the vehicle photos
+    // (tools/make_car_sprites.py); trucks set to real-world dimensions.
+    public static readonly Dictionary<string, (double WidthM, double LengthM)> VEHICLE_SIZES = new()
+    {
+        ["blue"]    = (1.80, 4.40),   // Mercedes C220d
+        ["silver"]  = (1.71, 3.14),   // Fiat 500
+        ["police"]  = (1.86, 4.71),   // BMW 320i police
+        ["tan"]     = (1.86, 4.75),   // VW Passat B5
+        ["tractor"] = (2.85, 7.00),   // tractor unit: 2.55 m body + ~15 cm mirror each side
+        ["pickup"]  = (2.09, 5.25),   // Ford F-150
+        ["mixer"]   = (2.80, 8.40),   // mixer: 2.50 m body + ~15 cm mirror each side
+    };
+
+    /// <summary>Footprint for a color; unknown colors fall back to the sedan box.</summary>
+    public static (double WidthM, double LengthM) SizeForColor(string? color) =>
+        VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH, CAR_LENGTH));
 
     // --- Axle geometry ---
     // The kinematic bicycle model integrates the REAR AXLE: Car.x / Car.y ARE

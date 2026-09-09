@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bk4knkkrsctlb"
-path="res://.godot/imported/car_64x128_blue.png-9e19416b5f788f8d945f4fd3fe0d39fa.ctex"
+uid="uid://c6awk6ep0wdcm"
+path="res://.godot/imported/vorfahrt.svg-854e76f77c0f91109b34286ec6e7213b.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/car_64x128_blue.png"
-dest_files=["res://.godot/imported/car_64x128_blue.png-9e19416b5f788f8d945f4fd3fe0d39fa.ctex"]
+source_file="res://assets/signs/vorfahrt.svg"
+dest_files=["res://.godot/imported/vorfahrt.svg-854e76f77c0f91109b34286ec6e7213b.ctex"]
 
 [params]
 
@@ -38,3 +38,6 @@ process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
 detect_3d/compress_to=1
+svg/scale=1.0
+editor/scale_with_editor_scale=false
+editor/convert_colors_with_editor_theme=false

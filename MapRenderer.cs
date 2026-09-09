@@ -154,6 +154,15 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, List<CarSample>> _carBuf = new();
     private readonly Dictionary<long, Node2D> _carNodes = new();
     private long? _followUid;      // camera bound to this car (null = free)
+    private long? _selectedUid;    // click-selected car (info window under the minimap)
+    // Decision log for the selected car (info window): polled from
+    // GET /car/{uid}/decisions (sim side: Car.Decisions - one event per
+    // CHANGE of braking reason, newest shown first).
+    private HttpRequest _decHttp;
+    private bool _decBusy;
+    private long _decUidFor = -1;    // uid the displayed lines belong to
+    private ulong _decLastMs = 0;    // wall time of the last fetch attempt
+    private List<string> _decLines = new();
     private bool _autoFollow = true;   // until the user takes manual control
     private double _lastMaxTime = double.NegativeInfinity;
     // Wall-clock driven render target: rt advances with REAL time between
@@ -180,6 +189,8 @@ public partial class MapRenderer : Node2D
     private Label _speedLabel;
     private string _lastSpeedText = "";
     private Label _testLabel;          // "5/21" from POST /label (via /state)
+    private Panel _infoPanel;          // click-to-inspect car info window
+    private Label _infoLabel;
     private string _lastTestText = null;
 
     // Follow mode mirrors the SIM's own camera (pygame parity: same lerp
@@ -196,8 +207,9 @@ public partial class MapRenderer : Node2D
     // color name, blinker/hazard lights, the car's OWN test flags + label.
     private class CarMeta
     {
-        public string Color = "red";
-        public bool BlinkL, BlinkR, Hazard;
+        public string Color = "blue";
+        public string Driver = "BICYCLE";   // driver class (BICYCLE/FREE), from /state
+        public bool BlinkL, BlinkR, Hazard, Braking, HeadlightsOn, TaillightsOn;
         public (float X, float Y, float Hdg)? FlagGreen, FlagRed;
         public string HudLabel;
     }
@@ -208,31 +220,77 @@ public partial class MapRenderer : Node2D
     // SetMeta - plain dictionaries).
     private readonly Dictionary<long, Polygon2D[]> _blinkL = new();
     private readonly Dictionary<long, Polygon2D[]> _blinkR = new();
+    // Rear-corner tail/brake lights: dark red while TaillightsOn, bright
+    // red while IsBraking (regardless of TaillightsOn - a real brake light
+    // works even with the lights off), invisible otherwise. Colour is set
+    // dynamically per frame, unlike the fixed-colour blinkers.
+    private readonly Dictionary<long, Polygon2D[]> _brakeLights = new();
+    // Front-corner headlights: white, visible while HeadlightsOn.
+    private readonly Dictionary<long, Polygon2D[]> _headlights = new();
 
-    // Car colors: the old pygame palette (red = player, then the obstacle
-    // palette). Sprite variants are pre-tinted PNGs generated with the old
-    // pygame tint formula (see driving-game asset generation note in the
-    // plan doc).
-    static readonly Dictionary<string, Color> CarColors = new()
-    {
-        ["red"] = new(0.706f, 0.118f, 0.118f),      // #B41E1E
-        ["blue"] = new(65f / 255f, 105f / 255f, 220f / 255f),
-        ["yellow"] = new(235f / 255f, 195f / 255f, 45f / 255f),
-        ["white"] = new(238f / 255f, 238f / 255f, 238f / 255f),
-    };
+    // Car sprites: seven vehicles extracted from assets/source/vehicles_green.png
+    // by tools/make_car_sprites.py (nose = texture top, transparent bg).
+    // The "color" field names a vehicle model, not just a tint.
     static readonly Dictionary<string, Texture2D> _carTextures = new();
     static Texture2D CarTexture(string color)
     {
         if (_carTextures.Count == 0)
         {
-            _carTextures["red"] = GD.Load<Texture2D>("res://assets/car_64x128.png");
-            _carTextures["blue"] = GD.Load<Texture2D>("res://assets/car_64x128_blue.png");
-            _carTextures["yellow"] = GD.Load<Texture2D>("res://assets/car_64x128_yellow.png");
-            _carTextures["white"] = GD.Load<Texture2D>("res://assets/car_64x128_white.png");
+            _carTextures["blue"]    = GD.Load<Texture2D>("res://assets/car_blue.png");
+            _carTextures["silver"]  = GD.Load<Texture2D>("res://assets/car_silver.png");
+            _carTextures["police"]  = GD.Load<Texture2D>("res://assets/car_police.png");
+            _carTextures["tan"]     = GD.Load<Texture2D>("res://assets/car_tan.png");
+            _carTextures["tractor"] = GD.Load<Texture2D>("res://assets/car_tractor.png");
+            _carTextures["pickup"]  = GD.Load<Texture2D>("res://assets/car_pickup.png");
+            _carTextures["mixer"]   = GD.Load<Texture2D>("res://assets/car_mixer.png");
         }
         return color != null && _carTextures.TryGetValue(color, out var t)
-            ? t : _carTextures["red"];
+            ? t : _carTextures["blue"];
     }
+
+    // Sign artwork: the SVGs provided in assets/signs/ (Godot imports them
+    // natively). "yield" = Vorfahrt gewähren, "priority" = Vorfahrtstraße.
+    static readonly Dictionary<string, Texture2D> _signTextures = new();
+    static Texture2D SignTexture(string type)
+    {
+        if (_signTextures.Count == 0)
+        {
+            _signTextures["yield"]    = GD.Load<Texture2D>("res://assets/signs/vorfahrt_gewaehren.svg");
+            _signTextures["priority"] = GD.Load<Texture2D>("res://assets/signs/vorfahrtsstrasse.svg");
+        }
+        return type != null && _signTextures.TryGetValue(type, out var t) && t != null
+            ? t : _signTextures["yield"];
+    }
+
+    // Physical size (W x L in metres) per sprite. The photo proportions are
+    // a STARTING point only (tools/make_car_sprites.py prints them): the two
+    // trucks were drawn too short in the source photo and are set to real
+    // dimensions instead (Zugmaschine ~7.0 m, Betonmischer ~8.4 m,
+    // standard truck width 2.5-2.55 m). The renderer stretches each texture
+    // to these sizes; the sim still uses the sedan box for all vehicles -
+    // see "Raceline rework — per-vehicle dimensions" in
+    // docs/C_SHARP_PORT_SPEC.md (TODO, not implemented).
+    // Per-sprite physical footprint (width × length, metres) - the shared
+    // table in Config.VEHICLE_SIZES is the single source of truth (the
+    // simulation's collision math uses the same numbers).
+    static (float W, float L) CarSizeOf(string color)
+    {
+        var (w, l) = DrivingGame.Sim.Config.SizeForColor(color);
+        return ((float)w, (float)l);
+    }
+
+    // Minimap dot colors: hand-picked so the eight vehicles stay
+    // distinguishable at minimap scale (median body samples were too close).
+    static readonly Dictionary<string, Color> CarColors = new()
+    {
+        ["blue"]    = new(0.25f, 0.41f, 0.86f),
+        ["silver"]  = new(0.80f, 0.82f, 0.85f),
+        ["police"]  = new(0.55f, 0.68f, 0.95f),
+        ["tan"]     = new(0.72f, 0.63f, 0.48f),
+        ["tractor"] = new(0.48f, 0.50f, 0.36f),
+        ["pickup"]  = new(0.42f, 0.44f, 0.47f),
+        ["mixer"]   = new(0.85f, 0.83f, 0.78f),
+    };
 
     // Breadcrumb trail (rear-axle points in metres + heading deg) and the
     // four wheel-track Line2Ds derived from it.
@@ -358,6 +416,10 @@ public partial class MapRenderer : Node2D
             _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
                 OnStateResponse(code, body, _stateHttpA);
             RequestState(_stateHttpA);
+            _decHttp = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+            AddChild(_decHttp);
+            _decHttp.RequestCompleted += (id, code, hdr, body) =>
+                OnDecisionsResponse(code, body);
         }
 
         // Test-runner UI + its own HTTP node (the map/state nodes are busy
@@ -629,6 +691,30 @@ public partial class MapRenderer : Node2D
                 _junctionCenters.Add(W(j.GetProperty("x").GetSingle(),
                                        j.GetProperty("y").GetSingle()));
 
+        // --- Road signs (z 3, above markings, below cars): the real sign
+        // artwork from assets/signs/ (Vorfahrt gewähren / Vorfahrtstraße).
+        // The payload places them OUTSIDE the curb on the approach side;
+        // here they are rotated to the approach heading and scaled to a
+        // deliberately OVERSIZED width - map readability over realism.
+        if (root.TryGetProperty("signs", out var sgn))
+            foreach (var s in sgn.EnumerateArray())
+            {
+                Vector2 C = W(s.GetProperty("x").GetSingle(), s.GetProperty("y").GetSingle());
+                string stype = s.GetProperty("type").GetString() ?? "";
+                float headingRad = Mathf.DegToRad(s.GetProperty("heading_deg").GetSingle());
+                var tex = SignTexture(stype);
+                const float SignWidthM = 2.5f;   // bigger than a real sign on purpose
+                _world.AddChild(new Sprite2D
+                {
+                    Texture = tex,
+                    Position = C,
+                    Rotation = headingRad,       // aligned with the road (car convention)
+                    Scale = new Vector2(SignWidthM / tex.GetSize().X,
+                                        SignWidthM / tex.GetSize().Y),
+                    ZIndex = 3,
+                });
+            }
+
         // Camera: fit the whole map into the viewport (or use overrides).
         Vector2 vp = GetViewport().GetVisibleRect().Size;
         float zoom = Mathf.Min(vp.X / _bounds.Size.X, vp.Y / _bounds.Size.Y) * 0.95f;
@@ -681,6 +767,26 @@ public partial class MapRenderer : Node2D
             _testLabel.AddThemeFontSizeOverride("font_size", 24);
             _testLabel.Visible = false;
             layer.AddChild(_testLabel);
+
+            // Car info window: click a car in the map to select it. Static
+            // position under the minimap, same background as the minimap.
+            var sbInfo = new StyleBoxFlat
+            {
+                BgColor = MinimapNode.Bg,
+                BorderColor = MinimapNode.Border,
+                BorderWidthLeft = 2, BorderWidthRight = 2,
+                BorderWidthTop = 2, BorderWidthBottom = 2,
+                ContentMarginLeft = 10, ContentMarginRight = 10,
+                ContentMarginTop = 8, ContentMarginBottom = 8,
+            };
+            _infoPanel = new Panel { Visible = false };
+            _infoPanel.AddThemeStyleboxOverride("panel", sbInfo);
+            _infoLabel = new Label();
+            _infoLabel.AddThemeColorOverride("font_color",
+                new Color(220 / 255f, 220 / 255f, 220 / 255f));
+            _infoLabel.AddThemeFontSizeOverride("font_size", 18);
+            _infoPanel.AddChild(_infoLabel);
+            layer.AddChild(_infoPanel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
         _lastCamPos = _cam.GlobalPosition;
@@ -935,6 +1041,11 @@ public partial class MapRenderer : Node2D
                 if (mb.Pressed) _lastManualMs = Time.GetTicksMsec();
                 _dragStartMouse = mb.Position;
                 _dragStartCam = _cam.GlobalPosition;
+                // A short click (release without moving the map) selects the
+                // car under the cursor; empty space clears the selection.
+                if (!mb.Pressed &&
+                    (mb.Position - _dragStartMouse).Length() < 6f)
+                    SelectCarAt(mb.Position);
             }
         }
         else if (e is InputEventMouseMotion mm && _dragging)
@@ -1073,6 +1184,40 @@ public partial class MapRenderer : Node2D
 
     // ------------------------------------------------- M2: car tracking
 
+    /// <summary>Decision-log response for the SELECTED car. Stale responses
+    /// (selection changed in flight) are dropped; the poll re-fires on the
+    /// next frame. Failures just keep the last lines (server may be down).
+    /// </summary>
+    private void OnDecisionsResponse(long responseCode, byte[] body)
+    {
+        _decBusy = false;
+        if (responseCode != 200 || _selectedUid is not long sel) return;
+        try
+        {
+            var root = JsonDocument.Parse(body).RootElement;
+            if (!root.TryGetProperty("uid", out var uEl) || uEl.GetInt64() != sel)
+                return;
+            _decUidFor = sel;
+            var lines = new List<string>();
+            if (root.TryGetProperty("decisions", out var arr))
+                foreach (var d in arr.EnumerateArray())
+                    lines.Add($"{d.GetProperty("t").GetDouble():F1}s  " +
+                              d.GetProperty("msg").GetString());
+            if (lines.Count == 0)
+            {
+                _decLines = new List<string> { "(no decisions yet)" };
+                return;
+            }
+            lines = lines.TakeLast(5).ToList();
+            lines.Reverse();   // newest first
+            _decLines = lines;
+        }
+        catch
+        {
+            _decLines = new List<string> { "(unparsable response)" };
+        }
+    }
+
     private void OnStateResponse(long responseCode, byte[] body,
                                  HttpRequest next)
     {
@@ -1184,10 +1329,16 @@ public partial class MapRenderer : Node2D
                         _carMeta[uid] = m = new CarMeta();
                     m.Color = c.TryGetProperty("color", out var cc)
                                && cc.ValueKind == JsonValueKind.String
-                           ? cc.GetString() : "red";
+                           ? cc.GetString() : "blue";
+                    m.Driver = c.TryGetProperty("driver", out var drv)
+                                && drv.ValueKind == JsonValueKind.String
+                            ? drv.GetString() : "BICYCLE";
                     m.BlinkL = c.TryGetProperty("blinker_left", out var bl) && bl.GetBoolean();
                     m.BlinkR = c.TryGetProperty("blinker_right", out var br) && br.GetBoolean();
                     m.Hazard = c.TryGetProperty("hazard", out var hz) && hz.GetBoolean();
+                    m.Braking = c.TryGetProperty("braking", out var bk2) && bk2.GetBoolean();
+                    m.HeadlightsOn = c.TryGetProperty("headlights_on", out var lo1) && lo1.GetBoolean();
+                    m.TaillightsOn = c.TryGetProperty("taillights_on", out var lo2) && lo2.GetBoolean();
                     m.FlagGreen = ParseFlag(c, "green");
                     m.FlagRed = ParseFlag(c, "red");
                     m.HudLabel = c.TryGetProperty("hud_label", out var hlc)
@@ -1237,6 +1388,9 @@ public partial class MapRenderer : Node2D
                 m.BlinkL = root.TryGetProperty("blinker_left", out var b0) && b0.GetBoolean();
                 m.BlinkR = root.TryGetProperty("blinker_right", out var b1) && b1.GetBoolean();
                 m.Hazard = root.TryGetProperty("hazard", out var b2) && b2.GetBoolean();
+                m.Braking = root.TryGetProperty("braking", out var b3) && b3.GetBoolean();
+                m.HeadlightsOn = root.TryGetProperty("headlights_on", out var b4) && b4.GetBoolean();
+                m.TaillightsOn = root.TryGetProperty("taillights_on", out var b5) && b5.GetBoolean();
             }
 
             // HUD test label ("5/21") - the PRIMARY car's label, string or null.
@@ -1287,9 +1441,12 @@ public partial class MapRenderer : Node2D
         { lab.QueueFree(); _carLabels.Remove(uid); }
         _blinkL.Remove(uid);
         _blinkR.Remove(uid);
+        _brakeLights.Remove(uid);
+        _headlights.Remove(uid);
         if (_carNodes.TryGetValue(uid, out var n))
         { n.QueueFree(); _carNodes.Remove(uid); }
         if (_followUid == uid) _followUid = null;
+        if (_selectedUid == uid) _selectedUid = null;
     }
 
     void ClearCars()
@@ -1306,59 +1463,101 @@ public partial class MapRenderer : Node2D
 
     Node2D MakeCarNode(long uid)
     {
-        // Same sprite as pygame (assets/car_64x128.png): nose points UP
-        // (north), so rotation_degrees = heading directly. The node sits
-        // on the REAR AXLE (/state x/y); the sprite is centred on the BODY
-        // centre, RearAxleOffsetM ahead of it.
+        // All sprites have the nose pointing UP (north), so
+        // rotation_degrees = heading directly. The node sits on the REAR
+        // AXLE (/state x/y); the sprite is centred on the BODY centre,
+        // RearAxleOffsetM ahead of it.
         var root = new Node2D { Name = $"car_{uid}" };
-        // Multi-car: each car gets its own pre-tinted sprite (red = the
-        // original; blue/yellow/white generated with the old pygame tint
-        // formula). Meta may not exist yet on the very first sample - red
-        // is the safe default.
-        string color = _carMeta.TryGetValue(uid, out var meta) ? meta.Color : "red";
-        // The 64x128 px texture is stretched to the car's physical size
-        // (pygame: transform.scale to CAR_WIDTH x CAR_LENGTH in world px).
-        // Nose = texture top; with rotation_degrees = heading the nose
-        // points along travel (verified pixel-wise against pygame).
+        // Multi-car: each car gets its own vehicle sprite (see CarTexture).
+        // Meta may not exist yet on the very first sample - red is the
+        // safe default.
+        string color = _carMeta.TryGetValue(uid, out var meta) ? meta.Color : "blue";
+        var tex = CarTexture(color);
+        var size = CarSizeOf(color);
+        // The texture is stretched to the sprite's physical size: the blue
+        // sedan matches the game's 1.8 x 4.4 m car box, the trucks keep
+        // their photo proportions (CarSizes). Nose = texture top; with
+        // rotation_degrees = heading the nose points along travel.
         root.AddChild(new Sprite2D
         {
-            Texture = CarTexture(color),
-            Scale = new Vector2(CarWidthM / 64f, CarLengthM / 128f),
+            Texture = tex,
+            Scale = new Vector2(size.W / tex.GetSize().X, size.L / tex.GetSize().Y),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
         // Blinker corner lights (pygame parity): one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
         // centre; orange, 0.5 s blink period.
-        float fore = CarLengthM / 2f * 0.85f;
-        float lat = CarWidthM / 2f * 0.75f;
+        // Corners follow the SPRITE's physical size, not the sedan box,
+        // so lights sit at the body corners of trucks too.
+        float fore = size.L / 2f * 0.85f;
+        float lat = size.W / 2f * 0.75f;
         var blinkerL = new Polygon2D[2];
         var blinkerR = new Polygon2D[2];
+        var blinkerColor = new Color(1f, 0.706f, 0f);   // (255,180,0)
         for (int i = 0; i < 2; i++)
         {
             float y = -fore * (i == 0 ? 1f : -1f) - RearAxleOffsetM;
-            blinkerL[i] = MakeBlinker(new Vector2(-lat, y));
-            blinkerR[i] = MakeBlinker(new Vector2(lat, y));
+            blinkerL[i] = MakeLight(new Vector2(-lat, y), blinkerColor);
+            blinkerR[i] = MakeLight(new Vector2(lat, y), blinkerColor);
         }
         root.AddChild(blinkerL[0]); root.AddChild(blinkerL[1]);
         root.AddChild(blinkerR[0]); root.AddChild(blinkerR[1]);
         _blinkL[uid] = blinkerL;
         _blinkR[uid] = blinkerR;
+
+        // Front-corner headlights: white, same fore-aft position as the
+        // front blinkers, placed further outboard (0.95*W/2) so both are
+        // visible as distinct dots.
+        float frontY = -fore - RearAxleOffsetM;
+        float latOutboard = size.W / 2f * 0.95f;
+        var headlightColor = new Color(1f, 1f, 0.9f);
+        var headlights = new[]
+        {
+            MakeLight(new Vector2(-latOutboard, frontY), headlightColor),
+            MakeLight(new Vector2(latOutboard, frontY), headlightColor),
+        };
+        root.AddChild(headlights[0]); root.AddChild(headlights[1]);
+        _headlights[uid] = headlights;
+
+        // Rear-corner tail/brake lights: same outboard lateral position as
+        // the headlights, at the rear. Colour (dark red = tail-light-on,
+        // bright red = braking) is set dynamically per frame, not here.
+        float rearY = fore - RearAxleOffsetM;
+        var brakeLights = new[]
+        {
+            MakeLight(new Vector2(-latOutboard, rearY), new Color(0f, 0f, 0f)),
+            MakeLight(new Vector2(latOutboard, rearY), new Color(0f, 0f, 0f)),
+        };
+        root.AddChild(brakeLights[0]); root.AddChild(brakeLights[1]);
+        _brakeLights[uid] = brakeLights;
+
         _world.AddChild(root);
         return root;
     }
 
-    static Polygon2D MakeBlinker(Vector2 pos)
+    static Polygon2D MakeLight(Vector2 pos, Color color)
     {
-        // Unit-radius 8-gon; scaled per frame to the pygame radius.
+        // Unit-radius 8-gon CENTRED AT THE NODE'S OWN ORIGIN (not baked into
+        // the polygon's vertices): `pos` is the node's Position instead.
+        // Per-frame zoom compensation sets this node's Scale (see
+        // UpdateCars) to keep the dot's SIZE constant on screen - Godot
+        // scales a node's rendering relative to its OWN Position, never its
+        // parent's origin. Baking `pos` into the vertices (the original
+        // bug) meant that same Scale ALSO shrank the offset toward the
+        // car's rear axle: at the ~0.1 zoom-compensation factor typically
+        // in play, a light meant to sit ~3 m from the body centre rendered
+        // ~0.3 m out - every corner light (blinkers included) has clustered
+        // near the middle of the car since this code was first written.
         var pts = new Vector2[8];
         for (int i = 0; i < 8; i++)
         {
             float a = Mathf.Tau * i / 8f;
-            pts[i] = pos + new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+            pts[i] = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
         }
         return new Polygon2D
         {
-            Color = new Color(1f, 0.706f, 0f),   // (255,180,0)
+            Position = pos,
+            Color = color,
             Polygon = pts,
         };
     }
@@ -1483,6 +1682,22 @@ public partial class MapRenderer : Node2D
                 if (_blinkR.TryGetValue(kv.Key, out var br))
                     foreach (var b in br)
                         { b.Visible = on && (meta.BlinkR || meta.Hazard); b.Scale = sc; }
+                // Headlights: white, visible while HeadlightsOn.
+                if (_headlights.TryGetValue(kv.Key, out var hl))
+                    foreach (var b in hl)
+                        { b.Visible = meta.HeadlightsOn; b.Scale = sc; }
+                // Tail/brake lights: bright red while braking (regardless
+                // of TaillightsOn - a real brake light works with the
+                // lights off), else dark red while TaillightsOn, else
+                // invisible.
+                if (_brakeLights.TryGetValue(kv.Key, out var bk))
+                    foreach (var b in bk)
+                    {
+                        b.Visible = meta.Braking || meta.TaillightsOn;
+                        b.Color = meta.Braking ? new Color(1f, 0.15f, 0.15f)
+                                                : new Color(0.4f, 0.05f, 0.05f);
+                        b.Scale = sc;
+                    }
 
                 // Small per-car HUD label above the nose (parallel tests):
                 // world-space so it never rotates with the car. The default
@@ -1504,9 +1719,10 @@ public partial class MapRenderer : Node2D
                     }
                     if (lab.Text != lbl) lab.Text = lbl;
                     // Center on the car's axis (Label origin is top-left).
+                    float noseLenM = CarSizeOf(meta.Color).L;
                     lab.Position = pos + new Vector2(
                         -lab.Size.X * 0.1f * 0.5f,
-                        -(RearAxleOffsetM + CarLengthM / 2f + 0.6f));
+                        -(RearAxleOffsetM + noseLenM / 2f + 0.6f));
                 }
                 else if (_carLabels.TryGetValue(kv.Key, out var dead))
                 { dead.QueueFree(); _carLabels.Remove(kv.Key); }
@@ -1525,7 +1741,7 @@ public partial class MapRenderer : Node2D
             foreach (var kv in _carNodes)
             {
                 string col = _carMeta.TryGetValue(kv.Key, out var m)
-                    ? m.Color : "red";
+                    ? m.Color : "blue";
                 _minimap.Cars.Add((new Vector2(kv.Value.GlobalPosition.X,
                                                -kv.Value.GlobalPosition.Y),
                                    kv.Key == _followUid,
@@ -1540,14 +1756,7 @@ public partial class MapRenderer : Node2D
             bool show = _lastTestText.Length > 0;
             _testLabel.Visible = show;
             if (show && _lastTestText != _testLabel.Text)
-            {
                 _testLabel.Text = _lastTestText;
-                var vp = GetViewport().GetVisibleRect();
-                _testLabel.Position = new Vector2(
-                    vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin,
-                    MinimapNode.Margin + MinimapNode.BoxSize + 6f
-                    + _speedLabel.Size.Y + 6f);
-            }
         }
 
         // Speed readout under the minimap: bound car (or first car).
@@ -1563,13 +1772,120 @@ public partial class MapRenderer : Node2D
                 {
                     _lastSpeedText = txt;
                     _speedLabel.Text = txt;
-                    var vp = GetViewport().GetVisibleRect();
-                    _speedLabel.Position = new Vector2(
-                        vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin,
-                        MinimapNode.Margin + MinimapNode.BoxSize + 6f);
                 }
             }
         }
+
+        // Car info window (click selection): id, type, live speed, driver
+        // class - static under the minimap, same background as the minimap.
+        if (_infoPanel != null)
+        {
+            bool show = _selectedUid.HasValue &&
+                        _carNodes.ContainsKey(_selectedUid.Value);
+            if (show)
+            {
+                long uid = _selectedUid.Value;
+                // Fetch on selection change, then refresh once a second:
+                // a stuck car's log is static, a busy one keeps appending.
+                ulong nowMs = Time.GetTicksMsec();
+                if (!_decBusy &&
+                    (uid != _decUidFor || nowMs - _decLastMs >= 1000))
+                {
+                    _decBusy = true;
+                    _decLastMs = nowMs;
+                    if (uid != _decUidFor) _decLines = new() { "(loading...)" };
+                    _decHttp.Request($"http://127.0.0.1:5000/car/{uid}/decisions");
+                }
+                var mSel = _carMeta.GetValueOrDefault(uid);
+                string color = mSel?.Color ?? "blue";
+                string cls = DrivingGame.Sim.Config.VEHICLE_CLASS
+                    .GetValueOrDefault(color, "car");
+                float kmh = 0f;
+                if (_carBuf.TryGetValue(uid, out var bufSel) && bufSel.Count > 0)
+                    kmh = bufSel[^1].SpeedKmh;
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"#{uid}   {color} ({cls})\n");
+                sb.Append($"speed   {kmh:F1} km/h\n");
+                sb.Append($"driver  {mSel?.Driver ?? "?"}\n");
+                sb.Append("decisions (newest first):\n");
+                foreach (var line in _decLines)
+                    sb.Append(line).Append('\n');
+                _infoLabel.Text = sb.ToString();
+            }
+            _infoPanel.Visible = show;
+        }
+        LayoutUnderMinimap();
+        LayoutInfoFooter();
+    }
+
+    // Height of the car info FOOTER (full-width bar at the bottom of the
+    // window): 4 header lines + up to 5 decision lines. Full width means
+    // the decision lines never wrap, so this fits them all.
+    const int FooterHeight = 240;
+
+    /// <summary>Click selection: hit-test every car's body box (in the car's
+    /// local frame, node origin = rear axle so the body centre sits
+    /// RearAxleOffsetM ahead) against the world point under the cursor; the
+    /// nearest hit wins. A click on empty space clears the selection.</summary>
+    void SelectCarAt(Vector2 screenPos)
+    {
+        var vp = GetViewport().GetVisibleRect().Size;
+        Vector2 world = _cam.GetGlobalPosition() + (screenPos - vp / 2f) / _cam.Zoom;
+        long? best = null;
+        double bestD = double.PositiveInfinity;
+        foreach (var kv in _carNodes)
+        {
+            var node = kv.Value;
+            string color = _carMeta.TryGetValue(kv.Key, out var m)
+                           ? m.Color : "blue";
+            var size = CarSizeOf(color);
+            Vector2 bodyCentre = node.GlobalPosition +
+                                 new Vector2(0, -RearAxleOffsetM);
+            // Rotate the world->body vector into the car's local frame
+            // (x = lateral, y = fore-aft along travel).
+            float c = Mathf.Cos(-node.Rotation), s = Mathf.Sin(-node.Rotation);
+            Vector2 dv = world - bodyCentre;
+            Vector2 rel = new Vector2(dv.X * c - dv.Y * s, dv.X * s + dv.Y * c);
+            // 0.3 m click tolerance beyond the painted body.
+            if (Math.Abs(rel.X) > size.W / 2f + 0.3f ||
+                Math.Abs(rel.Y) > size.L / 2f + 0.3f)
+                continue;
+            double d = rel.LengthSquared();
+            if (d < bestD) { bestD = d; best = kv.Key; }
+        }
+        _selectedUid = best;
+    }
+
+    /// <summary>Stack the overlays under the minimap, top to bottom: speed
+    /// readout, test label. (The car info panel is a full-width FOOTER at
+    /// the window bottom - see LayoutInfoFooter - not part of this stack.)
+    /// </summary>
+    void LayoutUnderMinimap()
+    {
+        var vp = GetViewport().GetVisibleRect();
+        float x = vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin;
+        float y = MinimapNode.Margin + MinimapNode.BoxSize + 6f;
+        if (_speedLabel != null && _speedLabel.Visible)
+        {
+            _speedLabel.Position = new Vector2(x, y);
+            y += _speedLabel.Size.Y + 6f;
+        }
+        if (_testLabel != null && _testLabel.Visible)
+            _testLabel.Position = new Vector2(x, y);
+    }
+
+    /// <summary>Position the car info panel as a full-width FOOTER at the
+    /// bottom of the window (only visible while a car is selected). Wider
+    /// than the old minimap-side box: the decision log reads on one line
+    /// each instead of wrapping in a 360 px column.
+    /// </summary>
+    void LayoutInfoFooter()
+    {
+        if (_infoPanel == null || !_infoPanel.Visible) return;
+        var vp = GetViewport().GetVisibleRect();
+        float m = MinimapNode.Margin;
+        _infoPanel.Position = new Vector2(m, vp.Size.Y - FooterHeight - m);
+        _infoPanel.Size = new Vector2(vp.Size.X - 2 * m, FooterHeight);
     }
 
     /// <summary>Follow mode mirrors the SIM's own camera (pygame parity:
@@ -1980,8 +2296,8 @@ public partial class MinimapNode : Node2D
 {
     public const int BoxSize = 360;  // big enough for the whole track to stay readable
     public const int Margin = 15;
-    static readonly Color Bg = new(20 / 255f, 60 / 255f, 20 / 255f);       // MINIMAP_BG
-    static readonly Color Border = new(80 / 255f, 80 / 255f, 80 / 255f);  // MINIMAP_BORDER
+    public static readonly Color Bg = new(20 / 255f, 60 / 255f, 20 / 255f);       // MINIMAP_BG
+    public static readonly Color Border = new(80 / 255f, 80 / 255f, 80 / 255f);  // MINIMAP_BORDER
     static readonly Color CarColor = new(1f, 0f, 0f);                     // MINIMAP_CAR_COLOR
 
 

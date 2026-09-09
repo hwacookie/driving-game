@@ -90,11 +90,12 @@ public static class ObstacleGeometry
         BoxCorners(ob.X, ob.Y, ob.Heading, Config.CAR_LENGTH, Config.CAR_WIDTH);
 
     /// <summary>The player car's body box - the same four-corner geometry the
-    /// on-road check uses (centered on the body centre, not the rear axle).</summary>
+    /// on-road check uses (centered on the body centre, not the rear axle).
+    /// Uses the car's REAL per-class footprint (Config.VEHICLE_SIZES).</summary>
     public static List<(double X, double Y)> PlayerBodyCorners(Car car)
     {
         var (bx, by) = car.BodyCenter();
-        return BoxCorners(bx, by, car.Heading, Config.CAR_LENGTH, Config.CAR_WIDTH);
+        return BoxCorners(bx, by, car.Heading, car.LengthM, car.WidthM);
     }
 
     private static (double Min, double Max) ProjectOnto(

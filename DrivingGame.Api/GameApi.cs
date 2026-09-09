@@ -97,6 +97,27 @@ public static class GameApi
             });
         });
 
+        // --- per-car driver decision log (car detail window) ---------------------
+        // EVENTS, not samples: one entry per change of braking reason, e.g.
+        // "brake: yield sign: car 26 at the crossing (19 m out)". Oldest
+        // first; the newest (last) entry is WHY the car is behaving now.
+        app.MapGet("/car/{uid:int}/decisions", (int uid) =>
+        {
+            if (!engine.Cars.TryGetValue(uid, out var c))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "unknown car" }, 404);
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["uid"] = uid,
+                ["decisions"] = c.DecisionsSnapshot()
+                    .Select(d => new Dictionary<string, object?>
+                    {
+                        ["t"] = Math.Round(d.T, 2),
+                        ["msg"] = d.Msg,
+                    }).ToList(),
+            });
+        });
+
         // --- map export ---------------------------------------------------------
 
         app.MapGet("/map", () => Results.Json(MapPayload.Build(engine.Network)));
@@ -148,8 +169,22 @@ public static class GameApi
                 add = ad.GetBoolean();
             if (data.TryGetProperty("speed", out var sd) && sd.ValueKind != JsonValueKind.Null)
                 speed = sd.GetDouble();
+            bool reverse = false;
+            if (data.TryGetProperty("reverse", out var rv))
+                reverse = rv.GetBoolean();
+            string? color = null;
+            if (data.TryGetProperty("color", out var cd) && cd.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(cd.GetString()))
+                color = cd.GetString();
+            if (color is not null && !Config.CAR_COLORS.Contains(color))
+                return Json(new Dictionary<string, object?>
+                {
+                    ["error"] = $"invalid color '{color}': expected one of " +
+                                string.Join(", ", Config.CAR_COLORS),
+                }, 400);
 
-            engine.EnqueueCommand(new TeleportCommand(startPoint, segment, progress, add, speed));
+            engine.EnqueueCommand(
+                new TeleportCommand(startPoint, segment, progress, add, speed, color, reverse));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
@@ -219,8 +254,11 @@ public static class GameApi
             bool? validator = data.TryGetProperty("validator", out var v) ? v.GetBoolean() : null;
             string? mode = data.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String
                            ? m.GetString() : null;
+            bool? headlights = data.TryGetProperty("headlights", out var hl) ? hl.GetBoolean() : null;
+            bool? taillights = data.TryGetProperty("taillights", out var tl) ? tl.GetBoolean() : null;
+            bool? clearBlinker = data.TryGetProperty("clear_blinker", out var cb) ? cb.GetBoolean() : null;
 
-            engine.EnqueueCommand(new ToggleCommand(breadcrumbs, validator, mode, uid));
+            engine.EnqueueCommand(new ToggleCommand(breadcrumbs, validator, mode, uid, headlights, taillights, clearBlinker));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
