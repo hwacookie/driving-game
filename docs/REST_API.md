@@ -17,7 +17,7 @@ Run the game with the `--api` flag:
 python -m src.main --api
 ```
 
-The API server will start on `http://localhost:5000`
+The API server will start on `http://localhost:5001`
 
 ## Endpoints
 
@@ -309,7 +309,7 @@ Returns `200` (`{"ok": true, "id": 1}`) or `404` for an unknown id.
 import requests
 import time
 
-API = "http://localhost:5000"
+API = "http://localhost:5001"
 
 # Check health
 response = requests.get(f"{API}/health")
@@ -335,28 +335,28 @@ requests.post(f"{API}/reset")
 
 ```bash
 # Health check
-curl http://localhost:5000/health
+curl http://localhost:5001/health
 
 # Get state
-curl http://localhost:5000/state | jq
+curl http://localhost:5001/state | jq
 
 # Accelerate
-curl -X POST http://localhost:5000/control \
+curl -X POST http://localhost:5001/control \
   -H "Content-Type: application/json" \
   -d '{"accelerate": true}'
 
 # Teleport randomly
-curl -X POST http://localhost:5000/teleport \
+curl -X POST http://localhost:5001/teleport \
   -H "Content-Type: application/json" \
   -d '{"random": true}'
 
 # Enable breadcrumbs
-curl -X POST http://localhost:5000/toggle \
+curl -X POST http://localhost:5001/toggle \
   -H "Content-Type: application/json" \
   -d '{"breadcrumbs": true}'
 
 # Freeze the simulation (e.g. to inspect state)
-curl -X POST http://localhost:5000/freeze \
+curl -X POST http://localhost:5001/freeze \
   -H "Content-Type: application/json" -d '{"frozen": true}'
 ```
 
@@ -432,5 +432,5 @@ Game loop flow:
 
 ## Security Note
 
-The API listens on `127.0.0.1:5000` (localhost only) by default.
+The API listens on `127.0.0.1:5001` (localhost only) by default.
 **Do not expose to public networks** - there is no authentication!

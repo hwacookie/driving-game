@@ -52,6 +52,23 @@ public static class CarCollisions
     // Comfortable standstill gap: the stopping-distance curve is measured
     // from this gap, so a following car rests ~3 m short of the lead car.
     const double StandstillGapM = 3.0;
+    // Extra margin demanded when the target is STATIONARY: the plain
+    // stop formula sqrt(2a*(G - StandstillGapM)) is the exact RECOVERABLE
+    // boundary - a car at that speed stops exactly at the standstill gap,
+    // zero margin, and the substep discretization (driver accelerates
+    // before the cap runs, cap applied after) eats the remainder: T_025
+    // car 10 at 21 m/s, 25 m from standing car 8, cap 0.4 m/s under speed
+    // - rear-ended at 20 km/h. Stopping StopMarginM further out keeps a
+    // physical clearance in the fatal band.
+    const double StopMarginM = 3.0;
+    // A target slower than this is EFFECTIVELY STATIONARY for stop-cap
+    // purposes (T_030: car 13 crept at ~0.3 m/s behind standing car 15;
+    // the v1 margin branch (vl < 0.1) never fired, car 11 got the
+    // zero-margin moving-leader formula and arrived at 12 m/s 6 m out).
+    // Below this speed the target's own forward motion is too small to
+    // count against the follower's stopping distance - treat it as a
+    // wall and demand the full StopMarginM.
+    const double StationaryCapMps = 2.0;
 
     // v2 - oblique/crossing pair prediction (right-before-left): a car not
     // yet in anyone's forward corridor can still be on a collision course at
@@ -66,6 +83,20 @@ public static class CarCollisions
     // the graded 1 s/3 s/5 s bands (GradedCap), just found reliably.
     const double TtcSweepStepS = 0.1;
     const double TtcSweepMaxS = 5.0;
+    // Minimum speed used for the TTC sweep. A sweep at the REAL speed
+    // collapses to zero the moment a cap brakes the car (the driver's
+    // TargetSpeed drops too), which "clears" the conflict and releases the
+    // cap - the brake/creep flicker (fig8_xing: car 29 creeping into
+    // standing car 5 for 15 s, 2026-09-10). With a floor, a body within
+    // MinSweepSpeedMps*TtcSweepMaxS (=8 m) ahead along the sweep stays a
+    // threat until it actually moves - the car stops short of it and holds
+    // instead of flicker-creeping into contact.
+    // The reach must stay NEAR (8 m, ~one car length + standstill gap):
+    // at 25 m (5 m/s floor) every car in a dense jam has a standing car in
+    // its sweep and the whole fleet deadlocks (fig8_xing T_014: 0/50
+    // moving for 200 s). Beyond 8 m the graded caps of a moving sweep
+    // govern - the car creeps up to the 8 m boundary and stops there.
+    const double MinSweepSpeedMps = 1.6;
     // Neighbor search radius for the pair check (current positions) - wider
     // than the corridor's look-ahead because the conflict may still be many
     // seconds off for two cars converging on a shared point from the side.
@@ -76,6 +107,14 @@ public static class CarCollisions
     // they look to see if the other driver will yield, and brake only if they
     // don't (or if it's already too late to stop).
     const double AlertGraceS = 1.0;
+    // How long a crossing conflict must be ABSENT before the staged alert
+    // clears. The v2 conflict flickers out for single ticks when the swept
+    // boxes graze at a crossing; clearing the alert on a single-tick
+    // absence reset the grace clock on every re-alert and delayed the
+    // self-protection brake (T_015: car 10 cleared/re-alerted on car 34
+    // three times within 0.5 s, braked ~1 s after first alert - too late
+    // at 65 km/h).
+    const double AlertClearHoldS = 0.3;
 
     sealed class Grid
     {
@@ -111,8 +150,8 @@ public static class CarCollisions
         }
     }
 
-    static List<(double X, double Y)> Body(Car c) =>
-        ObstacleGeometry.PlayerBodyCorners(c);
+    static ObstacleGeometry.BodyBox Body(Car c, int level) =>
+        new(ObstacleGeometry.PlayerBodyCorners(c), level);
 
     // Shrunken body for the RESOLVE (rollback) decision: BoxesIntersect uses
     // strict inequalities, so two boxes merely TOUCHING (resting nose-to-nose)
@@ -123,12 +162,13 @@ public static class CarCollisions
     // uids 11 x 38 pinned at contact for 140+ s). Real penetration (>= 5 cm
     // total) still triggers the rollback; mere contact does not.
     const double ResolvePenetrationEpsM = 0.025;
-    static List<(double X, double Y)> BodyForResolve(Car c)
+    static ObstacleGeometry.BodyBox BodyForResolve(Car c, int level)
     {
         var (bx, by) = c.BodyCenter();
-        return ObstacleGeometry.BoxCorners(bx, by, c.Heading,
-            Math.Max(0.1, c.LengthM - 2 * ResolvePenetrationEpsM),
-            Math.Max(0.1, c.WidthM - 2 * ResolvePenetrationEpsM));
+        return new ObstacleGeometry.BodyBox(
+            ObstacleGeometry.BoxCorners(bx, by, c.Heading,
+                Math.Max(0.1, c.LengthM - 2 * ResolvePenetrationEpsM),
+                Math.Max(0.1, c.WidthM - 2 * ResolvePenetrationEpsM)), level);
     }
 
     // TEMPORARY debug hook (remove after use)
@@ -171,6 +211,15 @@ public static class CarCollisions
     const double PriorityProximityM = 25.0;   // a priority car "at the crossing" within this
     const double SignCrossClearM = 5.0;       // crossing-zone half-width + margin, for t_clear
     const double SignGapMarginS = 1.5;        // extra time margin demanded of the gap
+    // Minimum speed for a car that is ALREADY inside the crossing box (RBL
+    // yielder): it must finish the crossing, never stop in the middle of it
+    // (a stop there blocks the other car's path - see the v2 RBL logic).
+    const double RblCompleteCrossingMps = 4.0;
+    // How far out the gap acceptance scans for APPROACHING cars on the
+    // crossing diagonal. Must cover t_clear+margin at max speed: a car at
+    // 100 m needs >= 6 s to arrive, longer than any t_clear (~4 s) +
+    // margin (1.5 s), so a gap open at commit time stays open.
+    const double GapScanRangeM = 100.0;
     // NOSE gap of the yield stop line: the front bumper stops this far before
     // the node. Measured (Fig8StopLineDiagTests SAT sweep): a stopped yield car
     // needs its nose >= ~4.0-4.5 m from C so that priority traffic passing
@@ -243,10 +292,35 @@ public static class CarCollisions
                 return false;   // I'm on the yield arm, not the priority arm
             return true;
         }
+        // (c) A YIELD car still BEFORE its stop line (not yet committed) is
+        // YIELDING, not a threat to a priority car: the stop line is set so
+        // a stopped yield car's body clears the priority lane
+        // (YieldStopNoseGapM). Self-protecting for it is what parked
+        // priority car 5 in its own crossing box and blocked the very yield
+        // car it watched (fig8_xing T_013, 2026-09-10). Once the other car
+        // commits (nose past the line) it is a real threat again.
+        bool IsYieldingBeforeLine(Car o, RoadNetwork n, HashSet<string> signed)
+        {
+            var seg = n.Segments[o.SegIdx];
+            string ahead = o.Forward ? seg.EndNode : seg.StartNode;
+            if (!signed.Contains(ahead)) return false;
+            if (!n.Signs.TryGetValue((o.SegIdx, ahead), out var sg) ||
+                sg != SignType.Yield)
+                return false;
+            if (o.CrossingCommittedNode == ahead) return false;
+            if (!n.Nodes.TryGetValue(ahead, out var nxy)) return false;
+            double stopGap = o.LengthM * 0.5 +
+                             Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
+            return Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pppm > stopGap;
+        }
         // Most-immediate crossing conflict per PRIORITY car this tick (uid ->
         // the car it is watching, the TTC, and its own distance to the meet
         // point). Filled by the v2 pair loop, consumed after it.
         var pConflicts = new Dictionary<int, (int Other, double Ttc, double DistP)>();
+        // Most-immediate v2 conflict for EVERY car (priority or not): the
+        // commit check (R3b) needs "is there a stationary body in my path"
+        // regardless of right-of-way.
+        var immediateConflict = new Dictionary<int, (int Other, double Ttc, bool OtherStationary)>();
 
         foreach (var c in carList)
         {
@@ -258,10 +332,12 @@ public static class CarCollisions
             // This car's own range: fast cars see (and must react to) the
             // leader much further out so they can still stop in time.
             double lookAhead = LookAheadForSpeed(c.Speed);
+            int lvlC = net is null ? 0 : net.Segments[c.SegIdx].Level;
 
             foreach (var o in grid.Near(c.X, c.Y, ring))
             {
                 if (o.Uid == c.Uid) continue;
+                int lvlO = net is null ? 0 : net.Segments[o.SegIdx].Level;
                 // Staged PRIORITY response: while this car is WATCHING car o
                 // (alert set by last tick's v2), the staged logic below is the
                 // single brake authority for o (it now includes a gap-based
@@ -273,7 +349,13 @@ public static class CarCollisions
                 double alongPx = dxc * fx + dyc * fy;          // ahead?
                 if (alongPx < 0 || alongPx > lookAhead * pppm) continue;
                 double latPx = dxc * rx + dyc * ry;
-                if (Math.Abs(latPx) > CorridorHalfWidthM * pppm) continue;
+                if (Math.Abs(latPx) > CorridorHalfWidthM * pppm)
+                {
+                    if (o.Speed < 6.0 && c.Speed >= 10.0 &&            // TEMPORARY
+                        alongPx / pppm <= 40.0)
+                        Console.WriteLine($"DBGV1X t={simTime:F2} uid{c.Uid} o{o.Uid}({o.Speed:F1}) along={alongPx / pppm:F1} lat={latPx / pppm:F2}");
+                    continue;
+                }
 
                 // Oblique/crossing pair (heading differs a lot): the centre-in-
                 // corridor test is too coarse for them - a car stopped at its
@@ -285,8 +367,11 @@ public static class CarCollisions
                 // corridor: then they are in my path and I brake; otherwise
                 // they pass beside me (v2/Resolve own the rest).
                 double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
+                // 3D: the corridor and the body must share a level - a deck
+                // car's corridor ignores ground traffic under the bridge.
                 if (hdiff >= 60.0 &&
-                    !ObstacleGeometry.BoxesIntersect(ForwardCorridorBox(c, pppm), Body(o)))
+                    !ObstacleGeometry.BoxesIntersect(
+                        ForwardCorridorBox(c, pppm, lvlC), Body(o, lvlO)))
                     continue;
 
                 // Bumper gap in metres: centre distance minus HALF of each
@@ -312,12 +397,19 @@ public static class CarCollisions
                 // behind a braking leader and no legal braking could save it,
                 // seeding the rear-end cascade that gridlocked the fleet.
                 double vl = Math.Max(vAhead, 0.0);
+                // Effectively-stationary leader: add StopMarginM (see the
+                // constants - the plain formula is the zero-margin
+                // recoverable boundary; a creeping leader < 2 m/s is a wall).
+                double gapEff = gapM - StandstillGapM -
+                                (vl < StationaryCapMps ? StopMarginM : 0.0);
                 double cap = Math.Sqrt(vl * vl +
                              2.0 * Config.CAR_BRAKING *
-                             Math.Max(gapM - StandstillGapM, 0.0));
+                             Math.Max(gapEff, 0.0));
                 if (cap < best) { best = cap; _v1By = o.Uid;
                     _v1Along = alongPx / pppm; _v1Lat = latPx / pppm;
                     _v1Gap = gapM; }   // TEMPORARY
+                if (o.Speed < 0.1 && c.Speed >= 5.0 && gapM <= 60.0)   // TEMPORARY
+                    Console.WriteLine($"DBGV1 t={simTime:F2} uid{c.Uid} lead{o.Uid} gap={gapM:F1} cap={cap:F2} best={best:F2}");
             }
 
             if (best < double.PositiveInfinity)
@@ -356,6 +448,12 @@ public static class CarCollisions
             foreach (var o in grid.Near(c.X, c.Y, pairRing))
             {
                 if (o.Uid <= c.Uid) continue;   // each pair once, deterministic
+                // Different levels (bridge over ground at the fig8 crossing):
+                // the 3D boxes never overlap at any sweep stage - no crossing
+                // conflict can occur, so neither car must yield for the other.
+                if (net is not null &&
+                    net.Segments[c.SegIdx].Level != net.Segments[o.SegIdx].Level)
+                    continue;
                 double distPx = Math.Hypot(o.X - c.X, o.Y - c.Y);
                 if (distPx > PairCheckRadiusM * pppm) continue;
 
@@ -367,7 +465,28 @@ public static class CarCollisions
                 // leader's axis as "coming from my right + closing" and made
                 // leaders stop for their followers at every queue - the fig8
                 // fleet gridlock.)
-                if (IsDirectlyBehind(c, o, pppm) || IsDirectlyBehind(o, c, pppm)) continue;
+                // Same-lane following pair. The old blanket filter skipped
+                // these here on the assumption that v1's forward corridor
+                // owns them - but v1's corridor is a STRAIGHT 1.8 m strip on
+                // my axis, and on a curve the leader sits laterally outside
+                // it at exactly the distance where the cap must start
+                // binding: T_033 car 11 (20.7 m/s) and leader car 13, 18 m
+                // apart on the curve - outside v1's corridor (lat ~2 m),
+                // filtered out here (lat ~1.5 m on the LEADER's axis) -
+                // capped by nobody until the gap was 6 m, rear-end at 26 km/h.
+                // Same-lane pairs therefore ALWAYS get the v2 cap, borne by
+                // the REAR car - never by the leader (that is what the old
+                // right-before-left misread did: leaders stopping for their
+                // own tails, the fig8 fleet gridlock).
+                int? rearUid = null;
+                // IsDirectlyBehind(me, other) = "other is behind ME" - so the
+                // rear car is the OTHER one in each case.
+                if (IsDirectlyBehind(c, o, pppm)) rearUid = o.Uid;
+                else if (IsDirectlyBehind(o, c, pppm)) rearUid = c.Uid;
+                if (Math.Min(c.Speed, o.Speed) < 6.0 &&               // TEMPORARY
+                    Math.Max(c.Speed, o.Speed) >= 10.0 &&
+                    distPx / pppm <= 40.0)
+                    Console.WriteLine($"DBGF t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pppm:F1} rear={rearUid}");
 
                 // A pair with a stationary member is NOT skipped: a car driving
                 // at full speed towards a body that really blocks its path must
@@ -381,9 +500,22 @@ public static class CarCollisions
                 bool anyStationary = c.Speed < StationaryEps || o.Speed < StationaryEps;
 
                 var conflict = EarliestConflict(c, o, sweeps[c.Uid], sweeps[o.Uid],
+                                                net is null ? 0 : net.Segments[c.SegIdx].Level,
+                                                net is null ? 0 : net.Segments[o.SegIdx].Level,
                                                 padM: anyStationary ? 0.0 : PredictionPadM);
+                if (Math.Min(c.Speed, o.Speed) < 6.0 &&                 // TEMPORARY
+                    Math.Max(c.Speed, o.Speed) >= 10.0 &&
+                    distPx / pppm <= 40.0)
+                    Console.WriteLine($"DBGV2x t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pppm:F1} " +
+                        (conflict is null ? "NULL" : $"s={conflict.Value.TimeS:F1}"));
                 if (conflict is null) continue;
                 var (stageS, distC, distO) = conflict.Value;
+                if (!immediateConflict.TryGetValue(c.Uid, out var imC) ||
+                    stageS < imC.Ttc)
+                    immediateConflict[c.Uid] = (o.Uid, stageS, o.Speed < StationaryEps);
+                if (!immediateConflict.TryGetValue(o.Uid, out var imO) ||
+                    stageS < imO.Ttc)
+                    immediateConflict[o.Uid] = (c.Uid, stageS, c.Speed < StationaryEps);
 
                 // Right-before-left decides which of the two bears the cap.
                 // NOTE: a PRIORITY-road car is NOT exempt from this - right
@@ -394,8 +526,26 @@ public static class CarCollisions
                 // other side.
                 bool cYields = ComesFromMyRight(c, o);
                 bool oYields = ComesFromMyRight(o, c);
+                // A yield car BRAKING BEFORE its stop line is holding at the
+                // line (its body clears the priority lane by design) - not
+                // stopping in anyone's path: keep the RBL/gap treatment, or
+                // the priority car would brake for a car that will stop 6 m
+                // clear of its lane (the T_013 box-parking deadlock).
+                var fbsSlow = c.Speed >= o.Speed ? (Car)o : (Car)c;
+                bool fbs = (ClosingFastVsBrakingSlow(c, o) ||
+                            ClosingFastVsBrakingSlow(o, c)) &&
+                           (net is null ||
+                            !IsYieldingBeforeLine(fbsSlow, net, signedNodes));
                 int yieldUid;
-                if (anyStationary)
+                if (rearUid is not null)
+                {
+                    // Same-lane: the rear car bears the cap (see the filter
+                    // note above). Right-before-left is meaningless here -
+                    // on a curve it reads the closing tail as an "incoming"
+                    // car from the leader's right and caps the wrong one.
+                    yieldUid = rearUid.Value;
+                }
+                else if (anyStationary)
                 {
                     // The mover bears the cap: a stopped body cannot move away,
                     // and ComesFromMyRight reads stationary cars as never
@@ -403,14 +553,109 @@ public static class CarCollisions
                     // the car that cannot do anything about it).
                     yieldUid = c.Speed < StationaryEps ? o.Uid : c.Uid;
                 }
+                else if (fbs)
+                {
+                    // Fast car closing on a BRAKING slow car: the slow one is
+                    // becoming a wall (stopping ahead), so the FAST car bears
+                    // the cap. RBL caps the slower one here and the faster
+                    // arrives above the margin curve (T_035: car 36 at 20.6
+                    // m/s, car 34 braking to a stop 36 m out - rear-end at
+                    // 16 km/h).
+                    yieldUid = c.Speed >= o.Speed ? c.Uid : o.Uid;
+                }
                 else if (cYields != oYields)
                     yieldUid = cYields ? c.Uid : o.Uid;
                 else
                     yieldUid = Math.Min(c.Uid, o.Uid);  // tie -> lower uid yields
                 double dMeet = yieldUid == c.Uid ? distC : distO;
-                double cap = GradedCap(stageS, dMeet);
+                // A stationary other: continuous stop formula with
+                // StopMarginM. The GradedCap's stageS<=1 s -> 0 cliff would
+                // cap a fast car at ZERO the moment it is within 1 s of a
+                // stopped body - already inside the unavoidable band (the
+                // T_025 rear-end); the margin formula keeps braking smooth
+                // and 3 m further out.
+                // dMeet is the distance to the OVERLAP point (my front
+                // touches the other's rear) = bumper gap + MY half length;
+                // subtract it so the formula zeroes at the same bumper gap
+                // as the v1 corridor formula (T_026: the 3.2 m mismatch
+                // let the v2 cap target 6 m/s at a 4.6 m bumper gap while
+                // v1 already demanded 0 - the car hit the stopped lead at
+                // 2 m/s when the IsDirectlyBehind filter handed the pair
+                // over mid-approach on the curve).
+                // The margin formula applies when the TARGET (the car we
+                // stop for) is effectively stationary (< StationaryCapMps),
+                // not just fully stopped - a creeping target (< 2 m/s) gives
+                // the GradedCap's zero-margin/1 s-cliff treatment and the
+                // follower arrives inside the unavoidable band (T_030 car 11
+                // vs creeping car 13).
+                var targetCar = yieldUid == c.Uid ? o : c;
+                // The margin formula also applies to a BRAKING slow target
+                // (fbs): it stops ahead and becomes an obstacle, so the
+                // yielder must be able to stop short of it with the full
+                // margin - the GradedCap's recoverable-boundary math assumes
+                // the target keeps moving.
+                double cap = (targetCar.Speed < StationaryCapMps || fbs)
+                    ? Math.Sqrt(2.0 * Config.CAR_BRAKING *
+                          Math.Max(dMeet - (yieldUid == c.Uid ? c : o).LengthM * 0.5
+                                   - StandstillGapM - StopMarginM, 0.0))
+                    : GradedCap(stageS, dMeet);
+
+                // RBL yield semantics (T_020/T_021, 2026-09-10): the raw
+                // GradedCap let a yielder ROLL INTO the crossing box while
+                // the other car was already closing (the cap only bound
+                // late), then decelerated it as stageS shrank until
+                // stageS < 1 s set the cap to ZERO INSIDE the box - the
+                // yielder stopped 2-3 m past the node, blocking the
+                // priority car's path, and got rear-ended at 65 km/h (2 of
+                // 3 runs on the unsigned map). A driver commits: the gap is
+                // good and they clear the box, or they hold BEFORE entering.
+                // Never half-in.
+                var yieldCar = yieldUid == c.Uid ? c : o;
+                double yieldHalfL = yieldCar.LengthM * 0.5;
+                if (rearUid is null && !fbs &&
+                    dMeet <= yieldHalfL && targetCar.Speed >= StationaryCapMps)
+                {
+                    // Nose at/past the meet point - INSIDE the crossing:
+                    // complete it (once committed, keep going - user rule).
+                    // A stop in the middle of the box guarantees a block;
+                    // finishing the crossing is the only forward move.
+                    // (A SLOW/STATIONARY target is never "completed": keep
+                    // the raw cap - hold short of the body, no creeping in;
+                    // forcing 4 m/s into a 2 m gap rear-ends it.)
+                    cap = Math.Max(cap, RblCompleteCrossingMps);
+                }
+                else if (rearUid is null && !fbs && dMeet > yieldHalfL)
+                {
+                    // Still BEFORE the crossing: may enter only if it can
+                    // CLEAR the box before the other car arrives (same
+                    // feasibility test as the signed rule). Otherwise hold
+                    // before the box - full stop, no rolling entry. (With a
+                    // stationary other this reads as "the box is blocked -
+                    // hold", which is the correct move.)
+                    //
+                    // The hold only applies while the other car is ACTUALLY
+                    // approaching: a standing car is never "arriving" - the
+                    // stageS computed against its 1.6 m/s floor sweep is
+                    // fictitious. Holding for standing cars deadlocked all
+                    // four mouths of the unsigned crossing (T_023: every
+                    // approach car held for the standing car on the crossing
+                    // diagonal; nobody moved, box empty, 0/50 for 200 s).
+                    // With a standing other, keep the raw (mild) GradedCap:
+                    // both cars enter, the closing-motion RBL test resolves
+                    // the pair as they approach, and the in-box rule finishes
+                    // the crossing.
+                    var otherCar = yieldUid == c.Uid ? o : c;
+                    double tClearS = (dMeet + SignCrossClearM) /
+                                     Math.Max(yieldCar.Speed, 3.0);
+                    if (otherCar.Speed >= OtherYieldingMinSpeedMps &&
+                        stageS < tClearS + SignGapMarginS)
+                        cap = 0.0;
+                }
 
                 int otherUid = yieldUid == c.Uid ? o.Uid : c.Uid;
+                if (Math.Min(c.Speed, o.Speed) < 6.0 &&                  // TEMPORARY
+                    Math.Max(c.Speed, o.Speed) >= 10.0 && dMeet <= 40.0)
+                    Console.WriteLine($"DBGV2 t={simTime:F2} y{yieldUid}({(yieldUid == c.Uid ? c.Speed : o.Speed):F1})/{otherUid}({(yieldUid == c.Uid ? o.Speed : c.Speed):F1}) dMeet={dMeet:F1} stage={stageS:F2} cap={cap:F2}");
                 string v2Text = anyStationary
                     ? $"[R2] car {otherUid} stopped in my path"
                     : $"[R2] predicted crossing with car {otherUid} in {stageS:F1} s";
@@ -423,7 +668,6 @@ public static class CarCollisions
                 // observes first. So the immediate v2 cap is withheld for it and
                 // the staged logic below decides its brake instead. Non-priority
                 // cars keep the immediate cap (right-before-left / stopped body).
-                var yieldCar = yieldUid == c.Uid ? c : o;
                 if (!IsPriorityCar(yieldCar))
                     OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text);
                 DebugLog.Add($"v2 uid{yieldUid}={cap:F2} pair({c.Uid},{o.Uid}) s={stageS:F1}");   // TEMPORARY
@@ -454,14 +698,18 @@ public static class CarCollisions
         {
             if (!pConflicts.TryGetValue(c.Uid, out var pc))
             {
-                if (c.AlertOtherUid != 0)
+                if (c.AlertOtherUid != 0 &&
+                    simTime - c.AlertLastSeenT >= AlertClearHoldS)
                 {
+                    // Conflict absent for AlertClearHoldS - genuinely gone
+                    // (see the constant for the flicker this guards).
                     int gone = c.AlertOtherUid;
                     c.ClearAlert();
                     c.RecordDecision(simTime, $"[R6] car {gone} cleared - proceeding");
                 }
                 continue;
             }
+            c.AlertLastSeenT = simTime;
             int otherUid = pc.Other;
             double ttc = pc.Ttc;
             double brakingTime = c.Speed > 0.01 ? c.Speed / Config.CAR_BRAKING : double.MaxValue;
@@ -503,6 +751,16 @@ public static class CarCollisions
             }
             if (ttc < brakingTime || (simTime - c.AlertStartT) > AlertGraceS)
             {
+                // (c) A yield car still before its stop line is yielding,
+                // not a threat - see IsYieldingBeforeLine. Keep watching;
+                // if it commits, the brake fires on the next tick.
+                if (net is not null &&
+                    carByUid.TryGetValue(otherUid, out var yc) &&
+                    IsYieldingBeforeLine(yc, net, signedNodes))
+                {
+                    c.AlertLastTtc = ttc;
+                    continue;
+                }
                 // The cap is the TIGHTER of:
                 //  (a) the meeting-point cap (GradedCap) - assumes a CLEAR
                 //      meeting zone: stop StandstillGap short of it; and
@@ -574,6 +832,27 @@ public static class CarCollisions
                 // uid 26 braked for it; whole loop frozen from t~30 s).
                 if (dToNodeM <= stopGapM)
                 {
+                    // (b) Do not commit into a BLOCKED box: a stationary
+                    // body in my path means the crossing is occupied - the
+                    // legal move is to hold at the stop line. The old
+                    // unconditional commit put cars in the box behind the
+                    // blocker, where the only way out was a creep into
+                    // contact (fig8_xing: car 29 committed at t=4.3 into a
+                    // box car 5 had occupied since t~2.5, then crept for
+                    // 15 s, 2026-09-10). Once committed the user rule still
+                    // applies: keep going.
+                    if (c.CrossingCommittedNode != aheadNode &&
+                        immediateConflict.TryGetValue(c.Uid, out var blk) &&
+                        blk.OtherStationary)
+                    {
+                        // Full stop at the line until the blocker moves or
+                        // clears. (A non-priority car already carries the v2
+                        // "stopped in my path" cap; a priority car's staged
+                        // response has no immediate cap, so hold it here.)
+                        OfferCap(c.Uid, 0.0, $"avoid#{blk.Other}",
+                                 $"[R3] holding before line - box blocked by car {blk.Other}");
+                        continue;
+                    }
                     if (c.CrossingCommittedNode != aheadNode)
                     {
                         c.CrossingCommittedNode = aheadNode;
@@ -609,8 +888,9 @@ public static class CarCollisions
                 foreach (var o in carList)
                 {
                     if (o.Uid == c.Uid || o.SegIdx == c.SegIdx) continue;
-                    var oseg = net.Segments[o.SegIdx];
-                    if (oseg.StartNode != aheadNode && oseg.EndNode != aheadNode)
+                    // 3D: a car on another level (bridge branch at the same
+                    // physical point) never conflicts with this one.
+                    if (net.Segments[o.SegIdx].Level != net.Segments[c.SegIdx].Level)
                         continue;
                     // Only CROSSING pairs threaten: a car on my OWN road's
                     // other arm (parallel/anti-parallel heading) passes beside
@@ -623,6 +903,18 @@ public static class CarCollisions
                     if (hdiff < 40.0 || hdiff > 140.0)
                         continue;   // same road - no conflict
                     double dO = Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pppm;
+                    // Scan by DISTANCE to the node, not by segment: limiting
+                    // the scan to the node's own segments was blind to a fast
+                    // car on the segment BEHIND the arm (T_017: car 27
+                    // committed at t=36.4 while car 26 closed from ~45 m out
+                    // on the segment behind the arm - invisible to the
+                    // segment filter). That commit deadlocked the box: car
+                    // 27's EXIT arm was occupied by car 26 (head-on, 4 m
+                    // out), and car 26 held for car 27 in the box - circular
+                    // wait, whole fleet frozen. The hdiff + pointing + eta
+                    // filters below exclude non-threats.
+                    if (dO > GapScanRangeM)
+                        continue;
                     if (dO < PriorityProximityM)
                     { blocked = true; blockedBy = o.Uid; break; }   // already at the crossing
                     // Approaching from its arm? Forward vector must point at C.
@@ -636,16 +928,22 @@ public static class CarCollisions
                 }
                 if (!blocked) continue;
 
-                // Fastest speed that still stops at the stop line.
-                double ycap = Math.Sqrt(2.0 * Config.CAR_BRAKING *
-                                        Math.Max(dToNodeM - stopGapM, 0.0));
-                OfferCap(c.Uid, ycap, $"sign#{aheadNode}#{blockedBy}",
+                // HOLD THE LINE (full stop) while the gap is bad. The old
+                // "fastest speed that still stops at the line" cap let a
+                // SLOW car roll straight through: it could technically stop
+                // (2.5 m/s < 6.5 m/s cap) so the cap never bound, it crossed
+                // the line and committed into the path of the car it was
+                // supposed to yield to (T_015: car 34 at 8 km/h committed
+                // at t=4.35 while car 10 closed at 65 km/h, 0.7 s out). A
+                // driver at a yield sign holds the line when the gap is
+                // bad; the commit block releases the hold once the gap
+                // opens (or the box blocker moves - see (b) above).
+                OfferCap(c.Uid, 0.0, $"sign#{aheadNode}#{blockedBy}",
                          byFeasibility
                          ? $"[R4] cannot clear before car {blockedBy} arrives " +
                            ($"({dToNodeM:F0} m out)")
                          : $"[R5] yield sign: car {blockedBy} at the crossing " +
                            ($"({dToNodeM:F0} m out)"));
-                DebugLog.Add($"sign uid{c.Uid}={ycap:F2} node={aheadNode} d={dToNodeM:F1}");   // TEMPORARY
             }
 
         // --- Cap decision persistence + decision log -------------------------
@@ -717,6 +1015,11 @@ public static class CarCollisions
                 }
             }
         }
+        // TEMPORARY: per-tick applied-cap trace for fast cars
+        foreach (var c in carList)
+            if (c.Speed >= 5.0 && caps.TryGetValue(c.Uid, out var ap) &&
+                ap < c.Speed - 0.5)
+                Console.WriteLine($"DBGCAP t={simTime:F2} uid{c.Uid} v={c.Speed:F1} cap={ap:F2}");
         return caps;
     }
 
@@ -730,7 +1033,8 @@ public static class CarCollisions
     /// turns out to be the one that must yield).</summary>
     static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t, double pppm)
     {
-        double v = Math.Max(0.0, Math.Max(car.Speed, car.TargetSpeed));
+        double v = Math.Max(MinSweepSpeedMps,
+                            Math.Max(car.Speed, car.TargetSpeed));
         var nav = car.BicycleNav;
         var refLine = nav?.Ref;
         if (refLine is not null)
@@ -772,6 +1076,7 @@ public static class CarCollisions
         Car c, Car o,
         (double X, double Y, double H, double Dist)[] sweepC,
         (double X, double Y, double H, double Dist)[] sweepO,
+        int lvlC, int lvlO,
         double padM = PredictionPadM)
     {
         for (int i = 0; i < sweepC.Length; i++)
@@ -782,7 +1087,9 @@ public static class CarCollisions
                 c.LengthM + 2.0 * padM, c.WidthM);
             var boxO = ObstacleGeometry.BoxCorners(ox, oy, oh,
                 o.LengthM + 2.0 * padM, o.WidthM);
-            if (ObstacleGeometry.BoxesIntersect(boxC, boxO))
+            if (ObstacleGeometry.BoxesIntersect(
+                    new ObstacleGeometry.BodyBox(boxC, lvlC),
+                    new ObstacleGeometry.BodyBox(boxO, lvlO)))
                 return ((i + 1) * TtcSweepStepS, cd, od);
         }
         return null;
@@ -803,20 +1110,39 @@ public static class CarCollisions
     /// look-ahead past my front bumper, at my REAL width - the strip of road
     /// I actually need to be clear to proceed. Used by v1's oblique-pair
     /// gate (see there).</summary>
-    static List<(double X, double Y)> ForwardCorridorBox(Car c, double pppm)
+    static ObstacleGeometry.BodyBox ForwardCorridorBox(Car c, double pppm, int level)
     {
         double rad = Math.Radians(c.Heading);
         double fx = Math.Sin(rad), fy = Math.Cos(rad);
         var (bx, by) = c.BodyCenter();
         double s1 = c.LengthM * 0.5 + LookAheadForSpeed(c.Speed);  // centre -> front+lookahead
         double sc = s1 / 2.0;
-        return ObstacleGeometry.BoxCorners(bx + fx * sc * pppm, by + fy * sc * pppm,
-                                           c.Heading, s1, c.WidthM);
+        return new ObstacleGeometry.BodyBox(
+            ObstacleGeometry.BoxCorners(bx + fx * sc * pppm, by + fy * sc * pppm,
+                                        c.Heading, s1, c.WidthM), level);
     }
 
     /// <summary>True if `other` sits directly BEHIND `me` within the corridor
     /// half-width - a same-lane following configuration that v1's forward-
     /// corridor cap already governs (see the pair-loop filter).</summary>
+    /// <summary>True if `fast` is closing on `slow` with at least DOUBLE the
+    /// speed while `slow` is actively braking (TargetSpeed below current
+    /// speed) - i.e. `slow` is stopping ahead and becoming an obstacle. In
+    /// that configuration the fast car must be the one that adapts; the
+    /// right-before-left reading (T_035 car 36/34) caps the slower car and
+    /// lets the faster one arrive inside the unavoidable band.</summary>
+    static bool ClosingFastVsBrakingSlow(Car fast, Car slow)
+    {
+        if (slow.Speed < 0.05 || fast.Speed < 2.0 * slow.Speed) return false;
+        if (slow.TargetSpeed >= slow.Speed - 0.5) return false;   // not braking
+        double dx = slow.X - fast.X, dy = slow.Y - fast.Y;
+        double frad = Math.Radians(fast.Heading);
+        double srad = Math.Radians(slow.Heading);
+        double rvx = Math.Sin(frad) * fast.Speed - Math.Sin(srad) * slow.Speed;
+        double rvy = Math.Cos(frad) * fast.Speed - Math.Cos(srad) * slow.Speed;
+        return dx * rvx + dy * rvy > 0;   // closing distance
+    }
+
     static bool IsDirectlyBehind(Car me, Car other, double pppm)
     {
         double rad = Math.Radians(me.Heading);
@@ -872,7 +1198,8 @@ public static class CarCollisions
     public static HashSet<int> Resolve(IEnumerable<Car> cars,
                                        Dictionary<int, (double X, double Y, double Heading)> prevPose,
                                        double simTime = 0.0,
-                                       Dictionary<int, double>? impactSpeed = null)
+                                       Dictionary<int, double>? impactSpeed = null,
+                                       RoadNetwork? net = null)
     {
         var grid = Grid.Build(cars);
         var contacted = new HashSet<int>();
@@ -880,11 +1207,21 @@ public static class CarCollisions
 
         foreach (var c in cars)
         {
-            var boxC = BodyForResolve(c);
+            int lvlC = net is null ? 0 : net.Segments[c.SegIdx].Level;
+            var boxC = BodyForResolve(c, lvlC);
             foreach (var o in grid.Near(c.X, c.Y, 1))
             {
                 if (o.Uid <= c.Uid) continue;   // each pair once, deterministic
-                if (!ObstacleGeometry.BoxesIntersect(boxC, BodyForResolve(o))) continue;
+                // 3D contact: cars on different levels (bridge over ground at
+                // the fig8 crossing) never touch - the x/y overlap under the
+                // deck is not a crash.
+                if (net is not null &&
+                    net.Segments[c.SegIdx].Level != net.Segments[o.SegIdx].Level)
+                    continue;
+                if (!ObstacleGeometry.BoxesIntersect(
+                        boxC,
+                        BodyForResolve(o, net is null ? 0 : net.Segments[o.SegIdx].Level)))
+                    continue;
 
                 partner[c.Uid] = o.Uid;
                 partner[o.Uid] = c.Uid;
@@ -928,7 +1265,8 @@ public static class CarCollisions
                         carByUid.TryGetValue(other, out var o))
                         CrashDumper.Dump(c, o, simTime,
                                          impactSpeed is null ? null : impactSpeed.GetValueOrDefault(c.Uid),
-                                         impactSpeed is null ? null : impactSpeed.GetValueOrDefault(o.Uid));
+                                         impactSpeed is null ? null : impactSpeed.GetValueOrDefault(o.Uid),
+                                         net);
                 }
                 c.InContact = true;
                 c.ContactWith = other;

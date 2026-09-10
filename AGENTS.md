@@ -77,10 +77,10 @@ the old way anyway is a violation of this rule.
 
 The test suite in `tests/test_turning.py` is the project's **end-to-end
 (e2e) test**: it drives the live game (real physics, real rendering, real
-road network) over the REST API on :5000. See `docs/TESTING.md` for the
+road network) over the REST API on :5001. See `docs/TESTING.md` for the
 full workflow. The canonical runner here is `scripts/run_e2e.sh`, which
 handles the whole cycle: kills stale processes (C# host AND old Python
-`src.main` - a stale Python server on :5000 silently answers curls meant
+`src.main` - a stale Python server on :5001 silently answers curls meant
 for .NET), builds + starts the C# console host (`DrivingGame.Server`) with
 the test map, launches the visible Godot window (unless `--no-godot`),
 launches the suite through `POST /run_test`, and streams the log to the
@@ -101,10 +101,13 @@ When the user asks to run the e2e tests:
    only for CI or when the user explicitly asks for it.)
 2. **Results visible while running.** The runner streams the suite output
    to the console as it happens - no backgrounding, no discarding output.
-   The per-run log file (`tests/run_test_<N>_<timestamp>.log`) can be
+   The per-run log file (`tests/run_test_T_<nnn>_<N>_<timestamp>.log`) can be
    re-read or grepped afterwards (long runs can exceed the tool output
    limit).
 
 (Godot self-terminates via `--quit-on-test-done`; if it is still open
-afterwards, say so - never kill it with a signal, that pops a macOS
-crash-report window.)
+afterwards, say so - **never send Godot a signal**: a SIGTERM kills .NET's
+exit path into an abort and pops a macOS crash-report window. The runner
+closes windows cleanly instead: the client watches
+`/tmp/driving_game_godot_gen` and quits itself when `scripts/run_e2e.sh`
+bumps it.)

@@ -1,4 +1,5 @@
-// Console host: Sim + REST API on :5000 (headless testing without Godot).
+// Console host: Sim + REST API on :5001 (headless testing without Godot).
+// (Not 5000: macOS AirPlay Receiver squats on it.)
 // Port of the car/src/main.py entry point. Same flags: --map, --start,
 // --port, --smoke. The sim runs on a dedicated background thread with its
 // own 60 Hz pacing (sleep + spin window) - fixed-timestep physics stays
@@ -12,7 +13,7 @@ using DrivingGame.Api;
 // --- Argument parsing (same flags as the Python entry point) -----------------
 
 string? mapName = null, startName = null;
-int apiPort = 5000, smokeFrames = 0;
+int apiPort = 5001, smokeFrames = 0;
 bool measureSleep = false;
 bool collisionsEnabled = true;
 // NB: C# top-level `args` does NOT include the program name (unlike Python's
@@ -159,7 +160,7 @@ if (mapName is not null)
                              network.WorldWidth, network.WorldHeight);
 }
 
-// --- REST API (embedded; the Python server's port-5000 contract) --------------------
+// --- REST API (embedded; the Python server's port-5001 contract) ---------------------
 
 var builder = WebApplication.CreateBuilder();
 builder.Logging.ClearProviders();                 // keep stdout clean for tests
@@ -167,7 +168,7 @@ builder.WebHost.UseUrls($"http://127.0.0.1:{apiPort}");
 var webApp = builder.Build();
 GameApi.MapEndpoints(webApp, engine);
 // Observe the start task: a discarded StartAsync() hides port conflicts -
-// the process would print "started" and then serve nothing on :5000 while
+// the process would print "started" and then serve nothing on :5001 while
 // an old instance keeps answering (bit us during Phase 5 gate testing).
 var startTask = webApp.StartAsync();
 await Task.Delay(200);   // Kestrel binds during StartAsync; give it a moment
@@ -186,7 +187,7 @@ Console.WriteLine($"   Game state:   http://127.0.0.1:{apiPort}/state");
 
 // SIGTERM/SIGINT must stop the process: the WebApplication's own graceful
 // shutdown only stops Kestrel - with an infinite sim loop in Main, a plain
-// `kill <pid>` would leave the process alive holding :5000 (observed during
+// `kill <pid>` would leave the process alive holding :5001 (observed during
 // Phase 5 gate testing).
 var stopCts = new CancellationTokenSource();
 using var termReg = PosixSignalRegistration.Create(PosixSignal.SIGTERM,

@@ -4,18 +4,21 @@
 # Phase 6 burn-in / gate G5 prep).
 #
 # Workflow:
-#   1. Kill any stale game processes (C# host AND old Python src.main - a
-#      stale Python server on :5000 silently answers curls meant for .NET)
-#   2. Build + start the C# console host with the test map, REST API on :5000
+#   1. Kill any stale game processes: C# host, old Python src.main (a stale
+#      Python server on :5001 silently answers curls meant for .NET), and
+#      any running Godot instance (cleanly - via the generation file,
+#      never a signal; see below).
+#   2. Build + start the C# console host with the test map, REST API on :5001
 #   3. Wait until /health is up
-#   4. Launch the Godot client (VISIBLE window unless --no-godot) with
-#      --quit-on-test-done: it QUITS IN-APP when the run finishes, so it
-#      never has to be killed from outside (any kill signal pops a macOS
-#      crash-report window - SIGTERM even aborts .NET's exit path).
+#   4. Launch the Godot client (VISIBLE window unless --no-godot); the
+#      runner closes the window again on exit (clean self-quit - the
+#      client watches a generation file, never a signal).
 #   5. Launch the suite through the host's POST /run_test (server spawns
 #      test_turning.py, logs to tests/run_test_N_*.log); stream that log to
 #      the console with tail -F and poll GET /run_test until it finishes.
-#   6. Stop only the C# host (plain dotnet process - SIGTERM is clean).
+#   6. Stop the C# host (plain dotnet process - SIGTERM is clean) and close
+#      the Godot window. On failure the host stays up so the frozen crash
+#      scene can be analysed (stop it later: pkill -f DrivingGame.Server).
 #
 # Usage:
 #   scripts/run_e2e.sh                                  # full suite, visible
@@ -32,9 +35,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Test-suite Python: prefer the repo venv (docs/TESTING.md convention).
+# The C# host honours $PYTHON for POST /run_test; without it the suite
+# runs on PATH python3, which may lack third-party deps (e.g. requests).
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  export PYTHON="$ROOT/.venv/bin/python"
+fi
+
 GAME_LOG=/tmp/game.log
 GODOT_LOG=/tmp/godot.log
-API=http://127.0.0.1:5000
+API=http://127.0.0.1:5001
 GODOT_BIN="/Applications/Godot_mono.app/Contents/MacOS/Godot"
 
 RUN_GODOT=1
@@ -51,14 +61,28 @@ done
 GAME_PID=""
 GODOT_PID=""
 TAIL_PID=""
+# Clean Godot close: the client (MapRenderer) watches this file and quits
+# itself when the value changes. We NEVER signal Godot - a SIGTERM kills
+# .NET's exit path into an abort and pops a macOS crash-report window.
+GODOT_GEN_FILE=/tmp/driving_game_godot_gen
 HOLD_OPEN=0   # set to 1 on failure: leave host + Godot up for analysis
 cleanup() {
   [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null || true
-  # Godot: NEVER killed here (any kill signal pops a macOS crash-report
-  # window). It stays open for analysis; tell the user it is there.
+  # Close our Godot client window CLEANLY (bump the generation file - the
+  # client quits itself; never a signal). On failure the C# host stays up,
+  # so the frozen scene can be re-opened in a new window.
   if [ -n "$GODOT_PID" ] && kill -0 "$GODOT_PID" 2>/dev/null; then
     echo ""
-    echo "!! Godot window still open (pid $GODOT_PID) - close it manually."
+    echo "==> Closing Godot window (pid $GODOT_PID)..."
+    echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"
+    for i in $(seq 1 10); do
+      kill -0 "$GODOT_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$GODOT_PID" 2>/dev/null; then
+      echo "!! Godot window (pid $GODOT_PID) did not close - close it"
+      echo "   manually (no signal: it pops a macOS crash-report window)."
+    fi
   fi
   # On failure, keep the C# host alive too so the frozen crash scene stays
   # interactive (click cars, /state, /car/uid/decisions). Stop it with:
@@ -72,19 +96,48 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Killing any running game processes (C# host + stale Python src.main)..."
+echo "==> Killing any running game processes (C# host + stale Python src.main + Godot)..."
 pkill -f "DrivingGame.Server" 2>/dev/null || true
 pkill -f "src.main" 2>/dev/null || true
 sleep 1
 
-if pgrep -f "Godot_mono.app/Contents/MacOS/Godot" > /dev/null 2>&1; then
-  echo "!! A Godot instance is already running - close it first (we never"
-  echo "   kill Godot with a signal: that pops macOS crash-report windows)."
-  exit 1
+# Close any stale Godot window CLEANLY: never signal Godot (a SIGTERM
+# kills .NET's exit path into an abort and pops a macOS crash-report
+# window). Bump the generation file - the client quits itself - then wait.
+# Bounded: if it does not exit within 10 s, abort rather than pile on.
+if G_PIDS=$(pgrep -f "$GODOT_BIN"); then
+  echo "==> Closing stale Godot instance(s): $(echo $G_PIDS | tr '\n' ' ')"
+  echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"
+  for i in $(seq 1 10); do
+    pgrep -f "$GODOT_BIN" > /dev/null || break
+    sleep 1
+  done
+  if pgrep -f "$GODOT_BIN" > /dev/null 2>&1; then
+    echo "!! Godot did not close - close the window manually and re-run."
+    exit 1
+  fi
 fi
 
 echo "==> Building DrivingGame.Server..."
 dotnet build DrivingGame.Server/DrivingGame.Server.csproj -v q --nologo
+
+# Godot client assembly: the Godot project (root DrivingGame.csproj) must
+# be built too - Godot loads MapRenderer & friends from
+# .godot/mono/temp/bin/Debug/, which a Server-only build never touches.
+# Without it the window comes up EMPTY ("Cannot instantiate C# script").
+echo "==> Building Godot project assembly..."
+dotnet build DrivingGame.csproj -v q --nologo
+
+# Godot asset import (.godot/imported is gitignored): a fresh clone or a
+# wiped .godot dir has no imported textures, and the window then renders
+# without signs/car sprites (and MapRenderer NREs on the null textures).
+# Idempotent - a few seconds when the cache is current.
+if [ -x "$GODOT_BIN" ]; then
+  echo "==> Importing Godot resources (headless)..."
+  "$GODOT_BIN" --headless --path "$ROOT" --import > /dev/null 2>&1 || {
+    echo "!! Godot asset import failed - the window would render without textures."
+    exit 1; }
+fi
 
 BIN="$ROOT/DrivingGame.Server/bin/Debug/net9.0/DrivingGame.Server"
 if [ ! -x "$BIN" ]; then
@@ -92,7 +145,7 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-echo "==> Starting C# console host (map=basic, API :5000) -> $GAME_LOG"
+echo "==> Starting C# console host (map=basic, API :5001) -> $GAME_LOG"
 nohup "$BIN" --map basic > "$GAME_LOG" 2>&1 &
 GAME_PID=$!
 
@@ -123,7 +176,9 @@ if [ -n "$TEST_SELECTOR" ]; then
   if [[ "$TEST_SELECTOR" =~ ^[0-9]+$ ]]; then
     TEST_NUMBER="$TEST_SELECTOR"
   else
-    TEST_NUMBER=$(python3 - "$TEST_SELECTOR" <<'EOF'
+    # ${PYTHON:-python3}: test_turning.py imports requests at module level,
+    # so --list-json needs the venv interpreter (PATH python3 may lack it).
+    TEST_NUMBER=$(${PYTHON:-python3} - "$TEST_SELECTOR" <<'EOF'
 import json, subprocess, sys
 rows = json.loads(subprocess.check_output(
     [sys.executable, "tests/test_turning.py", "--list-json"]))
@@ -144,7 +199,8 @@ fi
 # (centroid of the loop nodes) at zoom 14, instead of following a spawned car.
 GODOT_CAM_ARGS=()
 if [ -n "$TEST_NUMBER" ]; then
-  CAM=$(python3 - "$TEST_NUMBER" "$API" <<'EOF'
+  # Camera aiming is cosmetic - a failure here must never abort the run.
+  CAM=$(${PYTHON:-python3} - "$TEST_NUMBER" "$API" <<'EOF'
 import json, subprocess, sys, urllib.request
 num, api = int(sys.argv[1]), sys.argv[2]
 rows = json.loads(subprocess.check_output(
@@ -170,7 +226,7 @@ if n:
     ppm = 2.0   # config.PIXELS_PER_METER
     print(f"{xs / n / ppm:.2f} {ys / n / ppm:.2f}")
 EOF
-)
+) || CAM=""
   if [ -n "$CAM" ]; then
     GODOT_CAM_ARGS=(--center $CAM --zoom 14)
     echo "==> Crossing scenario: camera centred on the crossing ($CAM) @ zoom 14"
@@ -183,8 +239,9 @@ if [ "$RUN_GODOT" -eq 1 ]; then
     RUN_GODOT=0
   else
     echo "==> Launching Godot client (visible window) -> $GODOT_LOG"
-    # No --quit-on-test-done: the window stays open after the run so a
-    # failed/crashed scene can be inspected. Close it manually when done.
+    # The runner closes this window again on exit (clean self-quit via the
+    # generation file - never a signal). On failure the C# host stays up,
+    # so the scene can be re-opened in a new Godot window.
     nohup "$GODOT_BIN" --path "$ROOT" -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in

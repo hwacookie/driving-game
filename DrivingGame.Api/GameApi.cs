@@ -3,8 +3,9 @@
 // through its command queue + control buckets (thread-safe), state comes
 // back as a /state-shaped dict. Implemented ONCE here, wired by BOTH hosts
 // (Phase 7): the console host (DrivingGame.Server) and the Godot app
-// (embedded, --source embedded). Port 5000 so external test injection keeps
-// working — all existing test scripts run unchanged.
+// (embedded, --source embedded). Port 5001 (macOS AirPlay Receiver squats
+// on 5000) so external test injection keeps working — all existing test
+// scripts run unchanged.
 
 using System.Diagnostics;
 using System.Text.Json;
@@ -393,6 +394,12 @@ public static class GameApi
                     if (a.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(a.GetString()))
                         extraArgs.Add(a.GetString()!);
 
+            // "interrupt": true -> kill a running test first, then start the
+            // new one. The Godot "Run Test" button always sends this: a
+            // click means "interrupt whatever is running, start this test".
+            bool interrupt = data.TryGetProperty("interrupt", out var iEl) &&
+                             iEl.ValueKind == JsonValueKind.True;
+
             var rows = GetTestList();
             if (number > 0 && rows is not null && number > rows.Count)
                 return Json(new Dictionary<string, object?>
@@ -400,14 +407,32 @@ public static class GameApi
 
             // <repo>/tests/test_turning.py -> two levels up = repo root
             string repoRoot = Path.GetDirectoryName(Path.GetDirectoryName(RunnerPath)!)!;
-            var logFile = Path.Combine(Path.GetDirectoryName(RunnerPath)!,
-                $"run_test_{number}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
 
             lock (TestLock)
             {
                 if (_testRun is not null && _testRun.Proc.HasExited == false)
-                    return Json(new Dictionary<string, object?>
-                        { ["error"] = $"test #{_testRun.Number} is still running (pid {_testRun.Pid})" }, 409);
+                {
+                    if (!interrupt)
+                        return Json(new Dictionary<string, object?>
+                            { ["error"] = $"test #{_testRun.Number} is still running (pid {_testRun.Pid})" }, 409);
+                    // Interrupt: kill the running test (whole process tree)
+                    // so the new one starts immediately. The old run's log
+                    // keeps its partial output - closing its stdout finishes
+                    // the copy task, which disposes the log stream.
+                    try { _testRun.Proc.Kill(true); }
+                    catch (System.IO.IOException) { /* already gone */ }
+                    catch (System.InvalidOperationException) { }
+                    _testRun = null;
+                }
+
+                // Run tag: a fresh, persisted counter for every start (see
+                // RunTag - the e2e runner restarts the host per run, so the
+                // counter must survive in logs/run_counter). This log and
+                // every crash dump written while the run is active share
+                // the tag, so a dump can be attributed to its run.
+                RunTag.Current = $"T_{RunTag.NextRunNumber(CrashDumper.LogsDir()):D3}";
+                var logFile = Path.Combine(Path.GetDirectoryName(RunnerPath)!,
+                    $"run_test_{RunTag.Current}_{number}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
 
                 Process proc;
                 // NOTE: no `using` here - the stream must stay open for the
@@ -416,7 +441,10 @@ public static class GameApi
                 var logStream = File.Open(logFile, FileMode.Append);
                 try
                 {
-                    string cli = (number > 0 ? $"\"{RunnerPath}\" --tests {number}"
+                    // -u: unbuffered stdout - the suite's output must reach
+                    // the log immediately (an interrupted test would lose
+                    // everything still sitting in Python's block buffer).
+                    string cli = "-u " + (number > 0 ? $"\"{RunnerPath}\" --tests {number}"
                                              : $"\"{RunnerPath}\"") +
                         string.Join(" ", extraArgs.Select(a => " \"" + a.Replace("\"", "\\\"") + "\""));
                     var psi = new ProcessStartInfo(PythonExe, cli)
@@ -431,6 +459,7 @@ public static class GameApi
                 catch (Exception e)
                 {
                     logStream.Dispose();
+                    RunTag.Current = RunTag.Idle;   // no run to tag dumps with
                     return Json(new Dictionary<string, object?>
                         { ["error"] = $"launch failed: {e.Message}" }, 500);
                 }
@@ -460,6 +489,8 @@ public static class GameApi
                 if (_testRun is null)
                     return Results.Json(new Dictionary<string, object?> { ["running"] = false });
                 bool exited = _testRun.Proc.HasExited;
+                if (exited)
+                    RunTag.Current = RunTag.Idle;   // run over: idle tag again
                 return Results.Json(new Dictionary<string, object?>
                 {
                     ["running"] = !exited,

@@ -26,3 +26,4 @@ logs/
 ## OS / Python tooling junk
 .DS_Store
 __pycache__/
+.venv/

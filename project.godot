@@ -41,3 +41,6 @@ project/assembly_name="DrivingGame"
 
 rendering_device/driver.windows="d3d12"
 renderer/rendering_method="mobile"
+; MSAA 4x: smooths the world-space lane-marking meshes (the markings are
+; ImmediateMesh triangles - only viewport MSAA anti-aliases their edges).
+rendering/anti_aliasing/quality/msaa=4

@@ -812,7 +812,7 @@ Start with `--api` flag:
 python -m src.main --api
 ```
 
-API runs on http://localhost:5000
+API runs on http://localhost:5001
 
 Endpoints:
 - `GET /health` - Health check

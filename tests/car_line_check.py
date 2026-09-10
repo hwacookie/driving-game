@@ -24,7 +24,7 @@ import time
 import urllib.request
 import json
 
-API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5000")
+API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
 
 # (color, width_m, length_m) - MUST mirror Config.CAR_COLORS
 # (DrivingGame.Sim/Config.cs) and CarSizes in MapRenderer.cs.

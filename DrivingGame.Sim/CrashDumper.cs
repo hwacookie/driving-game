@@ -30,7 +30,8 @@ public static class CrashDumper
     /// pose just before impact - and Speed is already zeroed, so the impact
     /// speed comes from the impactSpeed map instead.</summary>
     public static void Dump(Car a, Car b, double simTime,
-                            double? speedA, double? speedB)
+                            double? speedA, double? speedB,
+                            RoadNetwork? net = null)
     {
         try
         {
@@ -43,13 +44,15 @@ public static class CrashDumper
                     Console.WriteLine("[crash-dump] skipped: both cars already dumped");
                     return;
                 }
+                // RunTag.Current prefixes the dump with the test run that
+                // produced it (T_000 = no run: unit tests / manual drives).
                 path = Path.Combine(LogsDir(),
-                    $"crash_{(int)Math.Round(simTime):D3}s_car{Math.Min(a.Uid, b.Uid):D2}_car{Math.Max(a.Uid, b.Uid):D2}.json");
+                    $"{RunTag.Current}_crash_{(int)Math.Round(simTime):D3}s_car{Math.Min(a.Uid, b.Uid):D2}_car{Math.Max(a.Uid, b.Uid):D2}.json");
                 json = JsonSerializer.Serialize(new
                 {
                     sim_time = Math.Round(simTime, 3),
                     @event = "fresh_contact",
-                    cars = new[] { CarPayload(a, speedA), CarPayload(b, speedB) },
+                    cars = new[] { CarPayload(a, speedA, net), CarPayload(b, speedB, net) },
                 }, JsonOpts);
                 File.WriteAllText(path, json);
                 Dumped.Add(a);
@@ -63,7 +66,8 @@ public static class CrashDumper
         }
     }
 
-    private static Dictionary<string, object?> CarPayload(Car c, double? impactMps) =>
+    private static Dictionary<string, object?> CarPayload(Car c, double? impactMps,
+                                                          RoadNetwork? net) =>
         new()
         {
             ["uid"] = c.Uid,
@@ -76,6 +80,7 @@ public static class CrashDumper
             ["impact_speed_kmh"] = impactMps is null
                 ? null : Math.Round(impactMps.Value * 3.6, 2),
             ["segment"] = c.SegIdx,
+            ["level"] = net is null ? 0 : net.Segments[c.SegIdx].Level,
             ["progress"] = Math.Round(c.Progress, 4),
             ["contact_with"] = c.ContactWith,
             ["hazard"] = (c.Driver as BicycleDriver)?.Hazard ?? false,
@@ -85,8 +90,10 @@ public static class CrashDumper
         };
 
     // <repo root>/logs, derived the same way ObstacleManager finds <root>/data:
-    // walk up from the app base dir to the project.godot marker.
-    private static string LogsDir()
+    // walk up from the app base dir to the project.godot marker. Public so
+    // the server can store the run counter (RunTag.NextRunNumber) beside
+    // the dumps.
+    public static string LogsDir()
     {
         string root = AppContext.BaseDirectory;
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

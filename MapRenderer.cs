@@ -17,19 +17,19 @@ using System.Text.Json;
 /// </summary>
 public partial class MapRenderer : Node2D
 {
-    const string MapUrl = "http://127.0.0.1:5000/map";
-    const string StateUrl = "http://127.0.0.1:5000/state";
-    const string RunTestUrl = "http://127.0.0.1:5000/run_test";
+    const string MapUrl = "http://127.0.0.1:5001/map";
+    const string StateUrl = "http://127.0.0.1:5001/state";
+    const string RunTestUrl = "http://127.0.0.1:5001/run_test";
     const float Ppm = 2f;   // config.PIXELS_PER_METER (/state is in world pixels)
 
     // Phase 7: communication method, selected at startup (user args after
     // "--"). "http" (default) = the existing double pipeline to an external
-    // server on :5000; "embedded" = the sim runs IN-PROCESS (SimHost node),
+    // server on :5001; "embedded" = the sim runs IN-PROCESS (SimHost node),
     // state is read directly per frame, and the REST API is embedded in this
     // process for external test injection. Both methods coexist.
     private string _source = "http";
     private string _embeddedMapName;   // null = OSM (console-host parity)
-    private int _embeddedPort = 5000;
+    private int _embeddedPort = 5001;
     private SimHost _simHost;          // non-null in embedded mode
 
     static Vector2 W(float x, float y) => new(x, -y);
@@ -53,6 +53,9 @@ public partial class MapRenderer : Node2D
     private HttpRequest _cmdHttp;
     private string _pendingCmd = "";      // "post" | "poll"
     private bool _pollActive;
+    private int _pollGen;                 // bump per polling chain - stale CreateTimer callbacks die
+    private bool _cmdHttpBusy;            // _cmdHttp handles ONE request at a time
+    private int _clickPendingNum = 0;     // >0: a Run Test click waits for the in-flight response to land
     private LineEdit _testInput;
     private Button _runTestBtn;
     private Label _runStatus;
@@ -190,7 +193,25 @@ public partial class MapRenderer : Node2D
     private string _lastSpeedText = "";
     private Label _testLabel;          // "5/21" from POST /label (via /state)
     private Panel _infoPanel;          // click-to-inspect car info window
-    private Label _infoLabel;
+    private Label _infoSpeed;          // live speed row (updated per frame)
+    private TextEdit _infoText;        // selectable/scrollable/copyable log
+    private string _lastInfoDecKey = "";    // uid|content: full-reset key
+
+    // Clean-shutdown generation: scripts/run_e2e.sh NEVER signals Godot
+    // (a SIGTERM kills .NET's exit path into an abort and pops a macOS
+    // crash-report window). It bumps this file instead; when the value
+    // changes under us, this window is stale and quits itself.
+    const string GodotGenFile = "/tmp/driving_game_godot_gen";
+    private string _godotGen = "";
+    private ulong _godotGenLastMs;
+    private Button _infoCopyBtn;   // "copy": whole log -> clipboard
+    private ulong _copyFlashUntil; // "copied!" flash revert timestamp
+
+    static string ReadGodotGen()
+    {
+        try { return File.ReadAllText(GodotGenFile).Trim(); }
+        catch { return ""; }
+    }
     private string _lastTestText = null;
 
     // Follow mode mirrors the SIM's own camera (pygame parity: same lerp
@@ -231,7 +252,6 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, Polygon2D[]> _brakeLights = new();
     // Front-corner headlights: white, visible while HeadlightsOn.
     private readonly Dictionary<long, Polygon2D[]> _headlights = new();
-    private readonly Dictionary<long, Line2D> _carOutlines = new();
 
     // Car sprites: seven vehicles extracted from assets/source/vehicles_green.png
     // by tools/make_car_sprites.py (nose = texture top, transparent bg).
@@ -320,6 +340,7 @@ public partial class MapRenderer : Node2D
 
     public override void _Ready()
     {
+        _godotGen = ReadGodotGen();   // baseline for the clean-quit check
         // User args after "--": parsed FIRST - the source selection decides
         // how map + state are fetched. --screenshot <path> saves the viewport
         // a moment after the map is built (parity check vs pygame) and then
@@ -373,7 +394,7 @@ public partial class MapRenderer : Node2D
             GD.Print($"Source: EMBEDDED (in-process sim, REST API on :{_embeddedPort})");
         }
         else
-            GD.Print("Source: HTTP (external server on :5000)");
+            GD.Print("Source: HTTP (external server on :5001)");
 
         _http = GetNode<HttpRequest>("Http");
         // use_threads: without it, Godot's HTTPRequest does ONE socket read
@@ -790,11 +811,46 @@ public partial class MapRenderer : Node2D
             };
             _infoPanel = new Panel { Visible = false };
             _infoPanel.AddThemeStyleboxOverride("panel", sbInfo);
-            _infoLabel = new Label();
-            _infoLabel.AddThemeColorOverride("font_color",
+            // Live speed row on top - kept OUT of the text view so its
+            // per-frame churn never resets the user's scroll position.
+            _infoSpeed = new Label { Text = "" };
+            _infoSpeed.AddThemeColorOverride("font_color",
                 new Color(220 / 255f, 220 / 255f, 220 / 255f));
-            _infoLabel.AddThemeFontSizeOverride("font_size", 18);
-            _infoPanel.AddChild(_infoLabel);
+            _infoSpeed.AddThemeFontSizeOverride("font_size", 16);
+            _infoSpeed.SetAnchorsPreset(Control.LayoutPreset.TopWide);
+            _infoSpeed.OffsetLeft = 8;  _infoSpeed.OffsetRight = -8;
+            _infoSpeed.OffsetTop = 6;   _infoSpeed.OffsetBottom = 30;
+            _infoPanel.AddChild(_infoSpeed);
+            // Real text view instead of a Label: selectable, scrollable and
+            // copyable (Editable=false still allows select + copy), so the
+            // full decision log - up to 100 lines - can be read and copied
+            // out for analysis, not just the ~10 a fixed label could show.
+            _infoText = new TextEdit
+            {
+                Editable = false,   // read-only: nothing can be typed in ...
+                SelectingEnabled = true,   // ...but select + copy still work
+                WrapMode = TextEdit.LineWrappingMode.Boundary,
+                AutowrapMode = TextServer.AutowrapMode.Word,
+            };
+            _infoText.AddThemeFontSizeOverride("font_size", 16);
+            _infoText.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+            _infoText.OffsetLeft = 8;   _infoText.OffsetTop = 34;
+            _infoText.OffsetRight = -8; _infoText.OffsetBottom = -8;
+            _infoPanel.AddChild(_infoText);
+            // "copy" button: copies the ENTIRE log to the clipboard in one
+            // click - manual select-all over 100 lines is the pain this
+            // removes.
+            _infoCopyBtn = new Button { Text = "copy" };
+            _infoCopyBtn.SetAnchorsPreset(Control.LayoutPreset.TopRight);
+            _infoCopyBtn.OffsetLeft = -110; _infoCopyBtn.OffsetTop = 2;
+            _infoCopyBtn.OffsetRight = -8;   _infoCopyBtn.OffsetBottom = 26;
+            _infoCopyBtn.Pressed += () =>
+            {
+                DisplayServer.ClipboardSet(_infoText.Text);
+                _infoCopyBtn.Text = "copied!";
+                _copyFlashUntil = Time.GetTicksMsec() + 1200;
+            };
+            _infoPanel.AddChild(_infoCopyBtn);
             layer.AddChild(_infoPanel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
@@ -1468,7 +1524,6 @@ public partial class MapRenderer : Node2D
         _blinkR.Remove(uid);
         _brakeLights.Remove(uid);
         _headlights.Remove(uid);
-        _carOutlines.Remove(uid);
         if (_carNodes.TryGetValue(uid, out var n))
         { n.QueueFree(); _carNodes.Remove(uid); }
         if (_followUid == uid) _followUid = null;
@@ -1510,31 +1565,6 @@ public partial class MapRenderer : Node2D
             Scale = new Vector2(size.W / tex.GetSize().X, size.L / tex.GetSize().Y),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
-        // Red collision outline: the exact box used for crash detection
-        // (LengthM x WidthM centred on the BODY centre). Prefer the sim's
-        // authoritative footprint (body_corners -> CollLenM/CollWidM); fall
-        // back to the sprite size before the first sample lands.
-        float collL = _carMeta.TryGetValue(uid, out var cm0) && cm0.CollLenM > 0
-                        ? cm0.CollLenM : size.L;
-        float collW = _carMeta.TryGetValue(uid, out var cm1) && cm1.CollWidM > 0
-                        ? cm1.CollWidM : size.W;
-        float chl = collL / 2f, chw = collW / 2f, ccy = -RearAxleOffsetM;
-        var outline = new Line2D
-        {
-            Width = 0.18f,               // metres (scales with zoom)
-            DefaultColor = new Color(1f, 0f, 0f),
-            Closed = true,
-            ZIndex = 1,                  // above the sprite
-            Points = new[]
-            {
-                new Vector2( chw, ccy - chl),   // front-right
-                new Vector2(-chw, ccy - chl),   // front-left
-                new Vector2(-chw, ccy + chl),   // rear-left
-                new Vector2( chw, ccy + chl),   // rear-right
-            },
-        };
-        root.AddChild(outline);
-        _carOutlines[uid] = outline;
         // Blinker corner lights (pygame parity): one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
         // centre; orange, 0.5 s blink period.
@@ -1845,7 +1875,7 @@ public partial class MapRenderer : Node2D
                     _decBusy = true;
                     _decLastMs = nowMs;
                     if (uid != _decUidFor) _decLines = new() { "(loading...)" };
-                    _decHttp.Request($"http://127.0.0.1:5000/car/{uid}/decisions");
+                    _decHttp.Request($"http://127.0.0.1:5001/car/{uid}/decisions");
                 }
                 var mSel = _carMeta.GetValueOrDefault(uid);
                 string color = mSel?.Color ?? "blue";
@@ -1854,14 +1884,23 @@ public partial class MapRenderer : Node2D
                 float kmh = 0f;
                 if (_carBuf.TryGetValue(uid, out var bufSel) && bufSel.Count > 0)
                     kmh = bufSel[^1].SpeedKmh;
+                // The speed row lives in its own Label (per-frame churn is
+                // fine there). The TextEdit is only reset on a STRUCTURAL
+                // change (new decision line, new car) - a full reset drops
+                // the scroll position, so it must not happen more often.
+                _infoSpeed.Text = $"speed   {kmh:F1} km/h";
                 var sb = new System.Text.StringBuilder();
                 sb.Append($"#{uid}   {color} ({cls})\n");
-                sb.Append($"speed   {kmh:F1} km/h\n");
                 sb.Append($"driver  {mSel?.Driver ?? "?"}\n");
                 sb.Append("decisions (newest first):\n");
                 foreach (var line in _decLines)
                     sb.Append(line).Append('\n');
-                _infoLabel.Text = sb.ToString();
+                string decKey = $"{uid}|{sb}";
+                if (decKey != _lastInfoDecKey)
+                {
+                    _lastInfoDecKey = decKey;
+                    _infoText.Text = sb.ToString();
+                }
             }
             _infoPanel.Visible = show;
         }
@@ -1888,9 +1927,9 @@ public partial class MapRenderer : Node2D
         {
             var node = kv.Value;
             _carMeta.TryGetValue(kv.Key, out var m);
-            // Match the RED COLLISION OUTLINE exactly: use the sim's
-            // crash-detection footprint (CollLenM/CollWidM from body_corners),
-            // falling back to the sprite size before the first sample.
+            // Hit area == the sim's crash-detection footprint
+            // (CollLenM/CollWidM from body_corners), falling back to the
+            // sprite size before the first sample.
             var size = CarSizeOf(m?.Color ?? "blue");
             float halfW = (m != null && m.CollWidM > 0 ? m.CollWidM : size.W) / 2f;
             float halfL = (m != null && m.CollLenM > 0 ? m.CollLenM : size.L) / 2f;
@@ -1994,6 +2033,24 @@ public partial class MapRenderer : Node2D
 
     void UpdateOverlays()
     {
+        // Revert the "copied!" flash on the copy button.
+        if (_infoCopyBtn != null && _infoCopyBtn.Text == "copied!" &&
+            Time.GetTicksMsec() >= _copyFlashUntil)
+            _infoCopyBtn.Text = "copy";
+        // Stale-window self-quit: the runner bumped the generation file
+        // (this window belongs to a finished/previous run) -> quit clean.
+        ulong nowMsGen = Time.GetTicksMsec();
+        if (nowMsGen - _godotGenLastMs >= 1000)
+        {
+            _godotGenLastMs = nowMsGen;
+            string gen = ReadGodotGen();
+            if (gen != _godotGen)
+            {
+                Console.WriteLine("[godot] generation changed - quitting (clean close)");
+                GetTree().Quit();
+                return;
+            }
+        }
         // Detect new points via the TAIL, not the count: once the trail
         // hits its 500-point cap the count never changes again while the
         // oldest point slides out - a count check would freeze the lines.
@@ -2227,10 +2284,31 @@ public partial class MapRenderer : Node2D
                 ok: false);
             return;
         }
-        var body = System.Text.Encoding.UTF8.GetBytes($"{{\"number\": {n}}}");
-        _pendingCmd = "post";
+        // A click always means "interrupt whatever is running and start
+        // this test": the server kills the old test process (interrupt)
+        // before it spawns the new one. Stop the old polling chain so its
+        // responses cannot clobber the new run.
+        _pollActive = false;
         _runTestBtn.Disabled = true;
-        SetRunStatus($"Starte Test #{n} …", ok: true);
+        SetRunStatus($"Starte Test #{n} (laufender Test wird unterbrochen) …",
+            ok: true);
+        if (_cmdHttpBusy)
+        {
+            // A request (poll or older start) is in flight - _cmdHttp is
+            // single-flight. Send the new start as soon as that response
+            // lands (OnCmdResponse checks _clickPendingNum first).
+            _clickPendingNum = n;
+            return;
+        }
+        SendRunTest(n);
+    }
+
+    void SendRunTest(int n)
+    {
+        _cmdHttpBusy = true;
+        _pendingCmd = "post";
+        var body = System.Text.Encoding.UTF8.GetBytes(
+            $"{{\"number\": {n}, \"interrupt\": true}}");
         // RequestRaw: raw byte body + custom headers (Godot 4.7).
         _cmdHttp.RequestRaw(RunTestUrl,
             new[] { "Content-Type: application/json" },
@@ -2239,6 +2317,17 @@ public partial class MapRenderer : Node2D
 
     void OnCmdResponse(long code, byte[] body)
     {
+        _cmdHttpBusy = false;
+        // A Run Test click that arrived while a request was in flight goes
+        // out now. The response it supersedes is dropped on purpose: a poll
+        // is periodic, an older start is replaced by the newer click.
+        if (_clickPendingNum > 0)
+        {
+            int clickNum = _clickPendingNum;
+            _clickPendingNum = 0;
+            SendRunTest(clickNum);
+            return;
+        }
         string txt = System.Text.Encoding.UTF8.GetString(body);
         if (_pendingCmd == "post")
         {
@@ -2287,14 +2376,14 @@ public partial class MapRenderer : Node2D
         if (running && haveNumber)
         {
             SetRunStatus($"Test #{n} läuft …", ok: true);
-            GetTree().CreateTimer(3.0).Timeout += PollRunStatus;
+            ScheduleNextPoll();
         }
         else if (!haveNumber)
         {
             if (_quitOnTestDone)
             {
                 // Run not started yet - keep watching.
-                GetTree().CreateTimer(3.0).Timeout += PollRunStatus;
+                ScheduleNextPoll();
             }
             else
             {
@@ -2322,11 +2411,25 @@ public partial class MapRenderer : Node2D
     {
         if (_pollActive) return;
         _pollActive = true;
+        _pollGen++;
         PollRunStatus();
+    }
+
+    // Gen-captured: a CreateTimer that outlived its polling chain (a Run
+    // Test click in between) must not resurrect a second chain.
+    void ScheduleNextPoll()
+    {
+        int gen = _pollGen;
+        GetTree().CreateTimer(3.0).Timeout += () =>
+        {
+            if (gen == _pollGen && _pollActive) PollRunStatus();
+        };
     }
 
     void PollRunStatus()
     {
+        if (!_pollActive || _cmdHttpBusy) return;
+        _cmdHttpBusy = true;
         _pendingCmd = "poll";
         _cmdHttp.Request(RunTestUrl);
     }

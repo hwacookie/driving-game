@@ -111,11 +111,33 @@ public static class ObstacleGeometry
         return (min, max);
     }
 
+    /// <summary>3D body box: 2D footprint corners + z level. A car on level L
+    /// occupies the z interval [L, L+1); a ground obstacle occupies [0, 1).
+    /// Collision requires EQUAL levels AND footprint overlap - the x/y SAT is
+    /// unchanged, the level is an additional filter: a bridge car (level 1)
+    /// passes over ground traffic (level 0) at the fig8 self-crossing without
+    /// contact, and vice versa. Levels come from RoadSegment.Level (0 ground,
+    /// 1 deck, 2 deck-on-deck, -1 tunnel).</summary>
+    public readonly struct BodyBox
+    {
+        public List<(double X, double Y)> Corners { get; }
+        public int Level { get; }
+        public BodyBox(List<(double X, double Y)> corners, int level)
+        {
+            Corners = corners;
+            Level = level;
+        }
+    }
+
+    /// <summary>3D collision test: levels must match, then the 2D SAT.</summary>
+    public static bool BoxesIntersect(BodyBox a, BodyBox b) =>
+        a.Level == b.Level && Intersects2D(a.Corners, b.Corners);
+
     /// <summary>SAT overlap test for two convex quads. Touching edges count as
     /// contact (separation must be strict), so a car resting flush against an
     /// obstacle still registers as in contact.</summary>
-    public static bool BoxesIntersect(List<(double X, double Y)> a,
-                                      List<(double X, double Y)> b)
+    public static bool Intersects2D(List<(double X, double Y)> a,
+                                    List<(double X, double Y)> b)
     {
         foreach (var poly in new[] { a, b })
         {
@@ -480,11 +502,14 @@ public sealed class ObstacleManager
     // --- Stop on contact (per-frame, all modes) ------------------------------
 
     /// <summary>The first obstacle whose footprint touches the player's body box.</summary>
-    public Obstacle? ContactWithCar(Car car)
+    public Obstacle? ContactWithCar(Car car, RoadNetwork? net = null)
     {
         var corners = ObstacleGeometry.PlayerBodyCorners(car);
+        int lvl = net is null ? 0 : net.Segments[car.SegIdx].Level;
         foreach (var ob in Snapshot())
-            if (ObstacleGeometry.BoxesIntersect(corners, ObstacleGeometry.ObstacleFootprint(ob)))
+            if (ObstacleGeometry.BoxesIntersect(
+                    new ObstacleGeometry.BodyBox(corners, lvl),
+                    new ObstacleGeometry.BodyBox(ObstacleGeometry.ObstacleFootprint(ob), 0)))
                 return ob;
         return null;
     }
@@ -500,7 +525,8 @@ public sealed class ObstacleManager
     /// Returns True while in contact (so the validator can treat the motion
     /// as externally constrained).</summary>
     public bool ApplyContactStop(Car car, double dt, double preX, double preY,
-                                 double? preHeading = null)
+                                 double? preHeading = null,
+                                 RoadNetwork? net = null)
     {
         var obs = Snapshot();
         if (obs.Count == 0) return false;
@@ -515,8 +541,13 @@ public sealed class ObstacleManager
             ObstacleGeometry.BoxCorners(x + offX, y + offY, h,
                                         Config.CAR_LENGTH, Config.CAR_WIDTH);
 
+        // 3D contact: the car's box sits at its segment's level, obstacles
+        // are ground objects (level 0) - a deck car passes over them.
+        int lvl = net is null ? 0 : net.Segments[car.SegIdx].Level;
         var cur = BodyAt(car.X, car.Y);
-        if (obs.All(o => !ObstacleGeometry.BoxesIntersect(cur, ObstacleGeometry.ObstacleFootprint(o))))
+        if (obs.All(o => !ObstacleGeometry.BoxesIntersect(
+                new ObstacleGeometry.BodyBox(cur, lvl),
+                new ObstacleGeometry.BodyBox(ObstacleGeometry.ObstacleFootprint(o), 0))))
             return false;
 
         // 1) Brake to a stop - never an instant zeroing from speed. A tiny
@@ -536,7 +567,9 @@ public sealed class ObstacleManager
 
         // 2) Clamp the motion of this step so the boxes never interpenetrate.
         var preBox = BodyAt(preX, preY);
-        if (obs.All(o => !ObstacleGeometry.BoxesIntersect(preBox, ObstacleGeometry.ObstacleFootprint(o))))
+        if (obs.All(o => !ObstacleGeometry.BoxesIntersect(
+                new ObstacleGeometry.BodyBox(preBox, lvl),
+                new ObstacleGeometry.BodyBox(ObstacleGeometry.ObstacleFootprint(o), 0))))
         {
             // The pre-step position was clear: find the furthest point along
             // prev -> new that is still clear (the car rests against the
@@ -549,7 +582,9 @@ public sealed class ObstacleManager
                 double mid = (lo + hi) / 2.0;
                 double mx = preX + (car.X - preX) * mid;
                 double my = preY + (car.Y - preY) * mid;
-                if (obs.Any(o => ObstacleGeometry.BoxesIntersect(BodyAt(mx, my), ObstacleGeometry.ObstacleFootprint(o))))
+                if (obs.Any(o => ObstacleGeometry.BoxesIntersect(
+                        new ObstacleGeometry.BodyBox(BodyAt(mx, my), lvl),
+                        new ObstacleGeometry.BodyBox(ObstacleGeometry.ObstacleFootprint(o), 0))))
                     hi = mid;
                 else
                     lo = mid;
@@ -580,7 +615,9 @@ public sealed class ObstacleManager
             // the car is pinned. Steering that keeps the boxes clear is left
             // alone, so a driver can still steer back away from the contact.
             if (preHeading is not null &&
-                obs.Any(o => ObstacleGeometry.BoxesIntersect(BodyAt(preX, preY), ObstacleGeometry.ObstacleFootprint(o))))
+                obs.Any(o => ObstacleGeometry.BoxesIntersect(
+                        new ObstacleGeometry.BodyBox(BodyAt(preX, preY), lvl),
+                        new ObstacleGeometry.BodyBox(ObstacleGeometry.ObstacleFootprint(o), 0))))
                 car.Heading = preHeading.Value;
         }
         return true;

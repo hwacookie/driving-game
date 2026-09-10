@@ -1,4 +1,4 @@
-<Project Sdk="Godot.NET.Sdk/4.7.1">
+<Project Sdk="Godot.NET.Sdk/4.7.2">
   <PropertyGroup>
     <!-- net9.0: the sim port targets net9.0 (only .NET 9 SDK is installed);
          Godot rolls the runtime forward, as it already did for net8.0 on

@@ -81,7 +81,10 @@ public class CrossingStressTests
             $"persisting; log in /tmp/flap_worst_car.txt");
     }
 
-    [Fact]
+    [Fact(Skip = "known-red (R14: committed car crosses into a stopped body) " +
+                 "and the 50-car spawn placement is under review - skipped per " +
+                 "user decision 2026-09-10, re-enable once the multi-car " +
+                 "spawn is fixed (see e2e fig8_stress, also skipped)")]
     public void CrossingStress_NoContact_Within_15s()
     {
         RunScenario(out double crashT, out int crashA, out int crashB, out var cars);

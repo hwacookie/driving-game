@@ -10,7 +10,7 @@ Target end state (hauke decision 2026-09-04):
 
 - **Renderer and simulation in one app (Godot):** MapRenderer reads sim state
   in-process; no HTTP for gameplay.
-- **REST API (port 5000) stays embedded** so external test injection keeps
+- **REST API (port 5001) stays embedded** so external test injection keeps
   working — all existing test scripts / stress suites run unchanged.
 
 Built in two stages:
@@ -42,7 +42,7 @@ driving-game/
 ├── project.godot, Main.tscn, MapRenderer.cs   Godot client (net8.0)
 ├── DrivingGame.Sim/          class library: the ported simulation
 │                             (no ASP.NET dependency; standalone or embedded)
-├── DrivingGame.Server/       console host: Sim + REST API on :5000
+├── DrivingGame.Server/       console host: Sim + REST API on :5001
 │                             (headless testing without Godot)
 └── data/osm_cache/           OSM JSON cache (copied from car repo)
 ```

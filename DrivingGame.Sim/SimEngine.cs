@@ -686,7 +686,7 @@ public sealed class SimEngine
                         // Stop-on-contact with obstacles (ALL modes): brake at
                         // full braking and clamp so the body box never
                         // interpenetrates an obstacle - the car rests against it.
-                        Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH);
+                        Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-CONTACT uid{c.Uid} v={c.Speed:F4}");
 
@@ -729,7 +729,7 @@ public sealed class SimEngine
                     long tResolve0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     HashSet<int> inContact = CarCollisions.Resolve(_cars.Values, prevPose,
                                                                    _simStepsTotal * DtFixed,
-                                                                   impactSpeed);
+                                                                   impactSpeed, Network);
                     if ((inContact.Contains(37) || inContact.Contains(38)) && Frame is >= 845 and <= 852)   // TEMPORARY
                         Console.WriteLine($"RESOLVE-STOPPED 37/38: {string.Join(",", inContact)}");
                     _resolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tResolve0;
@@ -779,7 +779,7 @@ public sealed class SimEngine
                         // Stop-on-contact with obstacles (ALL modes): brake at
                         // full braking and clamp so the body box never
                         // interpenetrates an obstacle - the car rests against it.
-                        bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH);
+                        bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
 
                         // Physics validation (independent check). While in contact
                         // the motion is externally constrained by a solid object,
@@ -994,7 +994,8 @@ public sealed class SimEngine
                 // The exact box used for crash detection (per-class body
                 // footprint, LengthM x WidthM centred on the body centre):
                 // four [x, y] pixel corners front-right, front-left,
-                // rear-left, rear-right. Rendered as the red collision outline.
+                // rear-left, rear-right. The client uses it as the car's
+                // click/hit area.
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(c)
                     .Select(p => new[] { p.X, p.Y }).ToList(),
                 ["blinker_left"] = c.Driver is BicycleDriver bl ? bl.BlinkerLeft : false,

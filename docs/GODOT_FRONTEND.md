@@ -16,7 +16,7 @@ world rules. Nothing in this plan changes simulated behavior; e2e
 ## 2. Target architecture: three roles, one seam
 
 ```
-                      REST API (localhost:5000)
+                      REST API (localhost:5001)
 ┌───────────────────────────────┐       ◄──────────────────►       ┌─────────────────────┐
 │  WORLD SIMULATOR (Python)     │                                   │  GODOT CLIENT       │
 │  physics + world rules        │                                   │  rendering + input  │

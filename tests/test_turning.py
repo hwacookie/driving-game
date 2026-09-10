@@ -22,7 +22,7 @@ CAR_WIDTH = 1.8             # m
 SPRITE_WHEELBASE_M = 2.64   # m (FRONT_AXLE_OFFSET_M + REAR_AXLE_OFFSET_M)
 
 
-API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5000")  # explicit IPv4: 'localhost' may resolve to ::1, where macOS ControlCenter squats on :5000
+API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")  # explicit IPv4: 'localhost' may resolve to ::1 (and :5000 is squatted on by macOS AirPlay Receiver anyway)
 
 # Results are persisted next to this script, keyed by "start_point|direction",
 # so the next run can report whether each scenario passed the last time it ran
@@ -509,7 +509,7 @@ DETERMINISTIC_TESTS = [
     # starts stuttering. Dispatched by start_point name, not through
     # monitor_turn (see run_deterministic_test).
     ('fig8_stress', 'straight', 0, None, 170.0,
-     "Multi-car stress: 150 cars on the figure-8 for 30 s of sim time (realtime-safe default; --stress-cars N overrides)"),
+     "Multi-car stress: 51 cars on the figure-8 for 30 s of sim time (drivable density on the 723 m loop, odd count - see STRESS_PHASE_CARS; --stress-cars N overrides)"),
     # RIGHT-OF-WAY CROSSING STRESS: 50 cars (25 per direction, interleaved)
     # on the basic map's real degree-4 figure-8 crossing, accelerator held,
     # run for up to 300 s of sim time or until the FIRST crash (two cars
@@ -521,6 +521,17 @@ DETERMINISTIC_TESTS = [
     ('fig8_xing_plain', 'straight', 0, None, 300.0,
      "Right-of-way crossing (NO signs, right-before-left): 50 cars, 25/direction, 300 s or first crash"),
 ]
+
+# Scenarios the NUMBERED suite skips (start_point -> reason). The raw --only
+# path still runs them - that is the debug door while a scenario is under
+# review. (2026-09-10, user decision: the fig8_stress 51-car spawn placement
+# is being reworked - the phase fails on off-road/wrong-side before any
+# crash, so it is out of the green baseline for now.)
+SKIPPED_TESTS = {
+    'fig8_stress': ("51-car spawn placement under review - the phase fails "
+                    "on off-road/wrong-side before any crash; "
+                    "run it raw with --only fig8_stress ... while debugging"),
+}
 
 
 class TurnTester:
@@ -647,11 +658,22 @@ class TurnTester:
         requests.post(f"{API_URL}/label", json={'text': text})
 
     # --- Multi-car stress scenario (fig8_stress, docs/MULTI_CAR_PLAN.md) ---
-    # Default phase is 150 cars: safely inside the sim's real-time range
+    # Default phase is 51 cars: the figure-8 loop is only 723 m, and with
+    # car-car collisions enabled (unlike the original pass-through design)
+    # more than ~50 cars on it is a physical standstill - 150 cars meant
+    # 4.8 m spacing for 4.4 m cars, i.e. an instant pile-up.
+    # The count is ODD on purpose: the figure-8 crosses itself at grade
+    # (one node visited twice per lap), and an EVEN uniform fleet always
+    # has a diametrically opposite pair that reaches that node
+    # simultaneously - a guaranteed head-on on the first pass. With an odd
+    # count the closest pair is offset by half a spacing (~7 m / 0.5 s at
+    # this count), so the fleet drives the full window; the close pass
+    # still exercises the crossing yield logic. Higher counts
+    # stay available via --stress-cars for real-time performance probing
     # (capacity sweep 2026-09-05 - C# ceiling ~170, Python ~90; anything
-    # above 200 runs in slow motion and just stretches wall time). Higher
-    # counts stay available via --stress-cars. Each phase drives the
-    # figure-8 loop for
+    # above 200 runs in slow motion and just stretches wall time; expect
+    # the fleet to jam/collide at those counts - that is the geometry, not
+    # a placement bug). Each phase drives the figure-8 loop for
     # STRESS_PHASE_SECONDS of SIM time. Cars pass through each other (no
     # car-car collisions), so any count is legal - the metric is how often
     # a car gets displaced JERKILY: per poll, movement beyond the suite's
@@ -665,7 +687,7 @@ class TurnTester:
     # same driving distance no matter how slow the wall clock gets.
     # Realtime ceiling on this machine is ~200 cars (0.83x); 150 keeps a
     # safety margin (measured 1.00x). Higher counts via --stress-cars.
-    STRESS_PHASE_CARS = (150,)
+    STRESS_PHASE_CARS = (51,)
     STRESS_PHASE_SECONDS = 30.0
     STRESS_POLL_S = 0.1
     # Positional indices into network.segments - fragile if the map
@@ -756,6 +778,70 @@ class TurnTester:
             sys.exit(2)
         return tuple(vals)
 
+    def _arc_uniform_spawns(self, segments: list, n_cars: int,
+                            offset: float = 0.0) -> list:
+        """(segment idx, progress) per car, evenly spaced BY ARC LENGTH
+        around a closed loop.
+
+        The old quantization (round(i * N_SEGS / n) + progress 0.5) put
+        several cars at the SAME segment midpoint - 150 cars on 48
+        segments meant 3 cars per spot with identical pose, which crashed
+        on the first sim step. Arc-length placement gives every car a
+        unique spot (spacing = perimeter / n_cars)."""
+        perimeter = sum(s['length'] for s in segments)
+        spawns = []
+        for k in range(n_cars):
+            target = (offset + (k + 0.5) * perimeter / n_cars) % perimeter
+            acc = 0.0
+            for s in segments:
+                if acc + s['length'] >= target:
+                    p = (target - acc) / s['length']
+                    # never ON a node (segment hand-off territory)
+                    spawns.append((s['idx'], min(max(p, 0.02), 0.98)))
+                    break
+                acc += s['length']
+        return spawns
+
+    def _crossing_safe_offset(self, segments: list, n_cars: int) -> float:
+        """Spawn phase offset (arc length) so no car starts within half a
+        spacing of a self-crossing node.
+
+        On a figure-8 the crossing node is visited twice per lap, and a
+        uniform fleet always has a pair of cars whose node arrivals are
+        separated by 2 x (distance of the nearest car to the node) / v.
+        With an unlucky offset (e.g. the loop's arc origin next to the
+        node) that pair is born at the node and crashes at t=0. Maximising
+        the nearest-car distance (grid search) bounds the pair arrival
+        difference to >= one full car spacing (~1 s at spawn speed)."""
+        perimeter = sum(s['length'] for s in segments)
+        spacing = perimeter / n_cars
+        # Self-crossing node(s): touched by 4 segments, 2 of which END
+        # there - their cumulative end positions are the visit arcs.
+        visits = []
+        acc = 0.0
+        end_counts: dict = {}
+        for s in segments:
+            end_counts[s['end_node']] = end_counts.get(s['end_node'], 0) + 1
+        acc = 0.0
+        for s in segments:
+            acc += s['length']
+            if end_counts.get(s['end_node'], 0) >= 2:
+                visits.append(acc % perimeter)
+        if not visits:
+            return 0.0   # no self-crossing - any offset is safe
+        best_d, best_off = -1.0, 0.0
+        for gi in range(200):
+            off = gi * perimeter / 200
+            min_d = min(
+                min(min(abs(v - c), perimeter - abs(v - c))
+                    for v in visits
+                    for c in ((off + (k + 0.5) * spacing) % perimeter
+                              for k in range(n_cars)))
+                for _ in [0])
+            if min_d > best_d:
+                best_d, best_off = min_d, off
+        return best_off
+
     def run_multi_car_stress_test(self, results: dict | None = None,
                                   abort_check: "callable | None" = None,
                                   label: str | None = None,
@@ -785,6 +871,15 @@ class TurnTester:
                   f"for {self.STRESS_PHASE_SECONDS:.0f} s of sim time")
             print(f"{'-'*60}")
 
+            # Defensively UNFREEZE first: a previous scenario (e.g. a
+            # crossing stress crash) may have left the sim frozen, and a
+            # frozen sim never processes the queued teleports.
+            try:
+                self._api_session.post(f"{API_URL}/freeze", timeout=5,
+                                       json={'frozen': False})
+            except requests.exceptions.RequestException:
+                pass
+
             # 1. Clean slate (also drops any car a previous scenario left).
             #    Waits until the map is REALLY empty, so no stale clear can
             #    still be in flight when we spawn.
@@ -796,15 +891,30 @@ class TurnTester:
 
             # 2. Spawn n_cars evenly around the loop (rolling start, no
             #    throttle afterwards - they coast at ~RUNNING_START_KMH).
+            #    Arc-length uniform (see _arc_uniform_spawns): the old
+            #    round(i * 48 / n) + progress 0.5 stacked 3+ cars per
+            #    segment midpoint, and they crashed on the first step.
+            loop = []
+            for i in range(self.FIG8_FIRST_SEGMENT,
+                           self.FIG8_FIRST_SEGMENT + self.FIG8_N_SEGMENTS):
+                try:
+                    s = self._api_session.get(f"{API_URL}/segment/{i}",
+                                              timeout=5).json()
+                except requests.exceptions.RequestException:
+                    s = None
+                if s is None or s.get('length') is None:
+                    print(f"   ❌ /segment/{i} unavailable - phase fails")
+                    return self._stress_scenario_result(
+                        phase_results, overall_passed=False, crashed=True,
+                        aborted=False)
+                loop.append(s)
+
             spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
-            for i in range(n_cars):
-                seg = (self.FIG8_FIRST_SEGMENT
-                       + round(i * self.FIG8_N_SEGMENTS / n_cars)
-                       % self.FIG8_N_SEGMENTS)
+            for seg, prog in self._arc_uniform_spawns(loop, n_cars):
                 # Sedan class for every car: mixed classes would change the
                 # calibrated capacity baselines (see create_car_at_start_point).
                 self._api_session.post(f"{API_URL}/teleport", json={
-                    'segment': seg, 'progress': 0.5,
+                    'segment': seg, 'progress': prog,
                     'speed': spawn_speed_mps, 'add': True, 'color': 'blue'}, timeout=5)
             # Wait until all cars actually exist (queued teleports land
             # one per sim frame - ~17 ms each). Proportional budget: at
@@ -1078,22 +1188,19 @@ class TurnTester:
             return self._crossing_result(start_point, passed=False,
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
-        perimeter = sum(s['length'] for s in loop)
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
         # Cycle through ALL vehicle classes (Config.CAR_COLORS) so the run
         # exercises every per-class collision footprint, not just the sedan.
+        # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
+        # "nearest segment midpoint" quantization could put two cars on the
+        # same midpoint when n_cars > len(loop).
         colors = ['blue', 'silver', 'police', 'tan', 'tractor', 'pickup', 'mixer']
-        for k in range(n_cars):
+        offset = self._crossing_safe_offset(loop, n_cars)
+        for k, (seg, prog) in enumerate(
+                self._arc_uniform_spawns(loop, n_cars, offset=offset)):
             reverse = (k % 2 == 1)
-            target = (k + 0.5) * perimeter / n_cars
-            best, best_err, mid = loop[0]['idx'], None, 0.0
-            for s in loop:
-                err = abs(mid + s['length'] / 2 - target)
-                if best_err is None or err < best_err:
-                    best, best_err = s['idx'], err
-                mid += s['length']
             self._api_session.post(f"{API_URL}/teleport", timeout=5, json={
-                'segment': best, 'progress': 0.5, 'speed': spawn_speed_mps,
+                'segment': seg, 'progress': prog, 'speed': spawn_speed_mps,
                 'add': True, 'color': colors[k % len(colors)],
                 'reverse': reverse})
 
@@ -2406,6 +2513,21 @@ class TurnTester:
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
             print(f"{'#'*60}")
 
+            if start_point in SKIPPED_TESTS:
+                print(f"\n⏭  SKIPPED: '{start_point}' - {SKIPPED_TESTS[start_point]}\n")
+                # Result in monitor_turn's shape (summary/exit-code keys),
+                # marked skipped so neither counts it as a failure.
+                result = {'passed': False, 'aborted': False, 'skipped': True,
+                          'start_point': start_point, 'direction': direction,
+                          'target_speed_kmh': speed,
+                          'off_road_detected': False,
+                          'instant_snap_detected': False}
+                self.test_results.append(result)
+                _emit({'type': 'done', 'index': i, 'passed': False,
+                       'aborted': False, 'skipped': True})
+                pos += 1
+                continue
+
             _emit({'type': 'start', 'index': i, 'total': len(tests),
                    'start_point': start_point, 'direction': direction,
                    'speed_kmh': speed, 'description': description})
@@ -2467,7 +2589,9 @@ class TurnTester:
         # were never actually tested - report them separately, don't count
         # them as failures.
         aborted = [r for r in self.test_results if r.get('aborted')]
-        runnable = [r for r in self.test_results if not r.get('aborted')]
+        skipped = [r for r in self.test_results if r.get('skipped')]
+        runnable = [r for r in self.test_results
+                    if not r.get('aborted') and not r.get('skipped')]
         passed = sum(1 for r in runnable if r['passed'])
         failed_offroad = sum(1 for r in runnable if r['off_road_detected'])
         failed_snap = sum(1 for r in runnable if r['instant_snap_detected'])
@@ -2511,7 +2635,10 @@ class TurnTester:
             return f"  ✅ Passed: no {pass_label}"
 
         print(f"\nTotal tests: {len(runnable)}"
-              + (f"  (+{len(aborted)} aborted by user)" if aborted else ""))
+              + (f"  (+{len(aborted)} aborted by user)" if aborted else "")
+              + (f"  (+{len(skipped)} skipped: "
+                 + ", ".join(f"'{r['start_point']}'" for r in skipped) + ")"
+                 if skipped else ""))
         print(f"  ✅ Passed: {passed}")
         print(line(failed_offroad, "off-road", "off-road violations"))
         print(line(failed_snap, "instant snap", "instant snaps"))
@@ -2549,9 +2676,16 @@ class TurnTester:
             print(f"OFF-ROAD VIOLATIONS: {len(offroad_violations)}")
             print(f"{'─'*60}")
             for i, r in enumerate(offroad_violations, 1):
-                v = r['violation_details']
+                v = r.get('violation_details')
                 label = f" @ '{r['start_point']}'" if r.get('start_point') else ""
-                print(f"\n{i}. {r['direction'].upper()} turn{label} @ {r['target_speed_kmh']:.0f} km/h")
+                speed = r.get('target_speed_kmh', 0)
+                print(f"\n{i}. {r.get('direction', '?').upper()} turn{label} @ {speed:.0f} km/h")
+                if v is None:
+                    # Multi-car scenario (stress/crossing): there is no
+                    # single violation record - show the aggregates.
+                    extra = f" (crash: {r['crash_info']})" if r.get('crash_info') else ""
+                    print(f"   off-road hits: {r.get('off_road_hits', '?')}{extra}")
+                    continue
                 print(f"   Time: {v['time']:.2f}s")
                 print(f"   Position: ({v['position'][0]:.0f}, {v['position'][1]:.0f})")
                 print(f"   Speed: {v['speed_kmh']:.0f} km/h")
@@ -2669,7 +2803,8 @@ def main():
 
         # Exit code: 0 if all passed, 1 if any failed (aborted scenarios
         # don't count - they were never actually tested).
-        runnable = [r for r in tester.test_results if not r.get('aborted')]
+        runnable = [r for r in tester.test_results
+                    if not r.get('aborted') and not r.get('skipped')]
         all_passed = all(r['passed'] for r in runnable)
         sys.exit(0 if all_passed else 1)
 

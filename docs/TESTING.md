@@ -295,7 +295,7 @@ different this time."
 segment/forward) - handy for exploring what's available:
 
 ```bash
-curl -s http://localhost:5000/start_points | python3 -m json.tool
+curl -s http://localhost:5001/start_points | python3 -m json.tool
 ```
 
 ## 5. Showing which test is running in the HUD
@@ -341,7 +341,7 @@ This is the actual workflow used throughout this project's development:
    debug output (turn planning, arc validation, off-road/teleportation
    watchdog messages - see `PhysicsValidator`, `LaneGuard` and
    `BicycleNav` in `src/`).
-4. If it fails, `GET /state` polled by hand (`curl http://localhost:5000/state`)
+4. If it fails, `GET /state` polled by hand (`curl http://localhost:5001/state`)
    is usually enough to pin down *where* and *at what exact frame* things
    went wrong.
 5. Fix the code, restart the game process (state like cached geometry

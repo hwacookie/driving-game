@@ -161,11 +161,15 @@ public class Car
     public int AlertOtherUid { get; internal set; }
     public double AlertStartT { get; internal set; }
     public double AlertLastTtc { get; internal set; }
+    /// <summary>Sim time the watched conflict was last SEEN; the alert only
+    /// clears once it has been absent for AlertClearHoldS (see CarCollisions).</summary>
+    public double AlertLastSeenT { get; internal set; }
     internal void ClearAlert()
     {
         AlertOtherUid = 0;
         AlertStartT = 0.0;
         AlertLastTtc = 0.0;
+        AlertLastSeenT = 0.0;
     }
 
     // Debug trail (breadcrumbs)
