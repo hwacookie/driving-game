@@ -321,6 +321,16 @@ public sealed partial class BicycleNav
     /// lane change is pending/active (null = no lane-change signal).</summary>
     public string? LaneChangeSignal { get; private set; }
 
+    /// <summary>Sim time accumulated from the fixed-step dt, so the nav can
+    /// timestamp its own decision-log entries (R17 etc.). The nav is driven
+    /// at DtFixed per substep, so summing dt tracks the sim clock.</summary>
+    private double _navTime;
+
+    /// <summary>Previous value of <see cref="LaneChangeSignal"/>, so the R17
+    /// "signal before the maneuver" log fires once on the null->direction
+    /// transition (blinker switched on) rather than every tick.</summary>
+    private string? _prevLaneChangeSignal;
+
     // Cruise at the car's class top speed on straights (set in the ctor).
     private double _cruise;
 

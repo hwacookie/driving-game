@@ -58,7 +58,8 @@ public sealed class PhysicsValidator
     /// implied-turning-radius invariant is suspended for that frame. The
     /// jump / heading-snap / off-road checks keep running: the stop itself
     /// must stay physical (no teleport, no instant snap, no penetration).</summary>
-    public void Check(Car car, double dt, RoadNetwork network, bool inContact = false)
+    public void Check(Car car, double dt, RoadNetwork network,
+                      double simTime = 0.0, bool inContact = false)
     {
         if (!Enabled) return;
 
@@ -68,11 +69,11 @@ public sealed class PhysicsValidator
             return;
         }
 
-        CheckJump(car, old.X, old.Y, dt);
-        CheckHeadingSnap(car, old.Heading);
+        CheckJump(car, old.X, old.Y, dt, simTime);
+        CheckHeadingSnap(car, old.Heading, simTime);
         if (!inContact)
-            CheckTurningRadius(car, old.X, old.Y, old.Heading);
-        CheckOffRoad(car, network);
+            CheckTurningRadius(car, old.X, old.Y, old.Heading, simTime);
+        CheckOffRoad(car, network, simTime);
 
         _lastState[car.Uid] = (car.X, car.Y, car.Heading);
     }
@@ -81,7 +82,7 @@ public sealed class PhysicsValidator
     public sealed record Violation(string Type, int Car, double X, double Y,
                                    double Speed, int Segment);
 
-    private void CheckJump(Car car, double oldX, double oldY, double dt)
+    private void CheckJump(Car car, double oldX, double oldY, double dt, double simTime)
     {
         // Impossible position jump.
         double distanceM = Math.Hypot(car.X - oldX, car.Y - oldY) / Config.PIXELS_PER_METER;
@@ -90,6 +91,9 @@ public sealed class PhysicsValidator
         double maxAllowed = Math.Abs(car.Speed) * dt + 0.1 * dt + 0.01;
 
         if (distanceM > maxAllowed)
+        {
+            car.RecordDecision(simTime,
+                $"[R1] impossible jump {distanceM:F1} m (max {maxAllowed:F1} m)");
             throw new PhysicsViolationException(
                 $"\n{'=' * 70}\n" +
                 $"⚠️  IMPOSSIBLE JUMP!\n" +
@@ -98,14 +102,18 @@ public sealed class PhysicsValidator
                 $"Distance: {distanceM:F1}m (max: {maxAllowed:F1}m)\n" +
                 $"Speed: {car.Speed:F1} m/s | Segment: {car.SegIdx}\n" +
                 $"{'=' * 70}\n");
+        }
     }
 
-    private void CheckHeadingSnap(Car car, double oldHeading)
+    private void CheckHeadingSnap(Car car, double oldHeading, double simTime)
     {
         // Instant heading change.
         double diff = Math.Abs(Math.WrapDeg(car.Heading - oldHeading));
 
         if (diff > 30)
+        {
+            car.RecordDecision(simTime,
+                $"[R1] instant heading change {diff:F1} deg");
             Console.WriteLine(
                 $"\n{'=' * 70}\n" +
                 $"⚠️  INSTANT HEADING CHANGE!\n" +
@@ -113,13 +121,16 @@ public sealed class PhysicsValidator
                 $"{oldHeading:F1}° → {car.Heading:F1}° (Δ{diff:F1}°)\n" +
                 $"Speed: {car.Speed:F1} m/s | Segment: {car.SegIdx}\n" +
                 $"{'=' * 70}\n");
+        }
     }
 
-    private void CheckOffRoad(Car car, RoadNetwork network)
+    private void CheckOffRoad(Car car, RoadNetwork network, double simTime)
     {
         // Off-road driving.
         if (!car.IsOnRoad(network))
         {
+            car.RecordDecision(simTime,
+                $"[R1] off-road at ({car.X:F0}, {car.Y:F0})");
             Console.WriteLine(
                 $"\n{'=' * 70}\n" +
                 $"⚠️  OFF-ROAD!\n" +
@@ -134,7 +145,7 @@ public sealed class PhysicsValidator
         }
     }
 
-    private void CheckTurningRadius(Car car, double oldX, double oldY, double oldHeading)
+    private void CheckTurningRadius(Car car, double oldX, double oldY, double oldHeading, double simTime)
     {
         // Heading change requires proportional movement.
         double diffDeg = Math.Abs(Math.WrapDeg(car.Heading - oldHeading));
@@ -145,6 +156,9 @@ public sealed class PhysicsValidator
         double radiusM = distM / Math.Radians(diffDeg);
 
         if (radiusM < MinRealisticRadiusM)
+        {
+            car.RecordDecision(simTime,
+                $"[R1] impossible turning radius {radiusM:F2} m (min {MinRealisticRadiusM} m)");
             throw new PhysicsViolationException(
                 $"\n{'=' * 70}\n" +
                 $"⚠️  IMPOSSIBLE TURNING RADIUS!\n" +
@@ -153,5 +167,6 @@ public sealed class PhysicsValidator
                 $"Implied radius: {radiusM:F3}m (min: {MinRealisticRadiusM}m)\n" +
                 $"Segment: {car.SegIdx}\n" +
                 $"{'=' * 70}\n");
+        }
     }
 }

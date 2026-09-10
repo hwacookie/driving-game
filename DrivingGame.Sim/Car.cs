@@ -58,6 +58,12 @@ public class Car
     // Engaged gear (FREE mode, like a real shifter): null = neutral,
     // 'fwd' or 'rev'. Set by a FRESH key press at a standstill.
     private string? _gear;
+    // Sim time accumulated from dt (FREE mode), so the R25 speed-limit clamp
+    // can timestamp its decision-log entry. Cars are stepped at the fixed dt.
+    private double _freeTime;
+    // True while the top-speed clamp is actively biting, so R25 logs once on
+    // the transition (cap engaged) rather than every tick at top speed.
+    private bool _speedCapEngaged;
     // Virtual steering wheel position (FREE mode), -1..+1. Ramps toward the
     // demanded direction at a finite rate (Config.STEER_LOCK_TIME_S).
     private double _steerPos;
@@ -252,6 +258,14 @@ public class Car
             else if (_gear == "fwd" && accel) Speed += AccelMps2 * dt;
         }
 
+        _freeTime += dt;
+        // R25 (StVO §3(3)) speed limit: hard post-filter clamping the car to
+        // its configured top speed every step. Log once when the cap engages.
+        bool capBites = Speed > TopSpeedMps;
+        if (capBites && !_speedCapEngaged)
+            RecordDecision(_freeTime,
+                $"[R25] speed capped at limit {TopSpeedMps:F1} m/s");
+        _speedCapEngaged = capBites;
         Speed = Math.Max(-Config.REVERSE_MAX_SPEED_M, Math.Min(TopSpeedMps, Speed));
         // Deadband so the car doesn't oscillate around 0 when neither gear
         // input is held.

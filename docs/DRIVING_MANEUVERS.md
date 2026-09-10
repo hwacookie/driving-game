@@ -487,11 +487,15 @@ of which lower-tier rule proposed it.
 - **R1 Physical validity** *[implemented]* — no motion a real car could not
   perform: no teleport, no instant heading change, no turning radius below
   the car's mechanical minimum, no position/heading desync.
-- **R13 Kinematic limits** *[proposed]* — bounded longitudinal and lateral
+- **R13 Kinematic limits** *[partial]* — bounded longitudinal and lateral
   acceleration (tire grip + comfort), not just the brake value: on the
   lemniscate's curves the lateral acceleration must stay under the
   grip/comfort limit, so a planned line that is too tight is rejected, not
   merely braked for. (Complements R1's geometry with the dynamic limits.)
+  *Implemented as a planning limit:* the BicycleNav speed profile caps
+  cornering speed at `v = sqrt(A_LAT_MAX / kappa)` (`BicycleNav.part2/3`),
+  and steering rate is bounded by `A_LAT_MAX / v`. Not yet a post-filter that
+  *rejects* a too-tight planned line — the plan is speed-limited, not refused.
 - **R25 Speed limit** *(StVO §3(3))* *[implemented via config]* — never
   exceed the road's limit speed; the cap is a hard post-filter on the speed
   output. In the sim this is the per-map / per-vehicle configured maximum
@@ -535,7 +539,10 @@ then commitment.
 - **R4 Enter only when sure to clear** *(crossing)* *[partial]* — enter only
   if the box can be cleared before the other diagonal's approach arrives
   (gates entry). **Evaluated before R5**: a car that cannot clear does not
-  enter even if it has right-of-way.
+  enter even if it has right-of-way. The temporal gap-acceptance test is
+  implemented (`CarCollisions`, `etaS < tClearS + SignGapMarginS`) and now
+  logs its own `[R4] cannot clear before car N arrives` decision, distinct
+  from R5's `[R5] yield sign`.
 - **R5 Right-of-way / yield** *(crossing)* *[implemented]* — the yield
   (Vorfahrt gewähren) car yields to the priority (Vorfahrt) car (for cars
   not yet in the crossing). *(proposed)* **At an unsigned crossing** (no
@@ -572,10 +579,11 @@ then commitment.
   triggers the brake flutter (each car assumes the other may pull away). A
   real contact is an accident (R2), so creeping that ends in contact is a
   bug.
-- **R10 Braking is a [0,1] value, always logged** *[in progress]* — braking
+- **R10 Braking is a [0,1] value, always logged** *[proposed]* — braking
   intensity is a continuous value `0` (coast) … `1` (maximum full brake),
   always output when a car brakes (visible, measurable intent). Pure
-  telemetry — not a behavior rule.
+  telemetry — not a behavior rule. *Current state:* the car's brake is still
+  a boolean (`Car.IsBraking` / `ControlInput.Brake`), not a continuous value.
 - **R11 Gentle braking by default** *[partial]* — normally brake gently (the
   car behind may brake less well and needs reaction time); brake harder only
   when it becomes necessary.
@@ -588,10 +596,13 @@ then commitment.
   sustained priority traffic does not starve indefinitely (gap-acceptance
   literature). R12 is voluntary courtesy from the priority car; R16 is the
   waiting car's own escalation.
-- **R17 Signal before the maneuver** *[proposed]* — blinker on a fixed
+- **R17 Signal before the maneuver** *[partial]* — blinker on a fixed
   time/distance **before** a lane change / avoidance so the intent is visible
   to others (complements R9: making intent recognizable needs a visible
-  signal, not just refraining from creeping).
+  signal, not just refraining from creeping). *Implemented for lane changes*
+  (`LaneChangeSignal` on from `MERGE_SIGNAL_AHEAD_M` before the merge zone)
+  *and parking* (`PARK_LEAD_S` indicator lead); logs `[R17]` on the
+  blinker-on transition. Not yet wired for avoidance (R8).
 - **R18 Jerk limit** *[proposed]* — a maximum rate of change of the R10 brake
   value per step; adds the *temporal* component to R11's gentle braking —
   prevents abrupt brake-value jumps even when the overall value is
@@ -625,4 +636,7 @@ then commitment.
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
   does this); required for explainability of the tree, especially at Tier-2
-  equal-rank.
+  equal-rank. *Currently logging:* R1 (`PhysicsValidator`), R2/R3/R4/R5/R6/R7
+  (`CarCollisions`), R17 and R25 (nav / `Car`). Still silent: R13 (planned
+  but not logged) and the not-yet-implemented rules (R8–R16, R18–R19,
+  R21–R24).

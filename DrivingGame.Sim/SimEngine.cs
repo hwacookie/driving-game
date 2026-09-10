@@ -737,6 +737,7 @@ public sealed class SimEngine
 
                     foreach (var c in _cars.Values)
                         Validator.Check(c, DtFixed, Network,
+                                        simTime: _simStepsTotal * DtFixed,
                                         inContact: inContact.Contains(c.Uid));
                     foreach (var c in _cars.Values)
                     {
@@ -985,6 +986,17 @@ public sealed class SimEngine
                 ["progress"] = c.Progress,
                 ["on_road"] = c.IsOnRoad(Network),
                 ["wrong_side"] = pcs.OnWrongSide,
+                // Collision contact: true while this car is pinned against
+                // another by collision resolution (a crash). The multi-car
+                // crossing scenario fails the instant any car reports it.
+                ["in_contact"] = c.InContact,
+                ["contact_with"] = c.InContact ? c.ContactWith : (int?)null,
+                // The exact box used for crash detection (per-class body
+                // footprint, LengthM x WidthM centred on the body centre):
+                // four [x, y] pixel corners front-right, front-left,
+                // rear-left, rear-right. Rendered as the red collision outline.
+                ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(c)
+                    .Select(p => new[] { p.X, p.Y }).ToList(),
                 ["blinker_left"] = c.Driver is BicycleDriver bl ? bl.BlinkerLeft : false,
                 ["blinker_right"] = c.Driver is BicycleDriver br ? br.BlinkerRight : false,
                 ["hazard"] = hazard,
@@ -1050,6 +1062,10 @@ public sealed class SimEngine
                 ["forward"] = car.Forward,
                 ["distance_to_junction"] = DistanceToJunction(car, Network),
                 ["on_road"] = car.IsOnRoad(Network),
+                ["in_contact"] = car.InContact,
+                ["contact_with"] = car.InContact ? car.ContactWith : (int?)null,
+                ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(car)
+                    .Select(p => new[] { p.X, p.Y }).ToList(),
                 // Dashboard lamps for the cockpit controller.
                 ["braking"] = car.IsBraking,
                 ["accelerating"] = car.IsAccelerating,

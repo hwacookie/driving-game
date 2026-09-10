@@ -141,6 +141,31 @@ public static class CarCollisions
     static readonly Dictionary<int, (string Key, int Ticks)> _capCandidate = new();
     const int PERSIST_TICKS = 15;   // 0.25 s of sim time at 60 Hz
 
+    // Cap DECISION persistence (docs/Human Factor Model.md §3/§5): while a
+    // car's cap reason is absent, the brake decision is HELD for a minimum
+    // duration instead of releasing immediately - an immediate release on a
+    // boundary situation (both cars slow and close) flutters the cap on/off
+    // every few substeps (the car's own braking grows the TTC, which the
+    // staged logic reads as "yielding"), and the car creeps into the threat.
+    static readonly Dictionary<int, double> _lastCap = new();      // uid -> last cap value
+    static readonly Dictionary<int, int> _releaseHold = new();     // uid -> absent substeps
+
+    /// <summary>Minimum substeps a cap's reason must be ABSENT before the
+    /// brake decision releases: base 0.5 s + deterministic per-uid jitter
+    /// 0..+0.5 s (cars release out of sync, no run-to-run randomness - R20).
+    /// The whole 0.5-1.0 s range sits in the doc's 0.5-1.5 s persistence band
+    /// AND above the ~0.3 s period of box-boundary flicker (a shorter hold
+    /// would release right into the next flicker cycle and the car would
+    /// creep forward every cycle - measured: fig8_xing car 40 creeping into
+    /// stopped car 14 at ~2 Hz).</summary>
+    static int ReleaseHoldTicks(int uid) => 30 + (uid * 14) % 31;
+
+    /// <summary>Minimum speed at which "the other car is yielding" is a
+    /// valid read of a growing TTC. Below this the other car is standing
+    /// still and the TTC growth is the watcher's own braking (the flutter).
+    /// A car genuinely clearing a crossing moves at several m/s.</summary>
+    const double OtherYieldingMinSpeedMps = 0.5;
+
     // --- Road signs (yield at signed approaches) ----------------------------
     const double SignActRangeM = 60.0;        // the sign acts from this distance out
     const double PriorityProximityM = 25.0;   // a priority car "at the crossing" within this
@@ -238,10 +263,11 @@ public static class CarCollisions
             {
                 if (o.Uid == c.Uid) continue;
                 // Staged PRIORITY response: while this car is WATCHING car o
-                // (alert set by last tick's v2), it does not brake for o yet
-                // - the staged logic below decides when to brake. This is what
-                // makes the cap for o stable instead of tick-to-tick (the
-                // flutter). Only priority cars ever enter this state.
+                // (alert set by last tick's v2), the staged logic below is the
+                // single brake authority for o (it now includes a gap-based
+                // term - see the self-protection branch below). Skipping v1
+                // here keeps one cap source per situation (the flutter fix);
+                // once the alert clears, v1 resumes in full.
                 if (c.AlertOtherUid == o.Uid) continue;
                 double dxc = o.X - c.X, dyc = o.Y - c.Y;
                 double alongPx = dxc * fx + dyc * fy;          // ahead?
@@ -423,6 +449,7 @@ public static class CarCollisions
         //   TTC growing     -> the other car is yielding - keep watching
         //   TTC flat + (too late OR grace expired) -> self-protection brake
         //   conflict gone   -> clear the alert, resume normal behaviour
+        var carByUid = carList.ToDictionary(k => k.Uid);
         foreach (var c in carList)
         {
             if (!pConflicts.TryGetValue(c.Uid, out var pc))
@@ -460,12 +487,44 @@ public static class CarCollisions
             }
             if (ttc > c.AlertLastTtc + 0.05)
             {
-                c.AlertLastTtc = ttc;   // other car yielding - keep watching
-                continue;
+                // "Yielding" is only a valid read if the OTHER car is
+                // actually moving (clearing the crossing). A standing-still
+                // other car grows the TTC purely because I am braking -
+                // releasing on that is the brake/creep flutter (the TTC
+                // growth is my own action, docs/Human Factor Model.md §3).
+                if (carByUid.TryGetValue(otherUid, out var other) &&
+                    other.Speed >= OtherYieldingMinSpeedMps)
+                {
+                    c.AlertLastTtc = ttc;   // other car yielding - keep watching
+                    continue;
+                }
+                // stationary other: do NOT release - fall through to the
+                // brake condition below.
             }
             if (ttc < brakingTime || (simTime - c.AlertStartT) > AlertGraceS)
             {
+                // The cap is the TIGHTER of:
+                //  (a) the meeting-point cap (GradedCap) - assumes a CLEAR
+                //      meeting zone: stop StandstillGap short of it; and
+                //  (b) the actual GAP to the other car's body (the v1
+                //      formula): the meeting zone can be OCCUPIED - a
+                //      stationary car sitting at the meeting point would be
+                //      clipped by (a) alone, which stops me 3 m short of the
+                //      point = INSIDE the other car (measured: the fig8_xing
+                //      car 13 vs 37 crash, both stopped nose-on-tail).
                 double cap = GradedCap(Math.Max(ttc, 1.01), pc.DistP);
+                if (carByUid.TryGetValue(otherUid, out var oCar))
+                {
+                    double radC = Math.Radians(c.Heading);
+                    double fx2 = Math.Sin(radC), fy2 = Math.Cos(radC);
+                    double alongM = ((oCar.X - c.X) * fx2 + (oCar.Y - c.Y) * fy2) / pppm;
+                    double gapM = Math.Max(alongM - (c.LengthM + oCar.LengthM) * 0.5, 0.0);
+                    double orad = Math.Radians(oCar.Heading);
+                    double vl = Math.Max(oCar.Speed *
+                        (Math.Sin(orad) * fx2 + Math.Cos(orad) * fy2), 0.0);
+                    cap = Math.Min(cap, Math.Sqrt(vl * vl +
+                        2.0 * Config.CAR_BRAKING * Math.Max(gapM - StandstillGapM, 0.0)));
+                }
                 OfferCap(c.Uid, cap, $"avoid#{otherUid}",
                          $"[R2] self-protection vs car {otherUid} (TTC {ttc:F1} s)");
             }
@@ -543,6 +602,10 @@ public static class CarCollisions
 
                 bool blocked = false;
                 int blockedBy = -1;
+                // Which rule gated entry: R4 = cannot CLEAR before an
+                // approaching car arrives (temporal gap); R5 = a priority car
+                // is already at the crossing.
+                bool byFeasibility = false;
                 foreach (var o in carList)
                 {
                     if (o.Uid == c.Uid || o.SegIdx == c.SegIdx) continue;
@@ -569,7 +632,7 @@ public static class CarCollisions
                         continue;   // exiting / crossing sideways - not a threat
                     double etaS = dO / Math.Max(o.Speed, 3.0);
                     if (etaS < tClearS + SignGapMarginS)
-                    { blocked = true; blockedBy = o.Uid; break; }
+                    { blocked = true; blockedBy = o.Uid; byFeasibility = true; break; }
                 }
                 if (!blocked) continue;
 
@@ -577,14 +640,25 @@ public static class CarCollisions
                 double ycap = Math.Sqrt(2.0 * Config.CAR_BRAKING *
                                         Math.Max(dToNodeM - stopGapM, 0.0));
                 OfferCap(c.Uid, ycap, $"sign#{aheadNode}#{blockedBy}",
-                         $"[R5] yield sign: car {blockedBy} at the crossing " +
-                         ($"({dToNodeM:F0} m out)"));
+                         byFeasibility
+                         ? $"[R4] cannot clear before car {blockedBy} arrives " +
+                           ($"({dToNodeM:F0} m out)")
+                         : $"[R5] yield sign: car {blockedBy} at the crossing " +
+                           ($"({dToNodeM:F0} m out)"));
                 DebugLog.Add($"sign uid{c.Uid}={ycap:F2} node={aheadNode} d={dToNodeM:F1}");   // TEMPORARY
             }
 
-        // --- Decision log: record a per-car event when the cap REASON changes
-        // (cap appeared, threat changed, or the car is free again).
-        // A DIFFERENT threat only replaces the logged one after it wins
+        // --- Cap decision persistence + decision log -------------------------
+        // The APPLIED cap follows the tightest reason every substep (the 60 Hz
+        // physical net, doc §5.1). The brake DECISION persists: a release
+        // requires the reason to be ABSENT for a minimum hold (0.5 s ± 0.25 s
+        // per-uid jitter), and while holding the LAST cap value keeps applying
+        // - so a boundary situation (both cars slow and close, or a stopped
+        // body in the path) brakes to rest instead of fluttering: the old
+        // release-immediate behavior flipped the cap on/off every ~5 substeps
+        // (12 decisions/s vs the ~2.5/s human ceiling, doc §1) and the car
+        // crept a few cm into the threat on every "gap clear".
+        // A DIFFERENT threat still replaces the logged one only after
         // PERSIST_TICKS consecutive substeps: near a cluster of stopped cars
         // the binding cap oscillates between them tick-to-tick (44 then 42
         // then 44 ...), and without the debounce the log would flip every
@@ -594,6 +668,8 @@ public static class CarCollisions
             if (reasons.TryGetValue(c.Uid, out var r))
             {
                 caps[c.Uid] = r.Cap;
+                _lastCap[c.Uid] = r.Cap;
+                _releaseHold.Remove(c.Uid);
                 if (c.ActiveCapKey is null)
                 {
                     _capCandidate.Remove(c.Uid);
@@ -621,9 +697,24 @@ public static class CarCollisions
             }
             else if (c.ActiveCapKey is not null)
             {
-                _capCandidate.Remove(c.Uid);
-                c.RecordDecision(simTime, "gap clear - resuming");
-                c.ActiveCapKey = null;
+                // Reason absent: hold the brake decision for the minimum
+                // duration before declaring the situation clear.
+                int hold = _releaseHold.GetValueOrDefault(c.Uid, 0) + 1;
+                if (hold >= ReleaseHoldTicks(c.Uid))
+                {
+                    _releaseHold.Remove(c.Uid);
+                    _lastCap.Remove(c.Uid);
+                    _capCandidate.Remove(c.Uid);
+                    c.RecordDecision(simTime, "gap clear - resuming");
+                    c.ActiveCapKey = null;
+                }
+                else
+                {
+                    _releaseHold[c.Uid] = hold;
+                    // Keep braking with the last cap value - the car rests
+                    // instead of creeping toward the (still-near) threat.
+                    caps[c.Uid] = _lastCap.GetValueOrDefault(c.Uid, 0.0);
+                }
             }
         }
         return caps;
@@ -816,6 +907,7 @@ public static class CarCollisions
         // Crash bookkeeping: one decision entry + hazard lights per contact
         // episode (a pinned pair re-triggers the overlap every substep, but
         // the episode is logged once, on the first substep of it).
+        var carByUid = cars.ToDictionary(k => k.Uid);
         foreach (var c in cars)
         {
             if (contacted.Contains(c.Uid))
@@ -829,6 +921,14 @@ public static class CarCollisions
                     c.RecordDecision(simTime,
                         $"[R2] CRASH: contact with car {other} (my speed {myKmh:F1} km/h)");
                     (c.Driver as BicycleDriver)?.SetHazard(true, $"crash with car {other}");
+                    // Persist the forensic trail: the in-memory decision log
+                    // would otherwise die with the process. Once per pair
+                    // (uid ordering) - a chain crash dumps each pair once.
+                    if (other > 0 && c.Uid < other &&
+                        carByUid.TryGetValue(other, out var o))
+                        CrashDumper.Dump(c, o, simTime,
+                                         impactSpeed is null ? null : impactSpeed.GetValueOrDefault(c.Uid),
+                                         impactSpeed is null ? null : impactSpeed.GetValueOrDefault(o.Uid));
                 }
                 c.InContact = true;
                 c.ContactWith = other;

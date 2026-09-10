@@ -510,6 +510,16 @@ DETERMINISTIC_TESTS = [
     # monitor_turn (see run_deterministic_test).
     ('fig8_stress', 'straight', 0, None, 170.0,
      "Multi-car stress: 150 cars on the figure-8 for 30 s of sim time (realtime-safe default; --stress-cars N overrides)"),
+    # RIGHT-OF-WAY CROSSING STRESS: 50 cars (25 per direction, interleaved)
+    # on the basic map's real degree-4 figure-8 crossing, accelerator held,
+    # run for up to 300 s of sim time or until the FIRST crash (two cars
+    # pinned in contact). Two variants: the signed crossing (tile (2,3),
+    # Vorfahrt signs) and the un-signed crossing (tile (3,3), right-before-
+    # left). Dispatched by start_point name, not through monitor_turn.
+    ('fig8_xing', 'straight', 0, None, 300.0,
+     "Right-of-way crossing (WITH signs): 50 cars, 25/direction, 300 s or first crash"),
+    ('fig8_xing_plain', 'straight', 0, None, 300.0,
+     "Right-of-way crossing (NO signs, right-before-left): 50 cars, 25/direction, 300 s or first crash"),
 ]
 
 
@@ -974,7 +984,225 @@ class TurnTester:
         return self._stress_scenario_result(phase_results, overall_passed,
                                             crashed, aborted)
 
-    
+    # Right-of-way crossing stress: 50 cars, half per direction, run for up
+    # to 300 s of sim time or until the FIRST crash.
+    CROSSING_N_CARS = 50
+    CROSSING_MAX_SIM_SECONDS = 300.0
+    CROSSING_POLL_S = 0.1
+    # start_point name -> the loop's node-id prefix on the basic map.
+    CROSSING_NODE_PREFIX = {
+        'fig8_xing': 'xing_',        # tile (2,3): WITH Vorfahrt signs
+        'fig8_xing_plain': 'xingp_', # tile (3,3): NO signs (right-before-left)
+    }
+
+    def _crossing_loop_segments(self, prefix: str) -> list:
+        """Segment indices whose START node id begins with `prefix` (the
+        48 segments of one figure-8 crossing loop), read live from the
+        game so it never depends on positional indices."""
+        segs, i = [], 0
+        while True:
+            try:
+                r = self._api_session.get(f"{API_URL}/segment/{i}", timeout=5)
+            except requests.exceptions.RequestException:
+                break
+            if r.status_code != 200:
+                break
+            s = r.json()
+            if str(s.get('start_node', '')).startswith(prefix):
+                segs.append(s)
+            i += 1
+        return segs
+
+    def _crossing_result(self, start_point: str, passed: bool, aborted: bool,
+                         game_crashed: bool, crash_info: str | None) -> dict:
+        """Scenario-level result in print_summary's shape."""
+        return {
+            'start_point': start_point,
+            'direction': 'crossing',
+            'passed': passed and not aborted,
+            'aborted': aborted,
+            'off_road_detected': False,
+            'instant_snap_detected': False,
+            'teleport_detected': False,
+            'game_crashed': game_crashed,
+            'wrong_side_detected': False,
+            'segment_changed': True,
+            'reached_expected_segment': True,   # no end flag in this test
+            'expect_wrong_side': False,
+            'final_segment': None,
+            'expected_end_segment': None,
+            'crash_info': crash_info,
+        }
+
+    def run_crossing_stress_test(self, start_point: str,
+                                 results: dict | None = None,
+                                 abort_check: "callable | None" = None,
+                                 label: str | None = None) -> dict:
+        """Spawn 50 cars (25 per direction, interleaved) on one figure-8
+        crossing loop, hold the accelerator on all of them, and run for up
+        to 300 s of sim time or until the FIRST crash (a car reporting
+        'in_contact'). Passes only if the whole fleet drives the full
+        window without a crash.
+        """
+        if results is None:
+            results = load_results()
+        prefix = self.CROSSING_NODE_PREFIX[start_point]
+        n_cars = self.CROSSING_N_CARS
+        print(f"\n{'-'*60}")
+        print(f"CROSSING STRESS ({start_point}): {n_cars} cars, "
+              f"{n_cars // 2}/direction, up to "
+              f"{self.CROSSING_MAX_SIM_SECONDS:.0f} s or first crash")
+        print(f"{'-'*60}")
+
+        # Defensively UNFREEZE first: a previous crossing run may have left
+        # the sim frozen on a crash (see the crash branch below).
+        try:
+            self._api_session.post(f"{API_URL}/freeze", timeout=5,
+                                   json={'frozen': False})
+        except requests.exceptions.RequestException:
+            pass
+
+        # 1. Clean slate.
+        if not self._clear_all_cars():
+            print("   ❌ Could not clear the map - scenario fails")
+            return self._crossing_result(start_point, passed=False,
+                                         aborted=False, game_crashed=True,
+                                         crash_info=None)
+
+        # 2. Identify the loop and spawn evenly around it, alternating
+        #    direction (even = forward, odd = reverse).
+        loop = self._crossing_loop_segments(prefix)
+        if len(loop) != 48:
+            print(f"   ❌ Expected 48 crossing segments ({prefix}), "
+                  f"got {len(loop)} - is the server on the basic map?")
+            return self._crossing_result(start_point, passed=False,
+                                         aborted=False, game_crashed=False,
+                                         crash_info=None)
+        perimeter = sum(s['length'] for s in loop)
+        spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
+        # Cycle through ALL vehicle classes (Config.CAR_COLORS) so the run
+        # exercises every per-class collision footprint, not just the sedan.
+        colors = ['blue', 'silver', 'police', 'tan', 'tractor', 'pickup', 'mixer']
+        for k in range(n_cars):
+            reverse = (k % 2 == 1)
+            target = (k + 0.5) * perimeter / n_cars
+            best, best_err, mid = loop[0]['idx'], None, 0.0
+            for s in loop:
+                err = abs(mid + s['length'] / 2 - target)
+                if best_err is None or err < best_err:
+                    best, best_err = s['idx'], err
+                mid += s['length']
+            self._api_session.post(f"{API_URL}/teleport", timeout=5, json={
+                'segment': best, 'progress': 0.5, 'speed': spawn_speed_mps,
+                'add': True, 'color': colors[k % len(colors)],
+                'reverse': reverse})
+
+        # Wait until all cars exist (queued teleports land ~1 per frame).
+        deadline = time.time() + max(15.0, n_cars * 0.03)
+        uids: list[int] = []
+        bad_streak = 0
+        while time.time() < deadline:
+            try:
+                st = self._api_session.get(f"{API_URL}/state", timeout=2).json()
+                bad_streak = 0
+            except (requests.exceptions.RequestException, ValueError):
+                bad_streak += 1
+                if bad_streak >= 5:
+                    break
+                time.sleep(0.5)
+                continue
+            uids = [c['car_uid'] for c in st.get('cars', [])]
+            if len(uids) == n_cars:
+                break
+            time.sleep(0.05)
+        if len(uids) != n_cars:
+            print(f"   ❌ Only {len(uids)}/{n_cars} cars appeared - fails")
+            return self._crossing_result(start_point, passed=False,
+                                         aborted=False, game_crashed=False,
+                                         crash_info=None)
+
+        # 3. Hold the throttle for every car.
+        for uid in uids:
+            try:
+                self._api_session.post(f"{API_URL}/control", timeout=5,
+                                       json={'uid': uid, 'accelerate': True})
+            except requests.exceptions.RequestException:
+                pass
+
+        # 4. Run: poll /state, fail on the FIRST crash, stop at 300 s sim.
+        print(f"   GO! {n_cars} cars accelerating - watching for crashes")
+        t0_sim = None
+        aborted = game_crashed = False
+        crash_info = None
+        last_report = -1e9
+        wall_deadline = time.time() + self.CROSSING_MAX_SIM_SECONDS * 20.0
+        while True:
+            if abort_check is not None and abort_check():
+                aborted = True
+                break
+            try:
+                st = self._api_session.get(f"{API_URL}/state", timeout=2).json()
+            except (requests.exceptions.RequestException, ValueError) as e:
+                print(f"\n   ❌ Game crashed mid-run: {e}")
+                game_crashed = True
+                break
+            cars = st.get('cars', [])
+            sim_t = st.get('time')
+            if t0_sim is None and isinstance(sim_t, (int, float)):
+                t0_sim = sim_t
+            elapsed = (sim_t - t0_sim) if t0_sim is not None else 0.0
+
+            hit = next((c for c in cars if c.get('in_contact')), None)
+            if hit is not None:
+                crash_info = (f"crash at t={elapsed:.1f}s: car "
+                              f"{hit['car_uid']} contacted car "
+                              f"{hit.get('contact_with')}")
+                print(f"\n   ❌ {crash_info}")
+                break
+
+            if elapsed - last_report >= 10.0:
+                speeds = [c['speed_kmh'] for c in cars]
+                moving = sum(1 for v in speeds if v > 3.6)
+                print(f"   t={elapsed:5.0f}s  no crash  moving {moving}/"
+                      f"{len(cars)}")
+                last_report = elapsed
+
+            if elapsed >= self.CROSSING_MAX_SIM_SECONDS:
+                print(f"   ✅ Survived {self.CROSSING_MAX_SIM_SECONDS:.0f} s "
+                      f"clean")
+                break
+            if time.time() > wall_deadline:
+                print("   ⚠️  Wall-clock hang guard hit - ending early")
+                break
+            time.sleep(self.CROSSING_POLL_S)
+
+        if crash_info is not None:
+            # FREEZE the sim on the crash and LEAVE the cars in place so the
+            # Godot window shows the exact crash pose for analysis (the
+            # runner no longer quits Godot / kills the host on failure).
+            try:
+                self._api_session.post(f"{API_URL}/freeze", timeout=5,
+                                       json={'frozen': True})
+                print("   ❄️  Sim frozen on the crash - cars left in place "
+                      "for analysis")
+            except requests.exceptions.RequestException:
+                pass
+        else:
+            self._clear_all_cars()
+        passed = (crash_info is None and not game_crashed and not aborted)
+        record_result(results, {
+            'start_point': start_point,
+            'direction': 'crossing',
+            'passed': passed,
+            'aborted': aborted,
+            'final_segment': None,
+            'expected_end_segment': None,
+        })
+        save_results(results)
+        return self._crossing_result(start_point, passed=passed,
+                                     aborted=aborted, game_crashed=game_crashed,
+                                     crash_info=crash_info)
+
     def _right_side_kerb_gaps_m(self, state: dict, start_point: str):
         """Gap (m) between the car's RIGHT FLANK at both wheel stations and
         the right kerb line of the scenario's road; positive = on the road.
@@ -2191,6 +2419,13 @@ class TurnTester:
                 # result here (monitor_turn normally does this itself).
                 result = self.run_multi_car_stress_test(
                     results=results, abort_check=abort_check,
+                    label=f"{i}/{len(tests)}")
+                self.test_results.append(result)
+            elif start_point in ('fig8_xing', 'fig8_xing_plain'):
+                # Right-of-way crossing stress: its own runner (50 cars,
+                # two-way, 300 s or first crash), not monitor_turn.
+                result = self.run_crossing_stress_test(
+                    start_point, results=results, abort_check=abort_check,
                     label=f"{i}/{len(tests)}")
                 self.test_results.append(result)
             else:

@@ -233,8 +233,6 @@ public static class TestMaps
     private static readonly Dictionary<string, Func<RoadNetwork>> Registry = new()
     {
         ["basic"] = BuildBasicTestMap,
-        ["fig8_cross"] = BuildFig8CrossTestMap,
-        ["fig8_plain"] = BuildFig8PlainTestMap,
     };
 
     /// <summary>Build a named synthetic test map.</summary>
@@ -268,7 +266,11 @@ public static class TestMaps
     ///   Tile (4,1): Parking avenue (2 driving + 1 parking lane per side)
     ///   Tile (4,2): One-way INTO a 4-way junction
     ///   Tile (4,3): One-way OUT of a 4-way junction
-    ///   Tile (1,3): Figure-8 - ONE continuous loop crossing itself</summary>
+    ///   Tile (1,3): Figure-8 - ONE continuous loop crossing itself
+    ///   Tile (2,3): Right-of-way figure-8 - REAL degree-4 crossing with
+    ///               Vorfahrt signs (Priority SE-NW, Yield SW-NE)
+    ///   Tile (3,3): Un-signed figure-8 - REAL degree-4 crossing with NO
+    ///               signs (right-before-left / Rechts vor Links governs)</summary>
     public static RoadNetwork BuildBasicTestMap()
     {
         var b = new MapBuilder();
@@ -606,29 +608,43 @@ public static class TestMaps
         b.Road("mixout_center", "mixout_s");
         b.Start("mixed_from_east", "mixout_e");
 
+        // --- Tile (2,3): Right-of-way figure-8 (real degree-4 crossing) ---
+        // Same planar lemniscate as the standalone fig8_cross map, but placed
+        // as a tile on the basic map so the right-of-way (Vorfahrt) scenario
+        // lives alongside every other track. The self-crossing C is a REAL
+        // 4-way junction: the SE-NW diagonal is the priority road, the SW-NE
+        // diagonal must yield. Start point "fig8_xing" spawns at the loop's
+        // leftmost point heading north.
+        (ox, oy) = Origin(2, 3);
+        AddPlanarFig8(b, "xing_", "fig8_xing", rightOfWay: true,
+                      px: ox + 250, py: oy + 250);
+
+        // --- Tile (3,3): Un-signed figure-8 (real degree-4 crossing) ---
+        // Same geometry as tile (2,3) but with NO signs at the crossing, so
+        // the engine's default right-before-left (Rechts vor Links) governs
+        // the self-crossing. Start point "fig8_xing_plain" spawns at the
+        // loop's leftmost point heading north.
+        (ox, oy) = Origin(3, 3);
+        AddPlanarFig8(b, "xingp_", "fig8_xing_plain", rightOfWay: false,
+                      px: ox + 250, py: oy + 250);
+
         return b.Build();
     }
 
-    /// <summary>The planar figure-8 family: a lemniscate (same curve as the
-    /// basic map's tile (1,3)) whose self-crossing is a REAL degree-4
-    /// junction (all segments ground level) instead of two coincident
-    /// degree-2 nodes + a bridge. A driver with no destination and throttle
-    /// held takes the straight continuation at the crossing, so it drives the
-    /// full figure-8 loop forever - both lobes, crossing in the middle like
-    /// real traffic. 48 segments; the four spokes of the crossing are
-    /// n11->C, C->n13, n35->C, C->n37. The crossing's right-of-way is a
-    /// parameter: BuildFig8CrossTestMap is the right-of-way-signs variant,
-    /// BuildFig8PlainTestMap the no-signs (right-before-left) variant.</summary>
-
-    /// <summary>Shared geometry for the planar figure-8 family. When
-    /// rightOfWay is true, adds the Vorfahrt signs (SE-NW diagonal = Priority,
-    /// SW-NE = Yield); false leaves the crossing un-signalled so the engine's
-    /// right-before-left (ComesFromMyRight) governs. A traffic-light variant
-    /// is planned (DRIVING_MANEUVERS.md R5) but not built.</summary>
-    static RoadNetwork BuildPlanarFig8(string prefix, string startName, bool rightOfWay)
+    /// <summary>Add a planar figure-8 (real degree-4 crossing) to an existing
+    /// builder, centred on the crossing point (px, py). The self-crossing is a
+    /// REAL degree-4 junction (all segments ground level): a driver with no
+    /// destination and throttle held takes the straight continuation at the
+    /// crossing, so it drives the full figure-8 loop forever - both lobes,
+    /// crossing in the middle like real traffic. 48 segments; the four spokes
+    /// of the crossing are n11->C, C->n13, n35->C, C->n37. When rightOfWay is
+    /// true, adds the Vorfahrt signs (SE-NW diagonal = Priority, SW-NE =
+    /// Yield); false leaves the crossing un-signalled so the engine's
+    /// right-before-left (ComesFromMyRight) governs. Used by the basic map's
+    /// right-of-way tile (2,3).</summary>
+    static void AddPlanarFig8(MapBuilder b, string prefix, string startName,
+        bool rightOfWay, double px, double py)
     {
-        var b = new MapBuilder();
-        double px = 250, py = 250;   // the crossing point P
         const int N = 48;
         for (int i = 0; i < N; i++)
         {
@@ -656,18 +672,5 @@ public static class TestMaps
             b.Sign($"{prefix}n37", c, SignType.Yield);
         }
         b.Start(startName, $"{prefix}n24", facing: $"{prefix}n25");   // leftmost point
-        return b.Build();
     }
-
-    /// <summary>Planar figure-8 with right-of-way (Vorfahrt) signs at the
-    /// crossing (C = fig8c_c). Used by tests/fig8_fleet_check.py and the
-    /// two-way deadlock repro.</summary>
-    public static RoadNetwork BuildFig8CrossTestMap() =>
-        BuildPlanarFig8("fig8c_", "fig8_cross", rightOfWay: true);
-
-    /// <summary>Planar figure-8 with NO signs at the crossing: right-of-way
-    /// is the default right-before-left (Rechts vor Links). Same geometry as
-    /// BuildFig8CrossTestMap (C = fig8p_c).</summary>
-    public static RoadNetwork BuildFig8PlainTestMap() =>
-        BuildPlanarFig8("fig8p_", "fig8_plain", rightOfWay: false);
 }

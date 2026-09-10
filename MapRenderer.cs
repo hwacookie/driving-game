@@ -212,6 +212,10 @@ public partial class MapRenderer : Node2D
         public bool BlinkL, BlinkR, Hazard, Braking, HeadlightsOn, TaillightsOn;
         public (float X, float Y, float Hdg)? FlagGreen, FlagRed;
         public string HudLabel;
+        // Collision footprint (the box used for crash detection), in metres,
+        // derived from /state body_corners. 0 = not known yet.
+        public float CollLenM, CollWidM;
+        public bool InContact;   // crashed (pinned against another car)
     }
     private readonly Dictionary<long, CarMeta> _carMeta = new();
     // Small per-car HUD label in world space above the car's nose.
@@ -227,6 +231,7 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, Polygon2D[]> _brakeLights = new();
     // Front-corner headlights: white, visible while HeadlightsOn.
     private readonly Dictionary<long, Polygon2D[]> _headlights = new();
+    private readonly Dictionary<long, Line2D> _carOutlines = new();
 
     // Car sprites: seven vehicles extracted from assets/source/vehicles_green.png
     // by tools/make_car_sprites.py (nose = texture top, transparent bg).
@@ -332,6 +337,10 @@ public partial class MapRenderer : Node2D
             else if (args[i] == "--center" && i + 2 < args.Length)
             {
                 _overrideCenter = W(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
+                // A fixed camera target: never auto-follow a spawned car, so
+                // the view stays on this point (e.g. the crossing) instead of
+                // snapping to the last car. Manual pan/zoom still works.
+                _autoFollow = false;
                 i += 2;
             }
             else if (args[i] == "--zoom" && i + 1 < args.Length)
@@ -1344,6 +1353,22 @@ public partial class MapRenderer : Node2D
                     m.HudLabel = c.TryGetProperty("hud_label", out var hlc)
                                   && hlc.ValueKind == JsonValueKind.String
                            ? hlc.GetString() : null;
+                    m.InContact = c.TryGetProperty("in_contact", out var ic)
+                                  && ic.GetBoolean();
+                    // Collision footprint from the four body_corners (world
+                    // pixels): length = front->rear edge, width = left->right.
+                    if (c.TryGetProperty("body_corners", out var bc)
+                        && bc.ValueKind == JsonValueKind.Array && bc.GetArrayLength() == 4)
+                    {
+                        var fr = bc[0]; var fl = bc[1]; var rl = bc[2];
+                        float frx = fr[0].GetSingle(), fry = fr[1].GetSingle();
+                        float flx = fl[0].GetSingle(), fly = fl[1].GetSingle();
+                        float rlx = rl[0].GetSingle(), rly = rl[1].GetSingle();
+                        m.CollWidM = Mathf.Sqrt((frx - flx) * (frx - flx)
+                                                + (fry - fly) * (fry - fly)) / Ppm;
+                        m.CollLenM = Mathf.Sqrt((flx - rlx) * (flx - rlx)
+                                                + (fly - rly) * (fly - rly)) / Ppm;
+                    }
                 }
                 // Multi-car auto-follow: a freshly spawned car takes over
                 // the camera binding - mirrors the sim, which follows the
@@ -1443,6 +1468,7 @@ public partial class MapRenderer : Node2D
         _blinkR.Remove(uid);
         _brakeLights.Remove(uid);
         _headlights.Remove(uid);
+        _carOutlines.Remove(uid);
         if (_carNodes.TryGetValue(uid, out var n))
         { n.QueueFree(); _carNodes.Remove(uid); }
         if (_followUid == uid) _followUid = null;
@@ -1484,6 +1510,31 @@ public partial class MapRenderer : Node2D
             Scale = new Vector2(size.W / tex.GetSize().X, size.L / tex.GetSize().Y),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
+        // Red collision outline: the exact box used for crash detection
+        // (LengthM x WidthM centred on the BODY centre). Prefer the sim's
+        // authoritative footprint (body_corners -> CollLenM/CollWidM); fall
+        // back to the sprite size before the first sample lands.
+        float collL = _carMeta.TryGetValue(uid, out var cm0) && cm0.CollLenM > 0
+                        ? cm0.CollLenM : size.L;
+        float collW = _carMeta.TryGetValue(uid, out var cm1) && cm1.CollWidM > 0
+                        ? cm1.CollWidM : size.W;
+        float chl = collL / 2f, chw = collW / 2f, ccy = -RearAxleOffsetM;
+        var outline = new Line2D
+        {
+            Width = 0.18f,               // metres (scales with zoom)
+            DefaultColor = new Color(1f, 0f, 0f),
+            Closed = true,
+            ZIndex = 1,                  // above the sprite
+            Points = new[]
+            {
+                new Vector2( chw, ccy - chl),   // front-right
+                new Vector2(-chw, ccy - chl),   // front-left
+                new Vector2(-chw, ccy + chl),   // rear-left
+                new Vector2( chw, ccy + chl),   // rear-right
+            },
+        };
+        root.AddChild(outline);
+        _carOutlines[uid] = outline;
         // Blinker corner lights (pygame parity): one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
         // centre; orange, 0.5 s blink period.
@@ -1836,9 +1887,13 @@ public partial class MapRenderer : Node2D
         foreach (var kv in _carNodes)
         {
             var node = kv.Value;
-            string color = _carMeta.TryGetValue(kv.Key, out var m)
-                           ? m.Color : "blue";
-            var size = CarSizeOf(color);
+            _carMeta.TryGetValue(kv.Key, out var m);
+            // Match the RED COLLISION OUTLINE exactly: use the sim's
+            // crash-detection footprint (CollLenM/CollWidM from body_corners),
+            // falling back to the sprite size before the first sample.
+            var size = CarSizeOf(m?.Color ?? "blue");
+            float halfW = (m != null && m.CollWidM > 0 ? m.CollWidM : size.W) / 2f;
+            float halfL = (m != null && m.CollLenM > 0 ? m.CollLenM : size.L) / 2f;
             Vector2 bodyCentre = node.GlobalPosition +
                                  new Vector2(0, -RearAxleOffsetM);
             // Rotate the world->body vector into the car's local frame
@@ -1846,9 +1901,8 @@ public partial class MapRenderer : Node2D
             float c = Mathf.Cos(-node.Rotation), s = Mathf.Sin(-node.Rotation);
             Vector2 dv = world - bodyCentre;
             Vector2 rel = new Vector2(dv.X * c - dv.Y * s, dv.X * s + dv.Y * c);
-            // 0.3 m click tolerance beyond the painted body.
-            if (Math.Abs(rel.X) > size.W / 2f + 0.3f ||
-                Math.Abs(rel.Y) > size.L / 2f + 0.3f)
+            // Hit area == the red outline (no extra tolerance).
+            if (Math.Abs(rel.X) > halfW || Math.Abs(rel.Y) > halfL)
                 continue;
             double d = rel.LengthSquared();
             if (d < bestD) { bestD = d; best = kv.Key; }

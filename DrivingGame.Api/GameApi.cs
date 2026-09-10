@@ -94,6 +94,7 @@ public static class GameApi
                 ["idx"] = idx,
                 ["x1"] = s.X1, ["y1"] = s.Y1, ["x2"] = s.X2, ["y2"] = s.Y2,
                 ["length"] = s.Length, ["width"] = s.Width, ["oneway"] = s.Oneway,
+                ["start_node"] = s.StartNode, ["end_node"] = s.EndNode,
             });
         });
 

@@ -1063,6 +1063,7 @@ public sealed partial class BicycleNav
     public void Update(double dt, ControlInput control)
     {
         var car = _car;
+        _navTime += dt;
         if (_uturnActive) { UpdateUturn(dt, control); return; }
         // Reverse-in parking (docs §1b) owns the car while it runs.
         if (_reversePark is not null) { UpdateReversePark(dt); return; }
@@ -1073,6 +1074,7 @@ public sealed partial class BicycleNav
             if (control.Brake || car.Speed != 0.0) car.Speed = 0.0;
             ParkPhase = "stopped";
             LaneChangeSignal = null;
+            _prevLaneChangeSignal = null;
             _mergeEpisode = null;
             car.TargetSpeed = 0.0;
             return;
@@ -1164,6 +1166,12 @@ public sealed partial class BicycleNav
             if (s0 - MERGE_SIGNAL_AHEAD_M <= S && S < s1)
                 LaneChangeSignal = direction;
         }
+        // R17 (signal before the maneuver): log once when the lane-change
+        // blinker switches on - MERGE_SIGNAL_AHEAD_M before the merge zone.
+        if (LaneChangeSignal is not null && _prevLaneChangeSignal is null)
+            car.RecordDecision(_navTime,
+                $"[R17] signal {LaneChangeSignal} before lane change");
+        _prevLaneChangeSignal = LaneChangeSignal;
 
         MaybeRebuild(pullingOver: pullingOver, pullingOut: pullingOut);
         var refLine = _ref;

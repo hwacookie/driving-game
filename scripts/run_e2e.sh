@@ -51,16 +51,24 @@ done
 GAME_PID=""
 GODOT_PID=""
 TAIL_PID=""
+HOLD_OPEN=0   # set to 1 on failure: leave host + Godot up for analysis
 cleanup() {
   [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null || true
-  # Godot: NEVER killed here. It self-terminates via --quit-on-test-done;
-  # if it is still around (crash/hang), tell the user instead of popping a
-  # crash-report window with a signal.
+  # Godot: NEVER killed here (any kill signal pops a macOS crash-report
+  # window). It stays open for analysis; tell the user it is there.
   if [ -n "$GODOT_PID" ] && kill -0 "$GODOT_PID" 2>/dev/null; then
     echo ""
     echo "!! Godot window still open (pid $GODOT_PID) - close it manually."
   fi
-  [ -n "$GAME_PID" ] && kill "$GAME_PID" 2>/dev/null || true
+  # On failure, keep the C# host alive too so the frozen crash scene stays
+  # interactive (click cars, /state, /car/uid/decisions). Stop it with:
+  #   pkill -f DrivingGame.Server
+  if [ "$HOLD_OPEN" -eq 1 ]; then
+    echo "!! Test failed - C# host left running (pid $GAME_PID) for analysis."
+    echo "   Stop it when done:  pkill -f DrivingGame.Server"
+  else
+    [ -n "$GAME_PID" ] && kill "$GAME_PID" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -132,13 +140,52 @@ else
   TEST_NUMBER=""   # empty -> full suite (no --tests arg)
 fi
 
+# For a crossing scenario (#23/#24) aim the camera at the crossing itself
+# (centroid of the loop nodes) at zoom 14, instead of following a spawned car.
+GODOT_CAM_ARGS=()
+if [ -n "$TEST_NUMBER" ]; then
+  CAM=$(python3 - "$TEST_NUMBER" "$API" <<'EOF'
+import json, subprocess, sys, urllib.request
+num, api = int(sys.argv[1]), sys.argv[2]
+rows = json.loads(subprocess.check_output(
+    [sys.executable, "tests/test_turning.py", "--list-json"]))
+key = next((r["key"] for r in rows if r["number"] == num), None)
+prefix = {"fig8_xing": "xing_", "fig8_xing_plain": "xingp_"}.get(key)
+if not prefix:
+    sys.exit(0)   # not a crossing scenario -> no camera override
+xs = ys = n = 0.0
+i = 0
+while True:
+    try:
+        with urllib.request.urlopen(f"{api}/segment/{i}", timeout=5) as r:
+            if r.status != 200:
+                break
+            s = json.loads(r.read())
+    except Exception:
+        break
+    if str(s.get("start_node", "")).startswith(prefix):
+        xs += s["x1"]; ys += s["y1"]; n += 1
+    i += 1
+if n:
+    ppm = 2.0   # config.PIXELS_PER_METER
+    print(f"{xs / n / ppm:.2f} {ys / n / ppm:.2f}")
+EOF
+)
+  if [ -n "$CAM" ]; then
+    GODOT_CAM_ARGS=(--center $CAM --zoom 14)
+    echo "==> Crossing scenario: camera centred on the crossing ($CAM) @ zoom 14"
+  fi
+fi
+
 if [ "$RUN_GODOT" -eq 1 ]; then
   if [ ! -x "$GODOT_BIN" ]; then
     echo "!! Godot not found at $GODOT_BIN - continuing without the window"
     RUN_GODOT=0
   else
     echo "==> Launching Godot client (visible window) -> $GODOT_LOG"
-    nohup "$GODOT_BIN" --path "$ROOT" -- --quit-on-test-done > "$GODOT_LOG" 2>&1 &
+    # No --quit-on-test-done: the window stays open after the run so a
+    # failed/crashed scene can be inspected. Close it manually when done.
+    nohup "$GODOT_BIN" --path "$ROOT" -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in
   fi
@@ -185,14 +232,8 @@ if [ "$TEST_EXIT" -eq 0 ]; then
   echo "==> Suite finished: rc=0 ✅ (log: $LOG_FILE)"
 else
   echo "==> Suite finished: rc=$TEST_EXIT ❌ (log: $LOG_FILE)"
-fi
-
-# Godot quits in-app within ~2 s of the run finishing; give it a moment.
-if [ -n "$GODOT_PID" ]; then
-  for i in $(seq 1 15); do
-    kill -0 "$GODOT_PID" 2>/dev/null || break
-    sleep 1
-  done
+  # Keep host + window up so the frozen crash can be analysed (visible mode).
+  [ "$RUN_GODOT" -eq 1 ] && HOLD_OPEN=1
 fi
 
 echo "==> Stopping host..."

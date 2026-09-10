@@ -20,6 +20,9 @@ tests/turning_results.json
 tests/run_test_*.log
 tests/twoway_repro_*.jsonl
 
+## crash dumps (regenerated on every run)
+logs/
+
 ## OS / Python tooling junk
 .DS_Store
 __pycache__/
