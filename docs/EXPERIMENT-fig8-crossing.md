@@ -61,7 +61,21 @@ Additionally (must not regress):
 3. **No new physics violations** — no off-road, no wrong-side beyond the
    known fig-8 baseline noise, no jitter/teleport (the standard stress
    invariants the suite already checks).
-4. **Existing suite stays green** — tests 1–21 unaffected by the change.
+4. **e2e turn suite stays green** — tests 1–21 unaffected by the change.
+5. **Unit tests: no NEW red, and the in-scope ones go green.** The C# xunit
+   suite is NOT fully green at baseline (see §4.4). The fix must:
+   - turn `CollisionTests.StationaryLeadCar_FollowerBrakesAndStopsBehind`
+     green (in-scope collision behavior), AND
+   - un-skip and green the crossing regression test
+     `CrossingStressFlutterTests` (`Skip = "known-red (R14 …)"`) / make the
+     `CrossingStress_NoContact_Within_15s` case pass — this IS the bug in
+     unit-test form;
+   - NOT introduce any new failing test.
+   The two `RacelineReferenceTests` reds (`NetworkMatchesReference`,
+   `ErosionAreaMatchesReference`) are a **pre-existing stale-baseline** issue
+   (the reference dump predates the new crossing maps: 183 vs 277 segments) —
+   OUT OF SCOPE for the crossing fix, tracked separately. A branch may leave
+   them red as long as it does not make them worse.
 
 The experiment compares how long each model (Opus 4.8 vs Qwen 3.8) takes to
 reach criteria 1+2 on both crossings from the identical baseline below.
@@ -101,6 +115,65 @@ Run 2026-09-11 (`scripts/run_e2e.sh --tests 24`, fresh C# host, 50 cars).
 Both crossings crash within ~8–16 s of sim time, well short of the 300 s
 window. The signed crossing fails FASTER than the unsigned one. Neither
 reaches sustained flow. This is the state both fix branches start from.
+
+### 4.4 Unit-test baseline (C# xunit)
+
+`dotnet test DrivingGame.Sim.Tests/` on `main` (2026-09-11):
+**91 passed, 3 failed, 2 skipped (96 total).** So the suite is NOT green at
+baseline — recorded here so a fix is judged against the real starting point.
+
+| Test | State | Category |
+|------|-------|----------|
+| `CollisionTests.StationaryLeadCar_FollowerBrakesAndStopsBehind` | FAIL (stops 5.61 m vs range 1.5–5.5) | in-scope (collision) |
+| `CrossingStressFlutterTests` (`CrossingStress_NoContact_Within_15s`) | SKIP (`known-red`, R14: committed car crosses into a stopped body) | in-scope — THE bug |
+| `RacelineReferenceTests.NetworkMatchesReference` | FAIL (183 vs 277 segments) | out-of-scope (stale reference dump) |
+| `RacelineReferenceTests.ErosionAreaMatchesReference` | FAIL (geometry drift) | out-of-scope (stale reference dump) |
+| `RacelineReferenceTests.RebaselineReferenceFile` | SKIP (rebaseline helper, always skipped) | n/a |
+
+The two out-of-scope reds exist because the crossing maps were added to
+`TestMaps.BuildBasicTestMap()` without regenerating the raceline reference
+dump — a separate maintenance task, not the collision/deadlock bug.
+
+## 6. How to run the tests
+
+All commands from the repo root (`/Users/hauke/prj/driving-game`).
+
+### Unit tests (C# xunit, headless, fast — run these first)
+
+```bash
+dotnet test DrivingGame.Sim.Tests/
+```
+
+One targeted test class or method while iterating:
+
+```bash
+dotnet test DrivingGame.Sim.Tests/ --filter FullyQualifiedName~CollisionTests
+dotnet test DrivingGame.Sim.Tests/ --filter "FullyQualifiedName~CrossingStress"
+```
+
+### e2e crossing tests (live REST + Godot, the real measurement)
+
+The canonical runner is `scripts/run_e2e.sh`. It kills stale processes,
+builds + starts the C# console host (`DrivingGame.Server`, REST on :5001),
+opens the Godot window (camera auto-aimed at the crossing for #23/#24),
+launches the suite via `POST /run_test`, and streams the log. One test
+number per run:
+
+```bash
+scripts/run_e2e.sh --tests 23     # fig8_xing        (signed crossing)
+scripts/run_e2e.sh --tests 24     # fig8_xing_plain  (right-before-left)
+scripts/run_e2e.sh --tests 23 --no-godot   # headless (no window)
+```
+
+Each crossing run spawns 50 cars, holds the throttle, and runs to 300 s of
+sim time or the first crash. PASS = the whole window with zero `in_contact`.
+Per-run log: `tests/run_test_T_*_<N>_<timestamp>.log`. After a FAILED run
+the C# host is left up (sim frozen on the crash) for inspection; stop it
+with `pkill -f DrivingGame.Server` before the next run (the runner also does
+this at startup).
+
+Do NOT send Godot a signal; the runner closes the window cleanly. See
+`docs/TESTING.md` / `AGENTS.md` for the full workflow rules.
 
 ## 5. Experiment protocol
 
