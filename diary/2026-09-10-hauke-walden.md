@@ -254,3 +254,47 @@
 - Tried & discarded: Grep `crash at t=...` from xUnit console output (failed because the format was truncated or different; switched to parsing `/tmp/flap_crash_decisions.txt` instead).
 - State: Determinism check passed. Next step is addressing the known bug in `CrossingStress_NoContact_Within_15s` or moving to SafetySystemsTests validation.
 
+## 2026-09-10 04:00–10:53 (hauke-walden)
+- Worked on: Git hygiene and session cleanup; added `logs/` to `.gitignore` (crash dumps are regenerated), committed all changes, pushed to origin.
+- Done: Committed fixes in `CarCollisions.cs` (persistence cap, motion-based yielding, gap-based self-protection); removed fig8 diagnostic tests; added `CrossingStressFlutterTests.cs`, `CrashDumper.cs`, `docs/CarVisuals.md`; pushed commit to remote.
+- State: All changes pushed. Next step: address remaining red test (t=4.98s collision car 40 vs 14) by implementing R14 blocked-box logic or stop here if flutter fixes are sufficient for the current milestone.
+
+## 2026-09-10 04:00–10:52 (hauke-walden)
+- Worked on: Git operations (add/commit/push) following user request "git a c p"; reviewed `git status` showing changes in `CarCollisions.cs`, deleted test files (`Fig8*Tests.cs`), and new files (`CrossingStressFlutterTests.cs`, `CrashDumper.cs`).
+- Done: Confirmed staging area readiness; identified 3 modified files, ~14 deleted tests, and 2 untracked new files. Pending actual `git add`, `commit`, and `push`.
+- Tried & discarded: N/A (session cut off before execution).
+- State: Git status verified with pending changes; next step is to run the requested git commands to commit the flutter fix and cleanup.
+
+## 2026-09-10 04:00–10:52 (hauke-walden)
+- Worked on: Git operations (`git add`, `git commit`, `git push`); verified changes affecting `CarCollisions.cs`, `CrossingStressFlutterTests.cs`, and cleanup of deleted Fig8 test files.
+- Done: Staged all modifications (new flutter tests, collision fixes, doc updates) and identified the next step as pushing to remote or continuing with R14 blocked-box logic.
+- State: Ready to push commit; remaining technical open item is implementing R14 blocked-box check for the t=4.98s crash.
+
+## 2026-09-10 04:00–10:52 (hauke-walden)
+- Worked on: Git status and commit workflow; reviewed changes in `CarCollisions.cs`, `CrossingStressFlutterTests.cs`, and deleted fig8 test files. Checked `.gitignore` for untracked `logs/`.
+- Done: Added all staged changes via `git add`; prepared commit message matching recent style (collision v2, flutter fix, cleanup); identified `logs/` as untracked but ignored by default config.
+- Tried & discarded: None.
+- State: Git add complete; awaiting user confirmation for `git commit`. Next step: push to remote after commit.
+
+## 2026-09-10 04:00–10:52 (hauke-walden)
+- Worked on: Git hygiene and commit. Added `logs/` to `.gitignore` (crash dumps are regenerated). Executed `git add`, `git commit`, `git push`.
+- Done: Pushed 13 files including `CarCollisions.cs` fixes, `CrossingStressFlutterTests.cs`, and `CrashDumper.cs`; excluded `logs/` from the repo.
+- Tried & discarded: None (direct user request execution).
+- State: Remote updated. Next: Address remaining R14 blocked-box failure (commit decision doesn't check for stopped bodies in corner geometry) to enable 300s e2e pass.
+
+## 2026-09-10 04:00–10:53 (hauke-walden)
+- Worked on: Git hygiene and state cleanup. Added `logs/` to `.gitignore` (crash dumps are regenerated); staged, committed, and pushed the large batch of changes including new tests (`CrossingStressFlutterTests.cs`, `CrashDumper.cs`), collision fixes (`CarCollisions.cs`), and documentation updates.
+- Done: Commit successful with message reflecting crossing stress fixes, flutter verification, and crash dumper; `logs/` now ignored in repo.
+- State: Branch updated remotely. Next: Implement R14 (blocked-box check) to resolve the remaining t=4.98s collision between car 40 and car 14.
+
+## 2026-09-10 04:00–10:53 (hauke-walden)
+- Worked on: Crossing stress hardening in `CarCollisions.cs` (cap persistence, stationary yielding, gap-based self-protection), Flutter regression tests (`CrossingStressFlutterTests.cs`), crash dumper (`CrashDumper.cs`), and e2e runner improvements; cleaned up fig8 diagnostic tests.
+- Done: Implemented Fix A (0.5–1.0s hold band), Fix B (yield against stationary cars), and Fix C (gap-based cap); new Flutter test passes (≥0.4s brake hold); original 13/37 crash fixed; git commit/push completed with logs added to `.gitignore`.
+- Tried & discarded: None in this window.
+- State: Remaining failure at t=4.98s (car 40 vs car 14) requires R14 blocked-box logic; e2e suite now stable except for that one documented red test and pre-existing reference drift.
+
+## 2026-09-10 04:00–10:53 (hauke-walden)
+- Worked on: Implemented collision fixes in `CarCollisions.cs` (cap persistence, stationary yielding, gap-based self-protection); added crash dumper `CrashDumper.cs`; restructured tests into `CrossingStressFlutterTests.cs`; updated `.gitignore` to exclude `logs/`.
+- Done: Pushed commit `5bd86ec` "Crossing-stress hardening" (31 files); Flutter decision-rate test green; original 13/37 crash fixed; new t=4.98s failure documented but stable; `logs/` now ignored.
+- State: Only one remaining red test (t=4.98s blocked-box collision). Next step: design R14/blocked-box rule or stop here?
+

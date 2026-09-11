@@ -672,6 +672,142 @@ car/
 - Sound effects (engine, brakes)
 - Anti-aliasing via pygame.gfxdraw
 
+## Multi-Vehicle, Collisions & Traffic (C# / Godot)
+
+These features were added on the verified C# engine AFTER the 1:1 port from
+Python was complete (the port itself is recorded in
+[C_SHARP_PORT_SPEC.md](C_SHARP_PORT_SPEC.md), now closed). Anything the
+Python original already had is described elsewhere in this spec; this section
+is the home for the post-port additions and the forward roadmap.
+
+### Vehicle classes & per-class dynamics — DONE
+
+Seven real vehicle sprites (`blue` sedan, `silver`, `police`, `tan`,
+`tractor`, `pickup`, `mixer`), assigned per car as `CAR_COLORS[(uid-1) % 7]`
+(see [MULTI_CAR_PLAN.md](MULTI_CAR_PLAN.md)). Each has its own physical
+footprint (`Config.VEHICLE_SIZES`, single source of truth for renderer + sim)
+and its own longitudinal/lateral dynamics (`Config.VEHICLE_CLASS_SPECS`):
+e.g. car 200 km/h / 2.8 m/s² / 4.5 m/s² lat vs truck 80 km/h / 1.3 / 3.5 vs
+heavy_truck (loaded mixer) 80 / 1.0 / 3.0. `BicycleNav` uses the per-instance
+`A_CRUISE`/`V_MAX`/`A_LAT_MAX` from `Car.Spec` for the speed profile, corner
+speeds and understeer caps. The e2e suite and collision tests pin spawns to
+the sedan (`color: "blue"`) so baselines stay comparable.
+
+### Car-to-car collision & avoidance — DONE
+
+Cars exert NO collision forces on each other; they brake and rest against one
+another like against a wall (same semantics as `Obstacles.ApplyContactStop`).
+Implemented in `DrivingGame.Sim/CarCollisions.cs`, run per physics substep in
+`SimEngine.Tick`; see the Driving Ruleset R2/R6/R7 in
+[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8. Two layers:
+
+1. **Avoidance (speed cap).** Every car gets a cap = the fastest speed from
+   which `CAR_BRAKING` still stops behind the nearest car ahead (plus a
+   standstill gap), applied as decel-limited braking AFTER the driver's own
+   longitudinal logic — so it works for every driver (BICYCLE and FREE,
+   incl. U-turn/reverse) without touching their code.
+   - **v1** — geometric forward corridor (±1.8 m of own axis, 40 m look-ahead,
+     3 m gap); cap = `v_ahead·axis + sqrt(2·CAR_BRAKING·max(gap−3 m, 0))`.
+     Broadphase = uniform 20 m grid. Handles smooth car-following.
+   - **v2** — time-window pair prediction for oblique/crossing conflicts:
+     each car's future path is swept every 0.1 s up to 5 s (along the
+     `BicycleNav.Ref` refline when routed, else linear), earliest body-box
+     overlap classified into graded TTC bands (≤1 s → stop, ≤3 s → cap,
+     else mild anticipation). Prediction boxes are length-padded (+2 m/end).
+     **Right-before-left**: the car seeing the other come from its right
+     yields (world-frame dot-product closing test; lower-uid tie-break).
+2. **Response (contact resolution).** If two body boxes overlap after the
+   step, both cars roll back to their pre-step pose and stop — no
+   interpenetration, no teleport.
+
+Per-class footprints are used throughout collision math (per-pair bumper gap
+in v1, per-car prediction boxes in v2, real body corners in `Resolve`).
+Verified by `DrivingGame.Sim.Tests/CollisionTests.cs` and the mixed-fleet
+fig8 regression; 96/96 sim tests green. `CollisionsEnabled` flag +
+`--no-collisions` CLI arg exist for isolation.
+
+### Flat crossing maps & right-of-way stress — DONE
+
+`TestMaps.cs` carries two ground-level degree-4 fig-8 crossings on the
+`basic` map — tile (2,3) "Right-of-way figure-8" (WITH Vorfahrt signs) and
+tile (3,3) "un-signed figure-8" (right-before-left) — so the two branches
+truly interact at grade. e2e scenarios `fig8_xing` (signed) and
+`fig8_xing_plain` (no signs) run 50 cars (25/direction) for up to 300 s of
+sim time or until the first crash. (The older single-branch density probe
+`fig8_stress` is currently skipped pending a spawn-placement fix.)
+
+### Driver profiles (Cautious / Normal / Sporty) — PLANNED
+
+First instances of the Driver-axis style policies (below). A per-car speed
+factor assigned at spawn, applied where `vTarget` is finalized
+(`BicycleNav.part3.cs`) — style acts at follow time, so it never invalidates
+the raceline cache:
+- **Cautious** ("Miss Daisy"): target ≈ 0.5× profile max, big gaps.
+- **Normal**: 1.0× (today's behavior; default).
+- **Sporty**: 1.0× but full acceleration, minimal margin.
+Work: spawn API param (default Normal); factor in the vTarget finalization;
+test mixed profiles on a shared route (no collisions, stable ordering).
+
+### Per-vehicle raceline & kinematics geometry — PLANNED
+
+Today non-sedan vehicles have realistic sizes, dynamics and car-to-car
+collision boxes but still plan the driving line and steer with a **sedan's**
+body envelope: `BicycleNav.WHEELBASE` is a global `2.7`, `Raceline`'s
+corridor erosion uses the global `Config.CAR_WIDTH`, and `SolveCacheKey`
+carries no vehicle geometry. This is a known inconsistency the "never
+physically impossible" rule will eventually force us to fix. For a sedan
+at R = 20 m the front-axle off-tracking is ~0.18 m (negligible, which is why
+the width-only corridor "worked"); for the ~7–8.4 m trucks it is ~0.6–1.2 m.
+Work items:
+1. Single source of truth for per-car wheelbase + front/rear axle offsets
+   (width/length already shared via `Config.VEHICLE_SIZES`).
+2. `LegalCorridor`/`SolveLine` take the vehicle's half-width AND overhangs
+   and constrain the SWEPT ENVELOPE (derived front-axle path, body corners),
+   not just the reference point; add the geometry to `SolveCacheKey`.
+3. Make off-road / lane-guard / bumper checks per-vehicle (still sedan-sized).
+4. Per-car wheelbase in the bicycle-model kinematics (corner SPEED is already
+   per-class via `A_LAT_MAX`).
+5. Keep the sedan as reference for existing e2e tolerances; truck scenarios
+   need adjusted expectations.
+
+### Traffic participants: trucks, bicycles, pedestrians — PLANNED
+
+Participant types beyond a single car class, via **two orthogonal, composed
+hierarchies** — what a participant IS vs how it is DRIVEN:
+- **Vehicle axis** (physical): `TrafficParticipant` → `RoadVehicle` /
+  `Pedestrian`; road vehicles carry a `VehicleSpec` (mostly data — subclass
+  only when physics LOGIC differs, e.g. articulated truck).
+- **Driver axis** (behavior): the existing `Driver` seam, extended with style
+  policies (cautious/aggressive: limit fraction, following distance, reaction
+  time, lane-change aggressiveness). N vehicles × M drivers, no N×M classes.
+- Pedestrians have no driver (intrinsic wander/cross/wait); a playing child
+  is a parameterized pedestrian. All stochastic behavior uses seeded RNG to
+  preserve determinism.
+
+The cached raceline solve stays keyed on (route geometry, VehicleSpec);
+driver style acts at follow time, so it never invalidates the line cache.
+
+**Truck left-turn encroachment (Flankieren):** on narrow two-way streets a
+Sattelschlepper can often only take a tight corner by pulling wide into the
+oncoming lane early. The centreline bound must become CONDITIONALLY relaxable
+for wide/long specs — a two-pass solve gated on a feasibility check (relax
+`lo` into the oncoming lane, bounded by its far curb, ONLY when the normal
+solve is infeasible for the class), never a style option. It needs
+yielding/right-of-way from the driver axis + collision avoidance, so it lands
+with the mixed-traffic work.
+
+**Acceptance (Gate G6):** a mixed-traffic scenario (car + truck + bicycle +
+pedestrian incl. playing child) passes the stress invariants; determinism
+verified (same seed → same run).
+
+### Parallelism — PLANNED (optional)
+
+The engine is deliberately concurrency-ready: a car update is a pure function
+of (own state, immutable world snapshot), with shared state confined to the
+sequential pre/post passes. Turning on parallelism is a one-line change
+(`foreach` → `Parallel.For` across cars) — done only when a measurement
+demands it, with an explicit shared-state audit and a determinism re-check.
+
 ## Performance
 
 - **FPS**: 109 fps @ 4× zoom with 1970 segments
