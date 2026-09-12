@@ -180,74 +180,24 @@ public class RacelineReferenceTests
     }
 
     // ------------------------------------------------------------------
-    // the network itself must match the Python map (G1 already covers /map;
-    // this pins what the raceline consumes: nodes, degrees, segment order).
+    // (removed 2026-09-11, user decision) NetworkMatchesReference and
+    // ErosionAreaMatchesReference pinned the WHOLE test map + eroded area to
+    // the frozen Python reference dump. Post-port the C# map deliberately
+    // grew (crossing tiles 2,3 / 3,3 -> 277 nodes vs the dump's 183), so
+    // both compared apples to oranges and were stale. The per-CASE tests
+    // below still pin the raceline math; only these two whole-map snapshots
+    // were deleted.
     // ------------------------------------------------------------------
 
-    [Fact]
-    public void NetworkMatchesReference()
-    {
-        var reference = LoadReference();
-        var network = TestMaps.BuildBasicTestMap();
-
-        Assert.Equal(reference.NodeCount, network.Nodes.Count);
-        Assert.Equal(reference.SegmentCount, network.Segments.Count);
-        Assert.Equal(reference.NodeDegree.Count, network.NodeDegree.Count);
-
-        foreach (var (nid, xy) in reference.Nodes)
-        {
-            Assert.True(network.Nodes.TryGetValue(nid, out var c), $"missing node {nid}");
-            Assert.True(Math.Abs(c.X - xy.X) <= Tol && Math.Abs(c.Y - xy.Y) <= Tol,
-                $"node {nid}: C# ({c.X}, {c.Y}) vs Python ({xy.X}, {xy.Y})");
-        }
-        foreach (var (nid, deg) in reference.NodeDegree)
-            Assert.Equal(deg, network.NodeDegree[nid]);
-
-        // Segment index alignment: every dumped route segment index must
-        // connect the consecutive route nodes of its case.
-        foreach (var c in reference.Cases)
-        {
-            for (int i = 0; i < c.SegIdx.Length; i++)
-            {
-                var sg = network.Segments[c.SegIdx[i]];
-                bool fwd = sg.StartNode == c.Nodes[i] && sg.EndNode == c.Nodes[i + 1];
-                bool bwd = sg.StartNode == c.Nodes[i + 1] && sg.EndNode == c.Nodes[i];
-                Assert.True(fwd || bwd,
-                    $"case {c.Name}: seg {c.SegIdx[i]} is " +
-                    $"{sg.StartNode}->{sg.EndNode}, expected {c.Nodes[i]}->{c.Nodes[i + 1]}");
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
-    // corner rounding (Phase 1 function) must reproduce the dumped routes.
-    // ------------------------------------------------------------------
-
-    [Fact]
-    public void RoundedCenterlinesMatchReference()
-    {
-        var reference = LoadReference();
-        var network = TestMaps.BuildBasicTestMap();
-        // Must match the Python harness (BicycleNav's rounding parameters).
-        double radius = 6.0 * Config.PIXELS_PER_METER;   // CORNER_RADIUS_M * PPPM
-        int arcSteps = 48;                             // BicycleNav.CORNER_ARC_STEPS
-
-        foreach (var c in reference.Cases)
-        {
-            var raw = c.Nodes.Select(nid => network.Nodes[nid]).ToList();
-            var rounded = RoadNetworkGeometry.RoundPolylineCorners(raw, radius, arcSteps, true);
-            Assert.True(rounded.Count == c.Rounded.Count,
-                $"{c.Name}: rounded vertex count {rounded.Count} vs {c.Rounded.Count}");
-            for (int i = 0; i < rounded.Count; i++)
-            {
-                Assert.True(Math.Abs(rounded[i].X - c.Rounded[i].X) <= Tol &&
-                            Math.Abs(rounded[i].Y - c.Rounded[i].Y) <= Tol,
-                    $"{c.Name}: rounded[{i}] C# ({rounded[i].X}, {rounded[i].Y}) " +
-                    $"vs Python ({c.Rounded[i].X}, {c.Rounded[i].Y})");
-            }
-        }
-    }
-
+    // (removed 2026-09-11, user decision) RoundedCenterlinesMatchReference
+    // rebuilt the rounded centrelines from the CURRENT map and pinned them to
+    // the frozen dump, so it was the one reference test coupled to the map
+    // LAYOUT - every deliberate map edit (tapers, bent width transitions,
+    // moved tracks) broke it and forced a rebaseline. The corner rounding is
+    // still covered indirectly by the (map-stable) solver reference tests
+    // below + the e2e suite. Same rationale as the deleted Network/Erosion
+    // reference tests.
     // ------------------------------------------------------------------
     // THE GATE: solve outputs vs the Python reference, on IDENTICAL
     // geometry (Python's paved + eroded-safe polygons injected).
@@ -320,29 +270,8 @@ public class RacelineReferenceTests
             $"{c.Name}: production-erosion offset diff {maxDiff:F4} m at {worst}");
     }
 
-    /// <summary>The NTS erosion must be close to the GEOS one in area — a
-    /// global sanity check on the matched buffer parameters.</summary>
-    [Fact]
-    public void ErosionAreaMatchesReference()
-    {
-        var reference = LoadReference();
-        var network = TestMaps.BuildBasicTestMap();
-        _ = Raceline.LegalCorridor(   // triggers erosion build
-            network,
-            new List<(double X, double Y)> { (0, 0), (100, 0) },
-            new List<(double X, double Y)> { (0, 1), (0, 1) },
-            new[]
-            {
-                new Raceline.StationProps(false, 7.0, 0, 0.0),
-                new Raceline.StationProps(false, 7.0, 0, 0.0),
-            });
-
-        double aC = network.RacelineSafe!.Area;
-        double aPy = reference.Safe.Area;
-        Assert.True(Math.Abs(aC - aPy) / aPy < 0.005,
-            $"erosion area C# {aC:F1} vs Python {aPy:F1} px² " +
-            $"({(aC - aPy) / aPy * 100.0:F3}%)");
-    }
+    // (ErosionAreaMatchesReference removed 2026-09-11, user decision - see
+    //  the note above NetworkMatchesReference's former location.)
 
     // ------------------------------------------------------------------
     // intermediate values: resample/normals/curvature, corridor bounds and

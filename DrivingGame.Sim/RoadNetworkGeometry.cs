@@ -135,14 +135,19 @@ public static class RoadNetworkGeometry
     /// must end at the crossing.</summary>
     public static Dictionary<(string Highway, double Width), List<List<(double X, double Y)>>>
         MergeAndRoundLines(RoadNetwork network, bool onlyTwoWay = false,
-            bool skipMultiLane = false, bool stopAtJunctions = false)
+            bool skipMultiLane = false, bool stopAtJunctions = false,
+            HashSet<int>? excludeSegs = null)
     {
         double pppm = Config.PIXELS_PER_METER;
         double cornerRadiusPx = Config.ROAD_CORNER_RADIUS_M * pppm;
 
         var groups = new Dictionary<(string, double), List<RoadSegment>>();
-        foreach (var seg in network.Segments)
+        for (int si = 0; si < network.Segments.Count; si++)
         {
+            var seg = network.Segments[si];
+            // Consumed by a width-varying ribbon/centreline (drawn from the
+            // continuous chain spline instead) - skip the per-width piece.
+            if (excludeSegs != null && excludeSegs.Contains(si)) continue;
             if (onlyTwoWay && seg.Oneway) continue;
             // Multi-lane carriageways draw their OWN centerline (solid) — the
             // plain dashed one would double it.
@@ -191,8 +196,25 @@ public static class RoadNetworkGeometry
     /// one plain list of polylines. One-way segments excluded.</summary>
     public static List<List<(double X, double Y)>> BuildCenterlines(RoadNetwork network)
     {
-        var groups = MergeAndRoundLines(network, onlyTwoWay: true);
-        return groups.Values.SelectMany(lines => lines).ToList();
+        // Width-varying roads: draw ONE dashed centreline from the same chain
+        // spline the paved ribbon uses (so the dashes sit on the paved centre),
+        // and skip the per-width pieces that would otherwise diverge from it.
+        var chains = ComputeWidthVaryingChains(network);
+        var covered = new HashSet<int>();
+        foreach (var wc in chains)
+            foreach (var si in wc.SegIdx) covered.Add(si);
+
+        var groups = MergeAndRoundLines(network, onlyTwoWay: true, excludeSegs: covered);
+        var lines = groups.Values.SelectMany(l => l).ToList();
+
+        foreach (var wc in chains)
+        {
+            if (!wc.TwoWay) continue;
+            var curve = new SmoothGeometry.SmoothCurve(wc.Chain, Config.PIXELS_PER_METER);
+            if (curve.Total <= 1e-6) continue;
+            lines.Add(SmoothGeometry.ResampleCurve(curve, 0.5));
+        }
+        return lines;
     }
 
     /// <summary>(start_trim, end_trim) in pixels: PARK_LANE_END_GAP_M where the
@@ -661,10 +683,31 @@ public static class RoadNetworkGeometry
         double pppm = Config.PIXELS_PER_METER;
         var smNet = SmoothGeometry.For(network);
 
-        // Group lines by (highway, width).
+        // Width-varying roads (a highway chain that changes width along its
+        // length) are built as ONE continuous variable-width ribbon: the
+        // centreline is splined through the width-change nodes (bends rounded)
+        // and offset by a smoothstep-tapered half-width. This is the only clean
+        // way to get BOTH smooth bends AND smooth width transitions - separate
+        // abutting/overlapping ribbons leave a notch or a bulge at an angled
+        // transition. See docs/SPEC.md width-taper note.
+        var (ribbons, covered) = BuildWidthVaryingRibbons(network, pppm);
+
+        // smNet line -> its segment indices, so lines consumed by a ribbon can
+        // be skipped below (the paved area must not be drawn twice).
+        var lineSegs = new Dictionary<SmoothGeometry.SmoothedLine, HashSet<int>>();
+        foreach (var (skey, cref) in smNet.SegmentCurve)
+        {
+            if (cref.Line is null) continue;
+            if (!lineSegs.TryGetValue(cref.Line, out var set)) lineSegs[cref.Line] = set = new();
+            set.Add(skey.SegIdx);
+        }
+
+        // Group the REMAINING (constant-width) lines by (highway, width).
         var groups = new Dictionary<(string, double), List<List<(double X, double Y)>>>();
         foreach (var line in smNet.Lines)
         {
+            if (lineSegs.TryGetValue(line, out var lsegs) && lsegs.Count > 0 && lsegs.All(covered.Contains))
+                continue;   // consumed by a width-varying ribbon
             var key = (line.Highway, line.Width);
             if (!groups.TryGetValue(key, out var l)) groups[key] = l = new List<List<(double X, double Y)>>();
             l.Add(line.Resampled);
@@ -674,12 +717,9 @@ public static class RoadNetworkGeometry
         foreach (var ((highway, width), allCoords) in groups)
         {
             double halfWPx = (width / 2) * pppm;
-
-            // Buffer each line's spline and union them together.
             var bufferedParts = allCoords.Select(coords =>
-                RoadNetwork.ToLineString(coords).Buffer(halfWPx,
-                    new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0))
-            ).ToList();
+                (Geometry)RoadNetwork.ToLineString(coords).Buffer(halfWPx,
+                    new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0))).ToList();
             Geometry buffered = RoadNetwork.UnionAll(bufferedParts);
 
             var color = Config.ROAD_TYPES.TryGetValue(highway, out var rt) ? rt.Color : ((150, 150, 150));
@@ -694,11 +734,194 @@ public static class RoadNetworkGeometry
             result.Add(new RoadPolygonGroup(color, exteriors));
         }
 
+        result.AddRange(ribbons);
+
         // Junction corner roundings (Eckausrundung patches).
         result.AddRange(BuildSmoothedJunctionFillets(network, smNet));
         return result;
     }
 
+    /// <summary>Build ONE continuous variable-width ribbon per highway chain
+    /// that changes width along its length. The chain is splined through the
+    /// width-change nodes (bends rounded), then offset by a half-width that
+    /// follows the per-segment width with a smoothstep taper in the WIDER side
+    /// of each change (length T = WIDTH_TAPER_RATIO*(W-w)). Returns the ribbon
+    /// polygons + the segment indices they consume (so the constant-width
+    /// buffer path can skip them). Constant-width chains are left to that
+    /// path.</summary>
+    /// <summary>A highway chain (segments joined through degree-2 nodes,
+    /// regardless of width) whose width changes along its length. Shared
+    /// source so the paved ribbon AND the dashed centreline use the exact same
+    /// spline.</summary>
+    private sealed record WidthChain(
+        string Highway, List<int> SegIdx, List<(double X, double Y)> Chain,
+        double[] EdgeW, bool TwoWay);
+
+    private static List<WidthChain> ComputeWidthVaryingChains(RoadNetwork network)
+    {
+        var result = new List<WidthChain>();
+        static long K(double v) => (long)Math.Round(v * 16.0);
+        var segByEnds = new Dictionary<(long, long, long, long), int>();
+        for (int i = 0; i < network.Segments.Count; i++)
+        {
+            var s = network.Segments[i];
+            segByEnds[(K(s.X1), K(s.Y1), K(s.X2), K(s.Y2))] = i;
+            segByEnds[(K(s.X2), K(s.Y2), K(s.X1), K(s.Y1))] = i;
+        }
+        var byHw = new Dictionary<string, List<RoadSegment>>();
+        foreach (var s in network.Segments)
+        {
+            if (Math.Hypot(s.X2 - s.X1, s.Y2 - s.Y1) < 1e-6) continue;
+            if (!byHw.TryGetValue(s.Highway, out var l)) byHw[s.Highway] = l = new();
+            l.Add(s);
+        }
+        foreach (var (highway, segs) in byHw)
+        {
+            foreach (var chain in ChainSegments(segs, network))
+            {
+                if (chain.Count < 2) continue;
+                var edgeW = new double[chain.Count - 1];
+                var segIdx = new List<int>(chain.Count - 1);
+                bool ok = true, hasChange = false, twoWay = true;
+                for (int i = 0; i < chain.Count - 1; i++)
+                {
+                    if (!segByEnds.TryGetValue((K(chain[i].X), K(chain[i].Y),
+                            K(chain[i + 1].X), K(chain[i + 1].Y)), out int si)) { ok = false; break; }
+                    segIdx.Add(si);
+                    edgeW[i] = network.Segments[si].Width;
+                    if (network.Segments[si].Oneway) twoWay = false;
+                    if (i > 0 && Math.Abs(edgeW[i] - edgeW[i - 1]) > 1e-6) hasChange = true;
+                }
+                if (!ok || !hasChange) continue;
+                result.Add(new WidthChain(highway, segIdx, chain, edgeW, twoWay));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Paved ribbons for the width-varying chains + the set of segment
+    /// indices they consume (so the constant-width buffer path skips them).</summary>
+    private static (List<RoadPolygonGroup> Ribbons, HashSet<int> Covered)
+        BuildWidthVaryingRibbons(RoadNetwork network, double pppm)
+    {
+        var ribbons = new List<RoadPolygonGroup>();
+        var covered = new HashSet<int>();
+        foreach (var wc in ComputeWidthVaryingChains(network))
+        {
+            var ring = WidthVaryingRibbon(wc.Chain, wc.EdgeW, pppm);
+            if (ring is null) continue;
+            try
+            {
+                Geometry poly = RoadNetwork.ToPolygon(new PolygonRing(ring, new()));
+                if (!poly.IsValid) poly = poly.Buffer(0);
+                if (poly.IsEmpty) continue;
+                var color = Config.ROAD_TYPES.TryGetValue(wc.Highway, out var rt) ? rt.Color : ((150, 150, 150));
+                var rings = new List<PolygonRing>();
+                foreach (Geometry g in poly.Geometries().Length > 0 ? poly.Geometries() : new[] { poly })
+                    if (g is Polygon p && !p.IsEmpty)
+                        rings.Add(new PolygonRing(
+                            p.ExteriorRing.Coordinates.Select(c => (c.X, c.Y)).ToList(),
+                            p.InteriorRings.Select(r => r.Coordinates.Select(c => (c.X, c.Y)).ToList()).ToList()));
+                if (rings.Count == 0) continue;
+                ribbons.Add(new RoadPolygonGroup(color, rings));
+                foreach (var si in wc.SegIdx) covered.Add(si);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[width-ribbon] skip ({wc.Highway}): {ex.Message}");
+            }
+        }
+        return (ribbons, covered);
+    }
+
+    /// <summary>For width-varying chains: the segment indices they consume
+    /// (so per-width dashed centrelines can be skipped) + for the TWO-WAY ones
+    /// a single dashed centreline = the SAME chain spline the paved ribbon
+    /// uses (so the dashes sit on the paved centre), with the chain's max width
+    /// (for the min-width-to-draw-a-centreline test).</summary>
+    public static (HashSet<int> Covered,
+        List<(List<(double X, double Y)> Coords, double MaxWidthM)> TwoWay)
+        WidthVaryingCenterlines(RoadNetwork network)
+    {
+        var covered = new HashSet<int>();
+        var twoWay = new List<(List<(double X, double Y)>, double)>();
+        foreach (var wc in ComputeWidthVaryingChains(network))
+        {
+            foreach (var si in wc.SegIdx) covered.Add(si);
+            if (!wc.TwoWay) continue;
+            var curve = new SmoothGeometry.SmoothCurve(wc.Chain, Config.PIXELS_PER_METER);
+            if (curve.Total <= 1e-6) continue;
+            twoWay.Add((SmoothGeometry.ResampleCurve(curve, 0.5), wc.EdgeW.Max()));
+        }
+        return (covered, twoWay);
+    }
+
+    /// <summary>Offset a splined, resampled chain centreline by a half-width
+    /// that follows the per-edge widths with a smoothstep taper in the wider
+    /// side of each interior width change. Returns the closed ribbon ring.</summary>
+    private static List<(double X, double Y)>? WidthVaryingRibbon(
+        List<(double X, double Y)> chain, double[] edgeW, double pppm)
+    {
+        var curve = new SmoothGeometry.SmoothCurve(chain, pppm);
+        double total = curve.Total;
+        if (total <= 1e-6) return null;
+        var pts = SmoothGeometry.ResampleCurve(curve, 0.5);
+        int n = pts.Count;
+        if (n < 2) return null;
+
+        var nodeS = new double[chain.Count];
+        for (int i = 0; i < chain.Count; i++)
+            nodeS[i] = SmoothGeometry.SmoothedNetwork.NodeS(curve, chain[i]);
+
+        double ratio = Config.WIDTH_TAPER_RATIO;
+        static double Smooth(double u) { u = Math.Clamp(u, 0.0, 1.0); return u * u * (3.0 - 2.0 * u); }
+        double HalfWidthAt(double s)
+        {
+            int e = 0;
+            for (int i = 0; i < edgeW.Length; i++) if (s >= nodeS[i]) e = i;
+            double wM = edgeW[Math.Clamp(e, 0, edgeW.Length - 1)];
+            for (int j = 1; j < chain.Count - 1 && j < edgeW.Length; j++)
+            {
+                double wl = edgeW[j - 1], wr = edgeW[j];
+                if (Math.Abs(wl - wr) < 1e-6) continue;
+                double wide = Math.Max(wl, wr), narrow = Math.Min(wl, wr);
+                double T = ratio * (wide - narrow) * pppm;
+                if (T <= 0) continue;
+                if (wl > wr)
+                {
+                    if (s >= nodeS[j] - T && s <= nodeS[j])
+                        wM = Math.Min(wM, narrow + (wide - narrow) * Smooth((nodeS[j] - s) / T));
+                }
+                else
+                {
+                    if (s >= nodeS[j] && s <= nodeS[j] + T)
+                        wM = Math.Min(wM, narrow + (wide - narrow) * Smooth((s - nodeS[j]) / T));
+                }
+            }
+            return wM / 2.0 * pppm;
+        }
+
+        var left = new List<(double X, double Y)>(n);
+        var right = new List<(double X, double Y)>(n);
+        for (int i = 0; i < n; i++)
+        {
+            double s = total * i / (n - 1);
+            int a = Math.Max(0, i - 1), b = Math.Min(n - 1, i + 1);
+            double tx = pts[b].X - pts[a].X, ty = pts[b].Y - pts[a].Y;
+            double tl = Math.Hypot(tx, ty);
+            if (tl < 1e-9) { tx = 1; ty = 0; tl = 1; }
+            tx /= tl; ty /= tl;
+            double nx = -ty, ny = tx;
+            double h = HalfWidthAt(s);
+            left.Add((pts[i].X + nx * h, pts[i].Y + ny * h));
+            right.Add((pts[i].X - nx * h, pts[i].Y - ny * h));
+        }
+        var ring = new List<(double X, double Y)>(2 * n + 1);
+        ring.AddRange(left);
+        for (int i = n - 1; i >= 0; i--) ring.Add(right[i]);
+        ring.Add(left[0]);
+        return ring;
+    }
     /// <summary>Build the Eckausrundung patches: at every junction corner, the
     /// curvilinear triangle between the corner point and the rounding arc —
     /// the paved fill that lets a car swing from one road into the other

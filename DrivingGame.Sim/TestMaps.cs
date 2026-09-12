@@ -262,7 +262,8 @@ public static class TestMaps
     ///   Tile (0,3): Sliver junction - a very short approach into a 4-way
     ///               with a near-straight, a sharp-right and a sharp-left
     ///               exit (mirrors the real-world 815 -> 1008 layout).
-    ///   Tile (4,0): Widths road (four 50 m sections: 13/9/7/4 m) + WWW zig-zag
+    ///   Tile (4,0): Widths road (four 50 m sections: 13/9/7/4 m)
+    ///   Tile (5,0): WWW zig-zag (own tile since 2026-09-11)
     ///   Tile (4,1): Parking avenue (2 driving + 1 parking lane per side)
     ///   Tile (4,2): One-way INTO a 4-way junction
     ///   Tile (4,3): One-way OUT of a 4-way junction
@@ -291,11 +292,15 @@ public static class TestMaps
         // U-turn scenarios run in the widest section; the narrow sections are
         // for future "too tight -> back up and retry" tests.
         (ox, oy) = Origin(4, 0);
-        b.Node("widths_n", ox + 100, oy + 300);    // north dead end (in 13 m section)
-        b.Node("widths_139", ox + 100, oy + 250);  // 13 -> 9
-        b.Node("widths_97", ox + 100, oy + 200);   // 9 -> 7
-        b.Node("widths_74", ox + 100, oy + 150);   // 7 -> 4
-        b.Node("widths_s", ox + 100, oy + 100);    // south dead end (in 4 m section)
+        // Transitions are ANGLED (not all straight) to test the taper on
+        // bent width changes: widths_139 = 180 deg (straight), widths_97 =
+        // 150 deg (30 deg bend, right), widths_74 = 120 deg (60 deg bend,
+        // back left). Node coords follow 50 m segments at those headings.
+        b.Node("widths_n", ox + 100, oy + 300);      // north dead end (13 m)
+        b.Node("widths_139", ox + 100, oy + 250);    // 13 -> 9  (180 deg)
+        b.Node("widths_97", ox + 100, oy + 200);     // 9 -> 7   (150 deg bend)
+        b.Node("widths_74", ox + 125, oy + 156.7);   // 7 -> 4   (120 deg bend)
+        b.Node("widths_s", ox + 100, oy + 113.4);    // south dead end (4 m)
         b.Road("widths_n", "widths_139", width: 13.0);
         b.Road("widths_139", "widths_97", width: 9.0);
         b.Road("widths_97", "widths_74", width: 7.0);
@@ -533,7 +538,7 @@ public static class TestMaps
         b.Start("fig8_deck", "fig8_n36", facing: "fig8_n37");
         b.Start("fig8_bridge", "fig8_n12", facing: "fig8_n13");
 
-        // --- Tile (4,0): WWW zig-zag (sharp corners -> smoothed by Catmull-Rom)
+        // --- Tile (5,0): WWW zig-zag (sharp corners -> smoothed by Catmull-Rom)
         // A W-shaped zig-zag road: right-down, left-down, right-down.
         // With §10 smoothed geometry the sharp kinks at B/C/D become
         // slightly rounded curves instead of hard 90° corners.
@@ -541,7 +546,10 @@ public static class TestMaps
         // `ox - 250` these landed at x=1750, which is exactly the T-junction
         // tile's stem - the zig-zag was drawn straight through tile (3,0),
         // silently wrecking every tjunction_* scenario.
-        (ox, oy) = Origin(4, 0);
+        // MOVED to its OWN tile (5,0) 2026-09-11 (was crammed into (4,0) with
+        // the Widths road, whose paved area it overlapped by ~178 m² - two
+        // logically separate tracks drawn as one connected blob).
+        (ox, oy) = Origin(5, 0);
         b.Node("www_a", ox + 50, oy + 350);    // start, top-left
         b.Node("www_b", ox + 130, oy + 60);    // V bottom
         b.Node("www_c", ox + 210, oy + 350);   // peak

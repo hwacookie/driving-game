@@ -46,6 +46,20 @@ public static class Config
     /// junctions (user decision 2026-08-31: 4 m). TODO: should depend on road
     /// class / design vehicle.</summary>
     public const double JUNCTION_CORNER_RADIUS_M = 4.0;
+    /// <summary>Width-transition taper: where a wider road meets a narrower
+    /// one at a plain (degree-2) node, the road does NOT step abruptly - it
+    /// tapers. The taper lies ENTIRELY in the wider section (the narrow road
+    /// keeps its width up to the node); its length is proportional to the
+    /// width jump: T = WIDTH_TAPER_RATIO * (W_wide - W_narrow). Value 3 = a
+    /// ~1:3 lateral:longitudinal verge, close to real road-design tapers.</summary>
+    public const double WIDTH_TAPER_RATIO = 3.0;
+    /// <summary>Width-transition overlap: the tapered wide ribbon does not stop
+    /// flush at the transition node - it continues at the NARROW width this far
+    /// past the node, ALONG the narrow neighbour's direction, so it overlaps
+    /// the narrow ribbon. At an ANGLED transition this makes the wide ribbon
+    /// bend through the node (no flat-cap gap) and the union merges cleanly
+    /// (no notch at the bend). Metres.</summary>
+    public const double WIDTH_TAPER_OVERLAP_M = 10.0;
     /// <summary>Shared slack (m) between planned-arc validation and live
     /// off-road checks.</summary>
     public const double ROAD_EDGE_TOLERANCE_M = 0.35;

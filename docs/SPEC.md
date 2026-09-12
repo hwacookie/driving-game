@@ -227,6 +227,60 @@ Minimising `sum(kappa^2)` subject to box bounds gives normal equations
 that are pentadiagonal, so a banded solve handles a 500-station route in
 about 20 ms.
 
+#### Where a car drives — and where it does not (the mental model)
+
+The single most useful model for reasoning about "why did the car drive
+*there* and not *here*" is that route choice and lateral placement are **two
+separate layers**:
+
+1. **WHICH road — the graph.** The route (the ordered sequence of nodes /
+   segments) comes from the **road graph** (topology). The raceline does
+   **no** free-space pathfinding over paved area: it never invents a shortcut
+   across an open surface, and it cannot "discover" a connection the graph
+   does not have. Change the route only by changing the graph or the turn
+   the driver signals.
+2. **HOW the car sits on that road — the paved geometry.** Along the chosen
+   route, the driving line is a lateral offset optimised inside a corridor
+   whose outer bound is the **actual paved polygon** (via the `Fits`/`Reach`
+   probe) and whose inner bound is the centreline margin. This layer is
+   **agnostic to WHY the tarmac is there** — road, junction fillet, or an
+   extra patch: the probe just tests the paved polygon and uses whatever
+   tarmac it finds.
+
+**So which tarmac gets used?** Exactly the tarmac that is
+*connected + adjacent to the route + on the legal side + within the
+corridor's lateral reach*:
+
+- Tarmac that **widens the road / fills a corner** along the route → **used**
+  (the corridor grows into it; the line hugs the edge / cuts the corner a
+  little tighter). This is why a correctly-connected junction fillet lets the
+  car round the corner — and why a *disconnected* fillet (grass gap in
+  between) is, for the driver, as if it were not there at all (the probe
+  stops at the gap).
+- Tarmac that is **disconnected** (a loose patch, or separated by a sliver of
+  grass), on the **oncoming half** of a two-way road, or **beyond the lateral
+  reach** → **ignored**.
+
+**Worked example — a "W"-shaped road, first V's interior fully paved.** Told
+to drive the whole W, the car still follows the graph: down the first arm to
+the valley node and back up the second arm — it does **not** cut straight
+across the paved V (no graph edge does). But at the sharp valley it **rounds
+the apex** using the inside tarmac: with the V filled it drives a smoother,
+wider (faster) racing line through the bottom than it could without it. Two
+limits still hold: on a two-way road the centreline margin forbids using the
+oncoming half (an *one-way* arm could use the whole inside), and only tarmac
+within the corridor's reach along the route counts — not an arbitrarily large
+triangle far from the line.
+
+The takeaway for debugging "why here / not there": if a car will not use a
+surface, ask (a) is it on the planned graph route at all, (b) is it
+*connected* to the route's pavement with no grass gap, and (c) is it on the
+legal (own-lane) side within reach. A "looks paved but never driven" spot is
+almost always a **connectivity** bug (disconnected island) — fix the geometry
+so drawn-tarmac == drivable-tarmac, never paint over the gap (that would
+fabricate road the planner still won't use, or use in a way a human can't
+predict).
+
 #### Junction Centre: the White Dot
 
 The renderer paints a white dot at every node of degree >= 3. Where the
@@ -258,6 +312,60 @@ This is now unified:
   (0.5m), instead of the planner silently allowing more slack than the
   live check honored (which used to cause plans that passed validation
   to immediately register as off-road once actually driven).
+
+#### TODO / idea — two footprints: body box vs. four tire contact points
+
+The on-road check (`IsCarOnRoad` and the raceline corridor's `Fits`/`Reach`)
+tests **four points** of the car against the paved polygon. Today those four
+points are the **body-box corners** (±L/2, ±W/2 of the 4.5 × 1.8 m box) — the
+outermost points of the vehicle. That is structurally already a four-point
+check, i.e. essentially "four tires", but sampled at the wrong place: real
+tires sit **inboard** of the body (from the sprite: front axle ~0.31·L ahead,
+rear axle ~0.29·L behind centre, tires ~0.36·W outboard), so the current
+check is **stricter than reality** — it forbids a bumper corner overhanging
+grass even when all four tires are still on tarmac.
+
+Proposed (small change, not yet implemented — deliberate, needs e2e
+re-verification because it changes the driving line): keep **two** footprints
+with distinct jobs —
+- **Body box** (4 corners): CRASH / collision detection (car-to-car, obstacle
+  contact) — the physical extent that must not interpenetrate.
+- **Four tire contact points** (inboard, real axle/track offsets): the
+  ROAD-CONTACT test (on-road + raceline corridor). Only the tires must stay
+  on pavement; the body may overhang grass, as a careful real driver does.
+Moving the four road-contact points from body corners to tire positions lets
+the line hug edges / cut corners a little tighter (bumpers overhang), and
+reduces how much junction fillet is strictly required. Per-vehicle later
+(trucks have different axle offsets). Until then: body-box corners for both.
+
+#### Width transitions (tapers)
+
+Where a road changes width along its length (a plain degree-2 node between a
+wider and a narrower section), the paved area must **not** step abruptly.
+Earlier that was two flat-capped rectangles merely abutting along a line,
+which the union renders degenerately (a spike to the centreline + the wide
+cap drawn as a white bar across the road). Instead, a width-varying road is
+built as **one continuous variable-width ribbon**
+(`RoadNetworkGeometry.BuildWidthVaryingRibbons`): the centreline is chained
+through the width-change nodes (regardless of width), splined
+(centripetal Catmull-Rom, so bends are smooth), resampled, and offset by a
+half-width that follows each section's width with a **smoothstep** (ease-in-
+out, `3u²−2u³`) taper.
+
+Rules for the taper (all in `Config`):
+- **Lies entirely in the wider section** — the narrow road keeps its width up
+  to the node; the wide road tapers down to meet it.
+- **Length ∝ width jump**: `T = WIDTH_TAPER_RATIO · (W_wide − W_narrow)`
+  (≈ a 1:3 verge).
+- The ribbon follows the **curved** centreline, so an angled transition
+  (a gentle "V") tapers smoothly around the bend with no notch and no bulge.
+
+Consumers stay consistent: the same chain spline feeds the paved polygon,
+the on-road check (via the paved polygon), and the **dashed centreline**
+(`GetMarkingCenterlines` draws the chain spline and skips the per-width
+pieces via `excludeSegs`), so the dashes sit on the paved centre. The
+continuous-ribbon geometry only replaces width-varying chains; constant-width
+roads still use the per-(highway,width) buffer.
 
 #### Turn Feasibility & Missed Turns
 

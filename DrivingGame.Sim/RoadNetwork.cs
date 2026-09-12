@@ -661,8 +661,12 @@ public class RoadNetwork
     public List<List<(double X, double Y)>> GetMarkingCenterlines()
     {
         if (_markingCenterlinesCache is not null) return _markingCenterlinesCache;
+        // Width-varying roads: draw ONE dashed centreline from the same chain
+        // spline the paved ribbon uses, and skip the per-width pieces (which
+        // would diverge from the smoothly-curved ribbon centre).
+        var (covered, chainCls) = RoadNetworkGeometry.WidthVaryingCenterlines(this);
         var groups = RoadNetworkGeometry.MergeAndRoundLines(this, onlyTwoWay: true,
-            skipMultiLane: true, stopAtJunctions: true);
+            skipMultiLane: true, stopAtJunctions: true, excludeSegs: covered);
         var out_ = new List<List<(double X, double Y)>>();
         foreach (var ((_, w), lines) in groups)
         {
@@ -675,6 +679,13 @@ public class RoadNetwork
                 var trimmed = RoadNetworkGeometry.TrimEnds(coords.ToList(), t0, t1);
                 if (trimmed.Count > 0) out_.Add(trimmed);
             }
+        }
+        foreach (var (coords, maxW) in chainCls)
+        {
+            if (maxW < Config.CENTERLINE_MIN_WIDTH_M) continue;
+            var (t0, t1) = RoadNetworkGeometry.JunctionMarkingTrimPx(this, coords);
+            var trimmed = RoadNetworkGeometry.TrimEnds(coords.ToList(), t0, t1);
+            if (trimmed.Count > 0) out_.Add(trimmed);
         }
         return _markingCenterlinesCache = out_;
     }
