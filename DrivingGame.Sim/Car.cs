@@ -149,6 +149,15 @@ public class Car
     /// a pair stays pinned in contact.</summary>
     public bool InContact { get; internal set; }
     public int ContactWith { get; internal set; }
+    /// <summary>Monotonic count of CRASH EPISODES this car has been part of
+    /// (one per contact episode, the same event that logs the "[R2] CRASH"
+    /// decision). InContact is transient - it is only set while the pair is
+    /// pinned, and a 0.1 s poll can miss the whole episode (measured: a
+    /// 50-car run logged contacts at t=6.9/7.8/20.7 s while every poll read
+    /// in_contact=false and the suite called the first crash at 84.8 s).
+    /// This counter never resets, so a test can detect the FIRST crash
+    /// reliably instead of the first crash the polling happens to see.</summary>
+    public int CrashEpisodes { get; internal set; }
 
     // --- Staged (human-like) PRIORITY response --------------------------
     // A priority-road car that detects a predicted crossing conflict does NOT

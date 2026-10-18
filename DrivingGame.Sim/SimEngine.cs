@@ -971,8 +971,15 @@ public sealed class SimEngine
                 // Collision contact: true while this car is pinned against
                 // another by collision resolution (a crash). The multi-car
                 // crossing scenario fails the instant any car reports it.
+                // Transient - a contact episode can clear inside one poll,
+                // which is what crash_episodes below counts.
                 ["in_contact"] = c.InContact,
                 ["contact_with"] = c.InContact ? c.ContactWith : (int?)null,
+                // Monotonic count of crash episodes this car took part in
+                // (R20: the event is already logged as a "[R2] CRASH"
+                // decision; this is the machine-readable form so a test
+                // polling /state cannot miss the FIRST contact).
+                ["crash_episodes"] = c.CrashEpisodes,
                 // The exact box used for crash detection (per-class body
                 // footprint, LengthM x WidthM centred on the body centre):
                 // four [x, y] METRE corners front-right, front-left,
@@ -1054,6 +1061,7 @@ public sealed class SimEngine
                 ["on_road"] = car.IsOnRoad(Network),
                 ["in_contact"] = car.InContact,
                 ["contact_with"] = car.InContact ? car.ContactWith : (int?)null,
+                ["crash_episodes"] = car.CrashEpisodes,
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(car)
                     .Select(p => new[] { p.X, p.Y }).ToList(),
                 // Dashboard lamps for the cockpit controller.

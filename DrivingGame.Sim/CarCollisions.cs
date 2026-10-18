@@ -26,7 +26,7 @@ namespace DrivingGame.Sim;
 public static class CarCollisions
 {
     // Broadphase grid cell size (m). The per-car look-ahead ring is
-    // ceil(LookAheadMaxM / CellSizeM) + 1 = 14 cells wide, the pair
+    // ceil(LookAheadMaxM / CellSizeM) + 1 = 21 cells wide, the pair
     // check ring ceil(PairCheckRadiusM / CellSizeM) + 1 = 9. 20 m keeps
     // both counts small enough that dense traffic stays cheap, while
     // staying coarse enough that a cell holds few cars.
@@ -49,8 +49,9 @@ public static class CarCollisions
     const double LookAheadMinM = 40.0;
     const double ReactionTimeS = 1.0;
     // Broadphase ring radius: must cover the LARGEST per-car look-ahead
-    // (stopping distance at top speed + reaction + gap ≈ 214 m).
-    const double LookAheadMaxM = 250.0;
+    // (comfort stopping distance at top speed + reaction + gap: 55.6 +
+    // 55.6²/10 + 3 ≈ 368 m at the 5 m/s² demand, was 214 m at the 1 g one).
+    const double LookAheadMaxM = 400.0;
 
     // Comfortable standstill gap: the stopping-distance curve is measured
     // from this gap, so a following car rests ~3 m short of the lead car.
@@ -64,6 +65,19 @@ public static class CarCollisions
     // - rear-ended at 20 km/h. Stopping StopMarginM further out keeps a
     // physical clearance in the fatal band.
     const double StopMarginM = 3.0;
+    // R7 + R11: the decel a driver DEMANDS for a following distance - the
+    // brake used routinely, not the emergency limit. CAR_BRAKING (10 m/s²
+    // ≈ 1 g) is the ABS panic-stop limit: real, but the physical maximum
+    // the car can still EXECUTE, and holding it every tick is what made
+    // every rear-end on the 50-car runs look "unavoidable on paper".
+    // 5 m/s² ≈ 0.5 g is the service brake a driver actually holds in
+    // traffic (docs/Human Factor Model.md §4 reaction + comfort).
+    const double ComfortBrakingMps2 = 5.0;
+    // NOTE: with ApproachCapMps in play the v1 corridor no longer adds
+    // StopMarginM on top - the reaction interval IS the slack the old
+    // synthetic margin patched for (both exist to fight the same zero-slack
+    // boundary), and stacking them parks the follower 6.2 m behind a
+    // stationary lead instead of at the ~3 m standstill gap.
     // A target slower than this is EFFECTIVELY STATIONARY for stop-cap
     // purposes (T_030: car 13 crept at ~0.3 m/s behind standing car 15;
     // the v1 margin branch (vl < 0.1) never fired, car 11 got the
@@ -118,6 +132,27 @@ public static class CarCollisions
     // three times within 0.5 s, braked ~1 s after first alert - too late
     // at 65 km/h).
     const double AlertClearHoldS = 0.3;
+
+    /// <summary>R7 + R11: the fastest approach speed that still gets the
+    /// car to REST inside `roomM` of the obstacle, allowing a reaction
+    /// interval first and braking at the rate a driver actually uses.
+    /// v·t_react + v²/(2·a_comfort) <= roomM (+ the leader's own motion
+    /// allowance vl²/(2·a_comfort)). The old curve used CAR_BRAKING (~1 g,
+    /// the ABS panic-stop limit) with ZERO reaction: it is the exact
+    /// recoverable boundary, so a follower could sit ON it and cross it
+    /// while still accelerating - then no legal braking saves it, which is
+    /// what made every rear-end on the 50-car runs "unavoidable on paper"
+    /// while a human driver would simply not close at 1 g (measured: car
+    /// 30 holding 1.02 g from 5.80 s, contact at 45.6 km/h). CAR_BRAKING
+    /// stays the physical maximum the car can still EXECUTE (the decel the
+    /// sim applies); it is no longer what the driver model demands.</summary>
+    static double ApproachCapMps(double vl, double roomM)
+    {
+        double a = ComfortBrakingMps2, tr = ReactionTimeS;
+        double rhs = roomM + vl * vl / (2.0 * a);
+        if (rhs <= 0.0) return 0.0;
+        return Math.Max(0.0, Math.Sqrt(a * a * tr * tr + 2.0 * a * rhs) - a * tr);
+    }
 
     sealed class Grid
     {
@@ -315,6 +350,27 @@ public static class CarCollisions
                              Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
             return Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) > stopGapM;
         }
+        // R3's other half: has this car already ENTERED the crossing it is
+        // heading for (nose past its stop line)? R3 says a car once in the
+        // crossing keeps going - "a car already blocking the box must keep
+        // going, else it deadlocks the cars it blocks". Without this test the
+        // "complete the crossing" floor below only applied to the last car
+        // length of the traversal, so a committed yield car was still free to
+        // stop in the MIDDLE of it (fig8_xing: car 32 committed at t=0.467,
+        // GradedCap's stageS<1 s cliff capped it to 0 at t~0.9, it parked
+        // 5.13 m past C for 1.5 s blocking the whole priority lane, and car
+        // 8 hit it at 31 km/h).
+        bool EnteredCrossing(Car y)
+        {
+            if (net is null) return false;
+            var yseg = net.Segments[y.SegIdx];
+            string yAhead = y.Forward ? yseg.EndNode : yseg.StartNode;
+            if (y.CrossingCommittedNode == yAhead) return true;
+            if (net.NodeDegree.GetValueOrDefault(yAhead, 0) < 4) return false;
+            if (!net.Nodes.TryGetValue(yAhead, out var yxy)) return false;
+            double yStopM = y.LengthM * 0.5 + Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
+            return Math.Hypot(y.X - yxy.X, y.Y - yxy.Y) <= yStopM;
+        }
         // Most-immediate crossing conflict per PRIORITY car this tick (uid ->
         // the car it is watching, the TTC, and its own distance to the meet
         // point). Filled by the v2 pair loop, consumed after it.
@@ -323,6 +379,45 @@ public static class CarCollisions
         // commit check (R3b) needs "is there a stationary body in my path"
         // regardless of right-of-way.
         var immediateConflict = new Dictionary<int, (int Other, double Ttc, bool OtherStationary)>();
+
+        // --- route-true forward corridor (the curved-arm fix) -------------
+        // v1's corridor was a straight RAY along the heading, which is blind
+        // around the figure-8's arms (~15 deg per 25 m segment): measured on
+        // fig8_xing, car 30 behind car 28 ON THE SAME LANE (0.44 m apart
+        // laterally at the crash pose) read lat = -3.6 m at a 40 m ray
+        // distance - outside the 1.8 m band, so NO cap ever fired and the
+        // follower drove around the bend at 96 km/h into a stopped car
+        // (first contact t=6.9 s). A driver looks along the road, not along
+        // a tangent: sample each car's own route ahead ONCE per substep
+        // (same pattern as the v2 sweeps below) and measure the leader
+        // against THAT line. Cars without a route line (no nav / no
+        // destination) keep the old ray test.
+        const double RouteSampleStepM = 2.0;
+        var routeAhead = new Dictionary<int, (double S, double X, double Y)[]>();
+        var routeS = new Dictionary<int, double>();
+        if (net is not null)
+            foreach (var c in carList)
+            {
+                var navC = c.BicycleNav;
+                var refC = navC?.Ref;
+                if (refC is null || refC.Total < 1.0) continue;
+                double s0 = navC.S;
+                if (s0 < 0.0 || s0 > refC.Total) continue;
+                double rangeM = LookAheadForSpeed(c.Speed);
+                var pts = new List<(double, double, double)>();
+                for (double s = s0;
+                     s <= Math.Min(refC.Total, s0 + rangeM + RouteSampleStepM);
+                     s += RouteSampleStepM)
+                {
+                    var (px, py) = refC.PointAt(s);
+                    pts.Add((s, px, py));
+                }
+                if (pts.Count >= 2)
+                {
+                    routeAhead[c.Uid] = pts.ToArray();
+                    routeS[c.Uid] = s0;
+                }
+            }
 
         foreach (var c in carList)
         {
@@ -348,9 +443,19 @@ public static class CarCollisions
                 // once the alert clears, v1 resumes in full.
                 if (c.AlertOtherUid == o.Uid) continue;
                 double dxc = o.X - c.X, dyc = o.Y - c.Y;
-                double along = dxc * fx + dyc * fy;          // ahead?
+                double rayAlong = dxc * fx + dyc * fy;      // ahead at all?
+                if (rayAlong < 0.0) continue;               // beside/behind me
+                // Distance AHEAD and the lateral offset: along my ROUTE when
+                // I have one (the road curves), along my heading ray when not.
+                double along, lat;
+                if (routeAhead.TryGetValue(c.Uid, out var line))
+                    (along, lat) = RouteAheadOffsets(line, routeS[c.Uid], o.X, o.Y);
+                else
+                {
+                    along = rayAlong;
+                    lat = dxc * Math.Cos(rad) + dyc * -Math.Sin(rad);
+                }
                 if (along < 0 || along > lookAheadM) continue;
-                double lat = dxc * rx + dyc * ry;
                 if (Math.Abs(lat) > CorridorHalfWidthM)
                 {
                     if (o.Speed < 6.0 && c.Speed >= 10.0 &&            // TEMPORARY
@@ -399,14 +504,22 @@ public static class CarCollisions
                 // behind a braking leader and no legal braking could save it,
                 // seeding the rear-end cascade that gridlocked the fleet.
                 double vl = Math.Max(vAhead, 0.0);
-                // Effectively-stationary leader: add StopMarginM (see the
-                // constants - the plain formula is the zero-margin
-                // recoverable boundary; a creeping leader < 2 m/s is a wall).
-                double gapEff = gapM - StandstillGapM -
-                                (vl < StationaryCapMps ? StopMarginM : 0.0);
-                double cap = Math.Sqrt(vl * vl +
-                             2.0 * Config.CAR_BRAKING *
-                             Math.Max(gapEff, 0.0));
+                // R7 + R11 (see ApproachCapMps): demand the stop behind the
+                // leader's FINAL rest position, after a reaction interval,
+                // braking at the comfort rate - not the 1 g panic limit from
+                // the leader's CURRENT position. A leader that is BRAKING is
+                // already becoming that wall (its brake lights are on), so
+                // from the moment it brakes its remaining stop distance
+                // vl²/(2·CAR_BRAKING) counts as room and its speed as 0.
+                // Measured, fig8_xing: car 30 at 96 km/h behind car 28
+                // braking from 57 km/h, 29.4 m of bumper gap when the old
+                // curve first bound - max braking from there needs 35 m,
+                // contact at 45.6 km/h into the rested body.
+                bool leadStopping = o.IsBraking && vl < c.Speed;
+                double roomM = gapM - StandstillGapM;
+                if (leadStopping)
+                    roomM += vl * vl / (2.0 * Config.CAR_BRAKING);
+                double cap = ApproachCapMps(leadStopping ? 0.0 : vl, roomM);
                 if (cap < best) { best = cap; _v1By = o.Uid;
                     _v1Along = along; _v1Lat = lat;
                     _v1Gap = gapM; }   // TEMPORARY
@@ -615,7 +728,8 @@ public static class CarCollisions
                 var yieldCar = yieldUid == c.Uid ? c : o;
                 double yieldHalfL = yieldCar.LengthM * 0.5;
                 if (rearUid is null && !fbs &&
-                    dMeet <= yieldHalfL && targetCar.Speed >= StationaryCapMps)
+                    targetCar.Speed >= StationaryCapMps &&
+                    (dMeet <= yieldHalfL || EnteredCrossing(yieldCar)))
                 {
                     // Nose at/past the meet point - INSIDE the crossing:
                     // complete it (once committed, keep going - user rule).
@@ -1179,9 +1293,52 @@ public static class CarCollisions
     /// reaction distance (v·t_react) + full braking distance (v²/2a) +
     /// standstill gap, floored at LookAheadMinM. See the constant block for
     /// why the range must be at least the car's own stopping distance.</summary>
+    /// <summary>(arc distance ahead of me, perpendicular offset from my
+    /// route line) for a point. Nearest sampled route point, refined
+    /// against the two polyline pieces around it. The offset is UNSIGNED -
+    /// the corridor only asks for the band, and the ray test above already
+    /// decided ahead/behind.</summary>
+    static (double Along, double Lat) RouteAheadOffsets(
+        (double S, double X, double Y)[] line, double sMe, double x, double y)
+    {
+        int best = 0;
+        double bestD2 = double.PositiveInfinity;
+        for (int i = 0; i < line.Length; i++)
+        {
+            double ddx = line[i].X - x, ddy = line[i].Y - y;
+            double d2 = ddx * ddx + ddy * ddy;
+            if (d2 < bestD2) { bestD2 = d2; best = i; }
+        }
+        double bestLat = Math.Sqrt(bestD2);
+        double bestS = line[best].S;
+        for (int i = Math.Max(0, best - 1); i < Math.Min(line.Length - 1, best + 1); i++)
+        {
+            double ax = line[i].X, ay = line[i].Y;
+            double dx = line[i + 1].X - ax, dy = line[i + 1].Y - ay;
+            double len2 = dx * dx + dy * dy;
+            if (len2 <= 1e-9) continue;
+            double t = Math.Clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0.0, 1.0);
+            double qx = ax + t * dx, qy = ay + t * dy;
+            double d = Math.Hypot(x - qx, y - qy);
+            if (d < bestLat)
+            {
+                bestLat = d;
+                bestS = line[i].S + t * (line[i + 1].S - line[i].S);
+            }
+        }
+        return (bestS - sMe, bestLat);
+    }
+
     static double LookAheadForSpeed(double v)
     {
-        double brakingDist = v * v / (2.0 * Config.CAR_BRAKING);
+        // R7: the look-ahead must cover the DISTANCE THE DRIVER MODEL DEMANDS
+        // (ApproachCapMps), not the panic-stop distance. With CAR_BRAKING
+        // (~1 g) a 76 km/h car saw ahead only 46 m out, so the pair entered
+        // the corridor at a 17.6 m gap - by then the follower was at 96 km/h
+        // and no legal braking could save it (measured, fig8_xing car 30 vs
+        // car 28: the required comfort cap was 47-80 km/h from a 45 m gap,
+        // invisible to the old range).
+        double brakingDist = v * v / (2.0 * ComfortBrakingMps2);
         return Math.Max(LookAheadMinM, v * ReactionTimeS + brakingDist + StandstillGapM);
     }
 
@@ -1331,6 +1488,7 @@ public static class CarCollisions
                 int other = partner.GetValueOrDefault(c.Uid, -1);
                 if (!c.InContact)
                 {
+                    c.CrashEpisodes++;   // monotonic: the transient flag below
                     double myKmh = impactSpeed is not null &&
                                    impactSpeed.TryGetValue(c.Uid, out var s)
                                    ? s * 3.6 : c.Speed * 3.6;

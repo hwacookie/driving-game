@@ -1343,6 +1343,10 @@ class TurnTester:
         crash_info = None
         last_report = -1e9
         wall_deadline = time.time() + self.CROSSING_MAX_SIM_SECONDS * 20.0
+        # Crash episodes are counted per car (monotonic, GET /state
+        # 'crash_episodes'); baseline right before the run so a car that
+        # somehow arrives already crashed does not read as a new contact.
+        crash_base: dict[int, int] = {}
         while True:
             if abort_check is not None and abort_check():
                 aborted = True
@@ -1356,11 +1360,22 @@ class TurnTester:
             cars = st.get('cars', [])
             sim_t = st.get('time')
             _trace_line(sim_t, cars)
+            for c in cars:
+                crash_base.setdefault(c['car_uid'], c.get('crash_episodes', 0))
             if t0_sim is None and isinstance(sim_t, (int, float)):
                 t0_sim = sim_t
             elapsed = (sim_t - t0_sim) if t0_sim is not None else 0.0
 
-            hit = next((c for c in cars if c.get('in_contact')), None)
+            # The FIRST crash is the first NEW contact episode, not the first
+            # poll that happens to see the transient in_contact flag: a pinned
+            # pair clears inside one 0.1 s poll, and the flag was already
+            # false when the next poll ran (measured: a run whose own crash
+            # dumps recorded contacts at t=6.9/7.8/20.7 s while every poll
+            # read in_contact=false and the suite called the first crash at
+            # 84.8 s). in_contact stays as a fallback for older hosts.
+            hit = next((c for c in cars
+                        if c.get('crash_episodes', 0) > crash_base.get(c['car_uid'], 0)),
+                       None) or next((c for c in cars if c.get('in_contact')), None)
             if hit is not None:
                 crash_info = (f"crash at t={elapsed:.1f}s: car "
                               f"{hit['car_uid']} contacted car "
