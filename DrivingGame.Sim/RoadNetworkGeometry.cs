@@ -600,28 +600,36 @@ public static class RoadNetworkGeometry
         }
 
         var zones = new List<(double From, double To)>();
-        // The arc position along the line where the distance to the node
-        // ALONG an arm direction first falls below `gap` - the mouth line
-        // of that arm, where its halt line is drawn. Walking `step` (+1 =
-        // along the line, -1 = back along it) from vertex `idx`.
-        double ArcAtMouth(int idx, int step, double dirx, double diry, double gap,
+        // The place nearest vertex `idx` where the line crosses the mouth
+        // LINE of the arm pointing (dirx,diry) - the line perpendicular to
+        // that arm at distance `gap` from the node, where that arm's halt
+        // line is drawn. Every crossing of that line is a sign change of
+        // the projection; the one nearest the pass is the mouth that bounds
+        // this paint.
+        double MouthCross(int idx, double dirx, double diry, double gap,
                           double nx, double ny)
         {
-            for (int t = idx; ; t += step)
+            double best = -1.0, bestDist = double.MaxValue;
+            double prev = (coords[0].X - nx) * dirx + (coords[0].Y - ny) * diry;
+            double accLen = 0.0;
+            for (int i = 0; i + 1 < coords.Count; i++)
             {
-                int u = t + step;
-                if (u < 0 || u >= coords.Count) return acc[Math.Min(t, coords.Count - 1)];
-                double p0 = (coords[t].X - nx) * dirx + (coords[t].Y - ny) * diry;
-                double p1 = (coords[u].X - nx) * dirx + (coords[u].Y - ny) * diry;
-                if (p0 < gap) return acc[Math.Min(t, coords.Count - 1)];
-                if (p1 < gap && p0 != p1)
+                var (ax, ay) = coords[i];
+                var (bx, by) = coords[i + 1];
+                double segLen = Math.Hypot(bx - ax, by - ay);
+                double cur = (bx - nx) * dirx + (by - ny) * diry;
+                if ((prev - gap) * (cur - gap) < 0.0 && cur != prev)
                 {
-                    double f = (p0 - gap) / (p0 - p1);
-                    return acc[Math.Min(t, coords.Count - 1)]
-                           + f * (acc[Math.Min(u, coords.Count - 1)]
-                                  - acc[Math.Min(t, coords.Count - 1)]);
+                    double f = (gap - prev) / (cur - prev);
+                    double at = accLen + f * segLen;
+                    double px = ax + f * (bx - ax), py = ay + f * (by - ay);
+                    double dd = Math.Hypot(px - coords[idx].X, py - coords[idx].Y);
+                    if (dd < bestDist) { bestDist = dd; best = at; }
                 }
+                prev = cur;
+                accLen += segLen;
             }
+            return best >= 0.0 ? best : acc[Math.Min(idx, coords.Count - 1)];
         }
 
         // The line's own extent: a junction node outside it cannot cut it,
@@ -662,32 +670,69 @@ public static class RoadNetworkGeometry
                 {
                     if (runStart >= 0)
                     {
-                        // The arm the line drives IN on: its direction of
-                        // travel at the start of the run, reversed.
-                        double ix = 1.0, iy = 0.0;
+                        int runEnd = i - 1;
+                        // Direction of travel at both ends of the pass -
+                        // measured against the PREVIOUS vertex when an end
+                        // is the line's own end and has no next one.
+                        double tx0, ty0;
                         if (runStart + 1 < coords.Count)
                         {
                             var (ux, uy) = Unit(coords[runStart + 1].X - coords[runStart].X,
                                                 coords[runStart + 1].Y - coords[runStart].Y);
-                            ix = ux; iy = uy;
+                            tx0 = ux; ty0 = uy;
                         }
-                        // The arm it drives OUT on: nothing when the run
-                        // reaches the line's own end (a dead-end approach).
-                        double ox = 1.0, oy = 0.0;
-                        if (i < coords.Count)
+                        else
                         {
-                            var (ux, uy) = Unit(coords[i].X - coords[i - 1].X,
-                                                coords[i].Y - coords[i - 1].Y);
-                            ox = ux; oy = uy;
+                            var (ux, uy) = Unit(coords[runStart].X - coords[runStart - 1].X,
+                                                coords[runStart].Y - coords[runStart - 1].Y);
+                            tx0 = ux; ty0 = uy;
                         }
-                        double gapIn = MouthAt(nid, -ix, -iy);
-                        double gapOut = MouthAt(nid, ox, oy);
-                        // The cut sits where the line crosses its own arm's
-                        // mouth line - the same place its halt line is drawn
-                        // - not a full mouth distance outside the run of
-                        // vertices inside the crossing box.
-                        zones.Add((ArcAtMouth(runStart, 1, -ix, -iy, gapIn, nxy.X, nxy.Y),
-                                   ArcAtMouth(i - 1, -1, ox, oy, gapOut, nxy.X, nxy.Y)));
+                        double tx1, ty1;
+                        if (runEnd + 1 < coords.Count)
+                        {
+                            var (ux, uy) = Unit(coords[runEnd + 1].X - coords[runEnd].X,
+                                                coords[runEnd + 1].Y - coords[runEnd].Y);
+                            tx1 = ux; ty1 = uy;
+                        }
+                        else
+                        {
+                            var (ux, uy) = Unit(coords[runEnd].X - coords[runEnd - 1].X,
+                                                coords[runEnd].Y - coords[runEnd - 1].Y);
+                            tx1 = ux; ty1 = uy;
+                        }
+                        // Where the paint stops at each end of the pass:
+                        // always at the mouth line of the ARM THE LINE
+                        // LIES ON there - the same place that arm's halt
+                        // line is drawn, signed or not.
+                        double entryCut, exitCut;
+                        if (runStart > 0)
+                        {
+                            // The line comes in over this arm: its paint
+                            // stops at that arm's mouth.
+                            double gapIn = MouthAt(nid, -tx0, -ty0);
+                            entryCut = MouthCross(runStart, -tx0, -ty0, gapIn,
+                                                 nxy.X, nxy.Y);
+                        }
+                        else entryCut = acc[0];   // the line starts inside
+                        if (runEnd + 1 < coords.Count)
+                        {
+                            // The line leaves over another arm: its paint
+                            // stops at that arm's mouth.
+                            double gapOut = MouthAt(nid, tx1, ty1);
+                            exitCut = MouthCross(runEnd, tx1, ty1, gapOut,
+                                                nxy.X, nxy.Y);
+                        }
+                        else
+                        {
+                            // The line ENDS in the crossing (its chain was
+                            // already cut at the junction): nothing beyond
+                            // the end is painted, so the zone runs to the
+                            // end of the line and the mouth of the arm it
+                            // lies on - taken at the start of the pass -
+                            // bounds it.
+                            exitCut = acc[coords.Count - 1];
+                        }
+                        zones.Add((entryCut, exitCut));
                         runStart = -1;
                     }
                     continue;

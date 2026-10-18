@@ -774,6 +774,13 @@ public class RoadNetwork
             double d = Math.Max(d0, d1);
             if (d <= 0.0) continue;      // no mouth ahead of the node
 
+            // The band is drawn CENTRED on the point below, so left as it
+            // is its near half would hang into the crossing beyond the
+            // mouth - and the centreline ends AT the mouth line. Push the
+            // band out by half its own width: its near edge then IS the
+            // mouth, so the centreline ends exactly where the white begins.
+            d += Config.STOP_LINE_WIDTH_M / 2.0 * pppm;
+
             // The lane: centreline to right kerb, keeping the kerb clear.
             double halfW = seg.Width / 2.0 * pppm;
             double span = halfW - Config.STOP_LINE_EDGE_GAP_M * pppm;

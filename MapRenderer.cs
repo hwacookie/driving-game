@@ -44,6 +44,7 @@ public partial class MapRenderer : Node2D
         public bool Breitstrich;    // lane-boundary paint drawn twice as wide
         public bool Solid;
         public bool Elevated;       // drawn above bridge decks (z 21)
+        public bool FarCull;        // hidden below MarkingMinZoom (see _farMarkings)
     }
 
     private HttpRequest _http;
@@ -85,6 +86,9 @@ public partial class MapRenderer : Node2D
     // (centre, radius). The sim decides where they are (RoadNetwork.
     // GetCrossingMarkers); this only paints them.
     private readonly List<(Vector2 C, float R)> _crossingDots = new();
+    // The meshes holding zoom-culled paint (centre + halt lines): kept so
+    // _Process can switch them off together below MarkingMinZoom.
+    private readonly List<MeshInstance2D> _farMarkings = new();
 
     // Dash patterns from the sim (set in BuildMap; RebuildMarkings needs them).
     private float _cDash = 3f, _cGap = 3f, _lDash = 2f, _lGap = 4f,
@@ -383,6 +387,18 @@ public partial class MapRenderer : Node2D
         else
             GD.Print("Source: HTTP (external server on :5001)");
 
+        // The window title carries the REST port: two windows of this
+        // project differ ONLY by the server they talk to - the e2e host and
+        // a scratch run look identical otherwise, which made "which map is
+        // this?" unanswerable from the screen.
+        var port = embedded ? _embeddedPort : PortOfUrl(MapUrl);
+        if (port > 0)
+        {
+            var title = GetTree().Root.Title;
+            if (title.Length == 0) title = "DrivingGame";
+            GetTree().Root.Title = $"{title} :{port}";
+        }
+
         _http = GetNode<HttpRequest>("Http");
         // use_threads: without it, Godot's HTTPRequest does ONE socket read
         // per rendered frame (godotengine/godot#120425) - every request then
@@ -586,10 +602,12 @@ public partial class MapRenderer : Node2D
                 var pts = Pts(line.GetProperty("pts"));
                 if (line.GetProperty("style").GetString() == "solid")
                     _markings.Add(new MarkingLine { Pts = pts, Solid = true,
-                                                     Color = white, WidthM = 0.15f });
+                                                     Color = white, WidthM = 0.15f,
+                                                     FarCull = true });
                 else
                     _markings.Add(new MarkingLine { Pts = pts, DashM = _cDash, GapM = _cGap,
-                                                     Color = white, WidthM = 0.15f });
+                                                     Color = white, WidthM = 0.15f,
+                                                     FarCull = true });
             }
 
         // Elevated centrelines: the ground-level ones under a bridge deck
@@ -645,7 +663,7 @@ public partial class MapRenderer : Node2D
                 var b = new Vector2(l[2].GetSingle(), -l[3].GetSingle());
                 _markings.Add(new MarkingLine { Pts = new List<Vector2> { a, b },
                                                  Solid = true, Color = white,
-                                                 WidthM = stopW });
+                                                 WidthM = stopW, FarCull = true });
             }
 
         // --- The crossing's own middle marker: a small white disc at its
@@ -863,20 +881,26 @@ public partial class MapRenderer : Node2D
     /// centreline is 0.15 m of white, a Breitstrich twice that) at full
     /// opacity, so the meshes are world-space and built ONCE per map -
     /// nothing depends on the zoom, so nothing is rebuilt when the camera
-    /// moves. Sub-pixel edges belong to the anti-aliasing pass (MSAA 4x in
-    /// project settings), not to a fade.</summary>
+    /// moves. The only zoom response is switching whole batches off (the
+    /// far-cull ones: centre and halt lines). Sub-pixel edges belong to
+    /// the anti-aliasing pass (MSAA 4x in project settings), not to a
+    /// fade.</summary>
     private void RebuildMarkings()
     {
         foreach (var child in _markLayer.GetChildren())
             child.QueueFree();
+        _farMarkings.Clear();
 
-        var verts = new Dictionary<(float w, Color c, bool elev), List<Vector3>>();
+        var verts = new Dictionary<(float w, Color c, bool elev, bool cull), List<Vector3>>();
+        // The class the CURRENT line belongs to; Quad reads it, so lines
+        // that switch off when zooming out get their own mesh.
+        bool cull = false;
         void Quad(Color c, float w, Vector2 a, Vector2 b, bool elev)
         {
-            if (!verts.TryGetValue((w, c, elev), out var list))
+            if (!verts.TryGetValue((w, c, elev, cull), out var list))
             {
                 list = new List<Vector3>();
-                verts[(w, c, elev)] = list;
+                verts[(w, c, elev, cull)] = list;
             }
             Vector2 d = b - a;
             float len = d.Length();
@@ -892,6 +916,7 @@ public partial class MapRenderer : Node2D
 
         foreach (var line in _markings)
         {
+            cull = line.FarCull;
             if (line.Solid)
             {
                 // Lane boundaries get the Breitstrich (double width); a
@@ -910,14 +935,15 @@ public partial class MapRenderer : Node2D
         }
 
         // A disc is a triangle fan - batched with the rest of the paint.
+        cull = false;
         const int segs = 16;
         var white = new Color(1f, 1f, 1f);
         foreach (var (c, r) in _crossingDots)
         {
-            if (!verts.TryGetValue((2f * r, white, false), out var list))
+            if (!verts.TryGetValue((2f * r, white, false, false), out var list))
             {
                 list = new List<Vector3>();
-                verts[(2f * r, white, false)] = list;
+                verts[(2f * r, white, false, false)] = list;
             }
             for (int i = 0; i < segs; i++)
             {
@@ -940,10 +966,23 @@ public partial class MapRenderer : Node2D
             var mi = new MeshInstance2D { Mesh = mesh,
                                           ZIndex = kv.Key.elev ? 21 : 2 };
             _markLayer.AddChild(mi);
+            if (kv.Key.cull) _farMarkings.Add(mi);
         }
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /// <summary>The port a REST URL names ("http://127.0.0.1:5001/map" ->
+    /// 5001); 0 when it does not name one.</summary>
+    private static int PortOfUrl(string url)
+    {
+        var at = url.LastIndexOf(':');
+        if (at < 0) return 0;
+        var n = 0;
+        for (int i = at + 1; i < url.Length && url[i] >= '0' && url[i] <= '9'; i++)
+            n = n * 10 + (url[i] - '0');
+        return n;
+    }
 
     static Color FromRgb(JsonElement el) => new(
         el[0].GetSingle() / 255f, el[1].GetSingle() / 255f, el[2].GetSingle() / 255f);
@@ -1070,6 +1109,11 @@ public partial class MapRenderer : Node2D
     // Edge lines are hidden entirely below this zoom (6 px/m) instead of
     // turning into sub-pixel noise (user decision).
     const float EdgeLineMinZoom = 6.0f;
+    /// <summary>Centre and halt lines stay longer than the kerb lines: the
+    /// user asked for them to survive further out, so they switch off at a
+    /// LOWER zoom than the road's outer lines (6 px/m) - only when the road
+    /// itself is already tiny. Below this they would be sub-pixel noise.</summary>
+    const float MarkingMinZoom = 2.0f;
     const float ZoomStep = 1.15f;   // wheel/pinch step per notch
 
     bool _dragging;
@@ -1243,6 +1287,12 @@ public partial class MapRenderer : Node2D
             l.Visible = edgeVisible;
         foreach (var l in _bridgeEdges)
             l.Visible = edgeVisible;
+        // Centre and halt lines keep going where the kerb lines have gone:
+        // they switch off only below MarkingMinZoom, further out than the
+        // road's outer lines (user decision).
+        bool paintVisible = s >= MarkingMinZoom;
+        foreach (var m in _farMarkings)
+            m.Visible = paintVisible;
 
         // Minimap only changes when the camera moves.
         if (_minimap != null &&
