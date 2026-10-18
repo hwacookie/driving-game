@@ -20,7 +20,8 @@ public partial class MapRenderer : Node2D
     const string MapUrl = "http://127.0.0.1:5001/map";
     const string StateUrl = "http://127.0.0.1:5001/state";
     const string RunTestUrl = "http://127.0.0.1:5001/run_test";
-    const float Ppm = 2f;   // config.PIXELS_PER_METER (/state is in world pixels)
+    // /state carries METRES (same unit as /map and as this node's own
+    // world coordinates), so there is no pixels-per-meter factor here.
 
     // Phase 7: communication method, selected at startup (user args after
     // "--"). "http" (default) = the existing double pipeline to an external
@@ -1398,7 +1399,7 @@ public partial class MapRenderer : Node2D
             }
 
             var seen = new HashSet<long>();
-            void Add(long uid, float xPx, float yPx, float hdg,
+            void Add(long uid, float xM, float yM, float hdg,
                      float kmh, int level)
             {
                 seen.Add(uid);
@@ -1412,12 +1413,12 @@ public partial class MapRenderer : Node2D
                 if (buf.Count > 0 && buf[^1].Time >= t) return;
                 buf.Add(new CarSample
                 {
-                    Time = t, X = xPx / Ppm, Y = yPx / Ppm,
+                    Time = t, X = xM, Y = yM,
                     HeadingDeg = hdg, SpeedKmh = kmh, Level = level,
                 });
-                RecordTrail(uid, t, xPx / Ppm, yPx / Ppm, hdg);
+                RecordTrail(uid, t, xM, yM, hdg);
                 if (_motionLog != null)
-                    _motionLog.WriteLine($"SAMP {t:F3} {xPx / Ppm:F2} {yPx / Ppm:F2}");
+                    _motionLog.WriteLine($"SAMP {t:F3} {xM:F2} {yM:F2}");
             }
 
             void RecordTrail(long uid, double t, float xm, float ym, float hdg)
@@ -1476,8 +1477,9 @@ public partial class MapRenderer : Node2D
                            ? hlc.GetString() : null;
                     m.InContact = c.TryGetProperty("in_contact", out var ic)
                                   && ic.GetBoolean();
-                    // Collision footprint from the four body_corners (world
-                    // pixels): length = front->rear edge, width = left->right.
+                    // Collision footprint from the four body_corners (METRES,
+                    // like every other /state coordinate): length = front->rear
+                    // edge, width = left->right.
                     if (c.TryGetProperty("body_corners", out var bc)
                         && bc.ValueKind == JsonValueKind.Array && bc.GetArrayLength() == 4)
                     {
@@ -1486,9 +1488,9 @@ public partial class MapRenderer : Node2D
                         float flx = fl[0].GetSingle(), fly = fl[1].GetSingle();
                         float rlx = rl[0].GetSingle(), rly = rl[1].GetSingle();
                         m.CollWidM = Mathf.Sqrt((frx - flx) * (frx - flx)
-                                                + (fry - fly) * (fry - fly)) / Ppm;
+                                                + (fry - fly) * (fry - fly));
                         m.CollLenM = Mathf.Sqrt((flx - rlx) * (flx - rlx)
-                                                + (fly - rly) * (fly - rly)) / Ppm;
+                                                + (fly - rly) * (fly - rly));
                     }
                 }
                 // Multi-car auto-follow: a freshly spawned car takes over
@@ -1559,7 +1561,7 @@ public partial class MapRenderer : Node2D
             return null;
         if (f.ValueKind != JsonValueKind.Array || f.GetArrayLength() < 3) return null;
         var a = f.EnumerateArray().ToArray();
-        return (a[0].GetSingle() / Ppm, a[1].GetSingle() / Ppm, a[2].GetSingle());
+        return (a[0].GetSingle(), a[1].GetSingle(), a[2].GetSingle());
     }
 
     void RemoveCar(long uid)

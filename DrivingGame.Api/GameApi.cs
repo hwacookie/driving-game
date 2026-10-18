@@ -304,12 +304,14 @@ public static class GameApi
                     return WaitMet(state);
                 else if (condition == "position_reached")
                 {
+                    // METRES: /state reports positions in metres (like /map),
+                    // so the target and its tolerance are metres too.
                     double x = value.GetProperty("x").GetDouble();
                     double y = value.GetProperty("y").GetDouble();
                     double dist = Math.Sqrt(
                         Math.Pow(Convert.ToDouble(state.GetValueOrDefault("x", 0.0)) - x, 2) +
                         Math.Pow(Convert.ToDouble(state.GetValueOrDefault("y", 0.0)) - y, 2));
-                    if (dist < (value.TryGetProperty("threshold", out var th) ? th.GetDouble() : 10.0))
+                    if (dist < (value.TryGetProperty("threshold", out var th) ? th.GetDouble() : 5.0))
                         return WaitMet(state);
                 }
 

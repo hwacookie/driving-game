@@ -42,6 +42,7 @@ GET /state
 Returns current game state:
 ```json
 {
+  "units": "meters",
   "frame": 123,
   "time": 2.05,
   "x": 1234.5,
@@ -65,6 +66,14 @@ Returns current game state:
   "time_warp": 1.0
 }
 ```
+
+**Units.** Every coordinate in this payload - `x`, `y`, the `body_corners`
+of a car, and the `flags` positions - is in **metres**, the same dialect
+`GET /map` uses. `speed` is m/s, `speed_kmh` km/h. The sim keeps its own
+internal frame in world pixels; the conversion happens once where the
+payload is built, so the API has exactly one dialect for positions. The
+two endpoints that still answer in world pixels (`GET /segment/{idx}` and
+`GET /start_points`) say so in the sections below.
 
 `parking` reflects the nav's parking state (fields are null when no
 parking plan is active): `style` is `"forward"` or `"reverse"`, `phase`
@@ -270,7 +279,10 @@ Content-Type: application/json
 }
 ```
 
-Blocks until condition is met or timeout.
+Blocks until condition is met or timeout. For
+`"position_reached"`, `value` is `{"x": …, "y": …, "threshold": …}` in
+**metres** (the same unit `GET /state` reports); `threshold` defaults to
+5 m.
 
 ### Obstacles (docs/OBSTACLES.md)
 

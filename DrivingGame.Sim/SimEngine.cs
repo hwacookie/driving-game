@@ -932,10 +932,24 @@ public sealed class SimEngine
         return null;
     }
 
+    /// <summary>World pixels -> metres. The sim still keeps its internal
+    /// coordinates in world pixels; the PAYLOAD speaks metres, like /map
+    /// (see docs/REST_API.md). Every coordinate that leaves the sim goes
+    /// through here, so the API has exactly one unit dialect.</summary>
+    private static double Meters(double px) => px / Config.PIXELS_PER_METER;
+
+    /// <summary>A flag's [x, y, heading_deg] in world pixels -> the payload
+    /// form in metres (the heading is unit-free and stays as it is).</summary>
+    private static double[]? FlagMeters(double[]? f)
+    {
+        if (f is null || f.Length < 3) return f;
+        return new[] { Meters(f[0]), Meters(f[1]), f[2] };
+    }
+
     private static Dictionary<string, object?> FlagsPayload(TestFlags? tf) => new()
     {
-        ["green"] = tf?.FlagGreen,
-        ["red"] = tf?.FlagRed,
+        ["green"] = FlagMeters(tf?.FlagGreen),
+        ["red"] = FlagMeters(tf?.FlagRed),
     };
 
     // Python's lane_guard.stats() returns a dict - keep the same key names.
@@ -959,8 +973,8 @@ public sealed class SimEngine
             carsPayload.Add(new Dictionary<string, object?>
             {
                 ["car_uid"] = c.Uid,
-                ["x"] = c.X,
-                ["y"] = c.Y,
+                ["x"] = Meters(c.X),
+                ["y"] = Meters(c.Y),
                 ["heading"] = c.Heading,
                 ["speed_kmh"] = c.Speed * 3.6,
                 ["level"] = Network.Segments[c.SegIdx].Level,
@@ -975,11 +989,11 @@ public sealed class SimEngine
                 ["contact_with"] = c.InContact ? c.ContactWith : (int?)null,
                 // The exact box used for crash detection (per-class body
                 // footprint, LengthM x WidthM centred on the body centre):
-                // four [x, y] pixel corners front-right, front-left,
+                // four [x, y] METRE corners front-right, front-left,
                 // rear-left, rear-right. The client uses it as the car's
                 // click/hit area.
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(c)
-                    .Select(p => new[] { p.X, p.Y }).ToList(),
+                    .Select(p => new[] { Meters(p.X), Meters(p.Y) }).ToList(),
                 ["blinker_left"] = c.Driver is BicycleDriver bl ? bl.BlinkerLeft : false,
                 ["blinker_right"] = c.Driver is BicycleDriver br ? br.BlinkerRight : false,
                 ["hazard"] = hazard,
@@ -1001,6 +1015,10 @@ public sealed class SimEngine
             // that; the fleet payload stays empty.
             state = new Dictionary<string, object?>
             {
+                // The unit every coordinate in this payload uses - the same
+                // declaration /map carries. The API speaks metres; world
+                // pixels stay inside the sim.
+                ["units"] = "meters",
                 ["frame"] = Frame,
                 ["time"] = _simStepsTotal * DtFixed,
                 // How much sim time runs per wall second (the host's pacing
@@ -1023,6 +1041,7 @@ public sealed class SimEngine
             var pcs = _perCarState.GetValueOrDefault(car.Uid);
             state = new Dictionary<string, object?>
             {
+                ["units"] = "meters",
                 ["frame"] = Frame,
                 ["time"] = _simStepsTotal * DtFixed,
                 ["time_warp"] = TimeWarp,
@@ -1031,8 +1050,8 @@ public sealed class SimEngine
                 // can't confirm a NEW car - it is already True while the old
                 // one still exists.
                 ["car_uid"] = car.Uid,
-                ["x"] = car.X,
-                ["y"] = car.Y,
+                ["x"] = Meters(car.X),
+                ["y"] = Meters(car.Y),
                 ["heading"] = car.Heading,
                 ["speed"] = car.Speed,
                 ["speed_kmh"] = car.Speed * 3.6,
@@ -1050,7 +1069,7 @@ public sealed class SimEngine
                 ["in_contact"] = car.InContact,
                 ["contact_with"] = car.InContact ? car.ContactWith : (int?)null,
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(car)
-                    .Select(p => new[] { p.X, p.Y }).ToList(),
+                    .Select(p => new[] { Meters(p.X), Meters(p.Y) }).ToList(),
                 // Dashboard lamps for the cockpit controller.
                 ["braking"] = car.IsBraking,
                 ["accelerating"] = car.IsAccelerating,

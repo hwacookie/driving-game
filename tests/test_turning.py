@@ -24,6 +24,13 @@ SPRITE_WHEELBASE_M = 2.64   # m (FRONT_AXLE_OFFSET_M + REAR_AXLE_OFFSET_M)
 
 API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")  # explicit IPv4: 'localhost' may resolve to ::1 (and :5000 is squatted on by macOS AirPlay Receiver anyway)
 
+# The suite speaks METRES end to end: /state and /map answer in metres
+# (docs/REST_API.md). Two endpoints still answer in the sim's internal
+# world pixels (/segment, /start_points); those payloads are converted
+# ONCE where they are read (get_segment_geometry, get_start_points), so
+# no comparison in this file mixes units.
+PX_PER_M = 2.0   # config.PIXELS_PER_METER
+
 # Results are persisted next to this script, keyed by "start_point|direction",
 # so the next run can report whether each scenario passed the last time it ran
 # (and why it failed, if it didn't). See docs/SPEC.md ("Turn Test Output").
@@ -590,11 +597,19 @@ class TurnTester:
         return response.json()
     
     def get_segment_geometry(self, idx: int) -> dict | None:
-        """One road segment's geometry from the game (pixels, 0-based)."""
+        """One road segment's geometry, in METRES (0-based).
+
+        /segment still answers in the sim's internal world pixels, so the
+        coordinates are converted here - the one place they enter. length
+        and width already come in metres.
+        """
         try:
             r = requests.get(f"{API_URL}/segment/{idx}", timeout=2)
             if r.ok:
-                return r.json()
+                seg = r.json()
+                for k in ('x1', 'y1', 'x2', 'y2'):
+                    seg[k] /= PX_PER_M
+                return seg
         except requests.exceptions.RequestException:
             pass
         return None
@@ -1005,7 +1020,7 @@ class TurnTester:
                     pass
 
             # 4. Run the phase: poll every STRESS_POLL_S, count jitters.
-            prev: dict[int, tuple] = {}   # uid -> (sim_t, x_px, y_px)
+            prev: dict[int, tuple] = {}   # uid -> (sim_t, x_m, y_m)
             jitters = 0
             worst_jump_m = 0.0
             off_road_hits = 0
@@ -1054,7 +1069,7 @@ class TurnTester:
                         t0, x0, y0 = prev[uid]
                         poll_dt = sim_t - t0
                         if poll_dt > 0:
-                            moved_m = math.hypot(x - x0, y - y0) / 2.0
+                            moved_m = math.hypot(x - x0, y - y0)
                             # The suite's teleport/jump bound (see
                             # _confirm_stop): movement beyond what the car's
                             # speed can cover in this wall-clock interval,
@@ -1376,30 +1391,38 @@ class TurnTester:
         sp = self.get_start_points().get(start_point)
         if sp is None:
             return None
-        pppm = 2.0  # config.PIXELS_PER_METER
         h = math.radians(sp['heading'])
         fx, fy = math.sin(h), math.cos(h)          # direction of travel
         rx, ry = fy, -fx                           # right-hand side of it
-        half_w_px = (PARK_AVENUE_WIDTH_M / 2.0) * pppm
-        cx, cy = sp['x'] + rx * half_w_px, sp['y'] + ry * half_w_px  # kerb line
+        half_w_m = PARK_AVENUE_WIDTH_M / 2.0
+        cx, cy = sp['x'] + rx * half_w_m, sp['y'] + ry * half_w_m  # kerb line
         hd = math.radians(state['heading'])
         fcx, fcy = math.sin(hd), math.cos(hd)      # car forward
         rcx, rcy = fcy, -fcx                       # car right side
-        x, y = state['x'], state['y']              # rear axle (world px)
-        wb_px = SPRITE_WHEELBASE_M * pppm
-        flank_px = (CAR_WIDTH / 2.0) * pppm
+        x, y = state['x'], state['y']              # rear axle (metres)
+        wb_m = SPRITE_WHEELBASE_M
+        flank_m = CAR_WIDTH / 2.0
         gaps = []
-        for wx, wy in ((x + rcx * flank_px, y + rcy * flank_px),          # rear right
-                       (x + fcx * wb_px + rcx * flank_px,
-                        y + fcy * wb_px + rcy * flank_px)):               # front right
+        for wx, wy in ((x + rcx * flank_m, y + rcy * flank_m),            # rear right
+                       (x + fcx * wb_m + rcx * flank_m,
+                        y + fcy * wb_m + rcy * flank_m)):                 # front right
             # signed distance from the kerb line into the road (n = -r)
-            gaps.append(((wx - cx) * (-rx) + (wy - cy) * (-ry)) / pppm)
+            gaps.append((wx - cx) * (-rx) + (wy - cy) * (-ry))
         return gaps
 
     def get_start_points(self) -> dict:
-        """List available deterministic start points from the loaded map."""
+        """Deterministic start points of the loaded map, in METRES.
+
+        /start_points answers in the sim's internal world pixels, so the
+        position is converted here - the one place it is read.
+        """
         response = requests.get(f"{API_URL}/start_points")
-        return response.json()
+        pts = response.json()
+        for sp in pts.values():
+            for k in ('x', 'y'):
+                if k in sp:
+                    sp[k] /= PX_PER_M
+        return pts
     
     def _drive_to_segment_end_and_stop(self, target_segment: int, start_time: float,
                                         max_extra_time: float = 25.0,
@@ -1456,7 +1479,7 @@ class TurnTester:
             now = time.time()
             if last_pos is not None:
                 poll_dt = _poll_dt(state, last_sim, now, last_time)
-                moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5 / 2.0
+                moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5
                 max_plausible_m = max(state['speed_kmh'] / 3.6, 50.0) * poll_dt * 1.5 + 1.0
                 if moved_m > max_plausible_m:
                     details['teleport'] = True
@@ -1545,7 +1568,7 @@ class TurnTester:
             now = time.time()
             if last_pos is not None:
                 poll_dt = _poll_dt(state, last_sim, now, last_time)
-                moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5 / 2.0
+                moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5
                 max_plausible_m = max(state['speed_kmh'] / 3.6, 50.0) * poll_dt * 1.5 + 1.0
                 if moved_m > max_plausible_m:
                     details['teleport'] = True
@@ -1761,7 +1784,7 @@ class TurnTester:
                 # the end segment (suite standard: FIRST 20%) - crossing
                 # it ends the test, no parking.
                 red_flag = None
-                flag_point = None   # world px of the red flag (reach check)
+                flag_point = None   # metres, position of the red flag (reach check)
                 if expected_end_segment is not None:
                     prog_flag = 0.5 if kerb_check else end_flag_progress
                     seg = self.get_segment_geometry(expected_end_segment)
@@ -1927,8 +1950,8 @@ class TurnTester:
             # assumed fixed frame dt, since polling isn't frame-locked).
             now = time.time()
             poll_dt = _poll_dt(state, last_poll_sim, now, last_poll_time)
-            moved_px = ((state['x'] - last_poll_pos[0]) ** 2 + (state['y'] - last_poll_pos[1]) ** 2) ** 0.5
-            moved_m = moved_px / 2.0  # PIXELS_PER_METER (see src/config.py)
+            moved_m = ((state['x'] - last_poll_pos[0]) ** 2 +
+                       (state['y'] - last_poll_pos[1]) ** 2) ** 0.5
             # Generous margin: highest plausible speed (~50 m/s cruise)
             # times the actual poll gap, plus slack for polling jitter
             # and the accelerate-from-a-stop ramp-up.
@@ -2082,7 +2105,7 @@ class TurnTester:
             if not kerb_check and flag_point is not None:
                 fdx = state['x'] - flag_point[0]
                 fdy = state['y'] - flag_point[1]
-                if (fdx * fdx + fdy * fdy) ** 0.5 <= FLAG_REACH_RADIUS_M * 2.0:
+                if (fdx * fdx + fdy * fdy) ** 0.5 <= FLAG_REACH_RADIUS_M:
                     reached_expected_segment = True
                     prog_pct = (state.get('progress') or 0.0) * 100
                     print(f"\n   ✅ Crossed the end flag at {prog_pct:.0f}% "
@@ -2094,7 +2117,7 @@ class TurnTester:
                     stopped_ok = True   # running test: no stop required
                     print(f"      Start: ({initial_pos[0]:.0f}, {initial_pos[1]:.0f}) seg {initial_segment} "
                           f"→ End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}")
-                    print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} pixels")
+                    print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
                     try:
                         self.reset_controls()   # release the throttle latch
                     except requests.exceptions.RequestException:
@@ -2230,7 +2253,7 @@ class TurnTester:
                             game_crashed = game_crashed or stop_details.get('game_crashed', False)
                             if stop_details.get('violation_details'):
                                 violation_details = stop_details['violation_details']
-                        rolled_m = ((final_pos[0] - cross_pos[0]) ** 2 + (final_pos[1] - cross_pos[1]) ** 2) ** 0.5 / 2.0
+                        rolled_m = ((final_pos[0] - cross_pos[0]) ** 2 + (final_pos[1] - cross_pos[1]) ** 2) ** 0.5
                         if stopped_ok:
                             where = (f"{rolled_m:.1f} m after crossing it"
                                      if rolled_m > 0.5 else "right at the flag")
@@ -2239,7 +2262,7 @@ class TurnTester:
                             print(f"      ⚠️  Did NOT come to a clean stop at the end flag")
                         print(f"      Start: ({initial_pos[0]:.0f}, {initial_pos[1]:.0f}) seg {initial_segment} "
                               f"\u2192 End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}")
-                        print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} pixels")
+                        print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
                         break
                 elif expected_end_segment is None:
                     # Legacy random-location mode: any segment change counts;
@@ -2262,7 +2285,7 @@ class TurnTester:
                     print(f"      Start: ({initial_pos[0]:.0f}, {initial_pos[1]:.0f}) seg {initial_segment} "
                           f"\u2192 End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}"
                           f"{' (stopped)' if stopped_ok else ' (did NOT stop cleanly)'}")
-                    print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} pixels")
+                    print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
                     break
             
             last_heading = current_heading
