@@ -22,6 +22,58 @@ Testing has two layers:
 See `docs/REST_API.md` for the full endpoint reference; this document
 focuses on the *testing workflow* itself.
 
+## Fast mode (warped runs)
+
+A refactoring run does not need real-time playback, and the sim is
+fixed-step, so it can run faster than the wall clock:
+
+```bash
+scripts/run_e2e.sh --fast            # as many 60 Hz steps as the CPU can do
+scripts/run_e2e.sh --warp 4          # exactly 4x (for a visible, sped-up run)
+scripts/run_e2e.sh --fast --no-godot # CI-shaped: no window at all
+```
+
+The switch is the host's (`DrivingGame.Server --warp N` / `--fast`); it
+announces itself in `/state` as `time_warp`. Nothing about the physics
+changes - the step stays 1/60 s, the host just runs more of them per
+wall second - and the guardrails follow the same unit: every duration and
+the teleport/jump bound are measured in **SIM time** (`/state.time`), so
+"what could this speed cover in that time" stays a physical check at any
+warp. Two consequences are deliberate:
+
+- the **capacity probe** (`fig8_stress`, "how many cars can we run/render
+  at max?") is skipped in a warped run - it measures real-time throughput,
+  which a warped run breaks by construction. Run it without the switch.
+- a visible window at high warp is a sped-up playback, not a smooth one
+  (the client renders 60 frames/s). Use `--warp 2..4` when watching, and
+  `--fast --no-godot` when only the results matter.
+
+## Capacity benchmark (the sim's own throughput)
+
+This measures the SIM, not the client, so it lives on the C# side: the console
+host runs it in-process, no REST API, no Godot, no HTTP round-trips. It
+replaces `tools/capacity_sweep.py`, which measured the same thing over the
+wire and paid the client's cost on top.
+
+```bash
+DrivingGame.Server --map basic --bench 25,50,75,100,150
+DrivingGame.Server --map basic --bench --bench-loop xingp_n   # another loop
+```
+
+Per phase it builds a fresh engine, puts N cars evenly around the loop it
+finds by node-name prefix (`fig8_n` by default - the benchmark prints which
+loop and how many segments it got), holds the throttle, warms up 8 s of sim
+so the raceline cache builds, then runs as many fixed 60 Hz steps as the CPU
+can do for 25 s of sim time and reports `pace = sim time / wall time`.
+`pace >= 0.97` counts as holding real time; below that the sim runs in slow
+motion (the accumulator caps substeps, so it degrades instead of leaping).
+
+Read the number as **one core's speed**: the sim is single-threaded, so this
+is not the machine's capacity. Measured on this machine (2026-10-18, all cars
+on the `fig8_n` loop): real time holds to ~50 cars; 150 cars runs at 0.33x.
+With the Godot window open in the same process (embedded mode) the same
+scenario holds to ~45 cars - the renderer costs about 10% of the budget.
+
 ## 1. Start the game with the API enabled
 
 ```bash

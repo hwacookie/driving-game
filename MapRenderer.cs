@@ -8,8 +8,8 @@ using System.Text.Json;
 /// <summary>
 /// M1 (car/docs/GODOT_FRONTEND.md): fetches GET /map from the world
 /// simulator and renders the static world — roads, markings, arrows,
-/// P-marks, junction dots. Zero driving logic: pure layer-3 presentation
-/// of the layer-2 contract.
+/// P-marks. Zero driving logic: pure layer-3 presentation of the
+/// layer-2 contract.
 ///
 /// Coordinates: the sim's world is in METRES with x = east, y = north.
 /// Godot 2D has y growing DOWN, so every point is flipped: W(x, y) = (x, -y).
@@ -40,10 +40,11 @@ public partial class MapRenderer : Node2D
         public List<Vector2> Pts;
         public float DashM, GapM;   // 0/0 for solid
         public Color Color;
-        public float WidthM;        // physical width (Breitstrich check)
+        public float WidthM;        // physical width of the paint
+        public bool Breitstrich;    // lane-boundary paint drawn twice as wide
         public bool Solid;
-        public float FadeRefM;      // dash length driving pygame's low-zoom fade
         public bool Elevated;       // drawn above bridge decks (z 21)
+        public bool FarCull;        // hidden below MarkingMinZoom (see _farMarkings)
     }
 
     private HttpRequest _http;
@@ -61,8 +62,7 @@ public partial class MapRenderer : Node2D
     private Label _runStatus;
     private Camera2D _cam;
     private Node2D _world;                 // container for all map nodes
-    private Node2D _markLayer;             // rebuilt on zoom change (px floor)
-    private Node2D _dotLayer;              // rebuilt on zoom change (px floor)
+    private Node2D _markLayer;             // world-space markings, built once
     private Rect2 _bounds;                  // world bounds in metres
     private readonly HashSet<Key> _keys = new();
     private string _screenshotPath;
@@ -82,26 +82,23 @@ public partial class MapRenderer : Node2D
     private float? _overrideZoom;
 
     private readonly List<MarkingLine> _markings = new();
-    private readonly List<Vector2> _junctionCenters = new();
-    private float _dotRadiusM = 0.15f;
-    private int _lastLinePx = -1, _lastDotPx = -1;
+    // The small white disc in the middle of a real crossing, metres:
+    // (centre, radius). The sim decides where they are (RoadNetwork.
+    // GetCrossingMarkers); this only paints them.
+    private readonly List<(Vector2 C, float R)> _crossingDots = new();
+    // The meshes holding zoom-culled paint (centre + halt lines): kept so
+    // _Process can switch them off together below MarkingMinZoom.
+    private readonly List<MeshInstance2D> _farMarkings = new();
 
-    // Dash patterns from the sim (set in BuildMap; RebuildDynamic needs them).
+    // Dash patterns from the sim (set in BuildMap; RebuildMarkings needs them).
     private float _cDash = 3f, _cGap = 3f, _lDash = 2f, _lGap = 4f,
                   _pDash = 1f, _pGap = 1f;
 
-    // pygame fades markings out as their on-screen dash length drops below
-    // ~1 px (alpha = 255 * clamp((dash_px - 1) / 3, 0, 1)). The marking
-    // meshes and the arrow/P-mark polygons remember which dash length
-    // drives their fade; _Process applies it via modulate (no rebuild).
-    // Fade refs split in two: static (arrows/P marks, built once) and
-    // dynamic (marking meshes — freed on every RebuildDynamic, so the list
-    // must be rebuilt with them; holding stale refs throws ObjectDisposed).
-    private readonly List<(CanvasItem ci, float refM)> _fadedStatic = new();
-    private readonly List<(CanvasItem ci, float refM)> _fadedDyn = new();
-
-    // Minimap (pygame parity: config.MINIMAP_*): screen-space overlay on a
-    // CanvasLayer, redrawn whenever the camera moves.
+    // Markings are drawn at their PHYSICAL widths (a centreline is 0.15 m
+    // of paint, not a screen pixel) and at full opacity at every zoom: the
+    // renderer's job is the paint, the camera's job is the view. MSAA 4x
+    // (project settings) anti-aliases the sub-pixel edges instead of hiding
+    // them behind a fade.
     private MinimapNode _minimap;
     private Label _zoomLabel;
     private Vector2 _lastCamPos = new(float.NaN, float.NaN);
@@ -111,8 +108,8 @@ public partial class MapRenderer : Node2D
     // floor so every road stays visible at any map scale.
     private readonly List<(Vector2 A, Vector2 B, float W)> _mmSegs = new();
 
-    // Paved-edge outline: fixed 2 screen px white line (pygame parity), so
-    // the world-space width must track the zoom every frame.
+    // Paved-edge outline: kept so the kerb paint can be hidden as a whole
+    // below a legibility zoom instead of turning into sub-pixel noise.
     private readonly List<Line2D> _edgeLines = new();
     private readonly List<Line2D> _bridgeEdges = new();   // level-1 decks
 
@@ -184,11 +181,9 @@ public partial class MapRenderer : Node2D
     private double _rateRefSim = -1;     // newest sample at last rate update
     private double _rateRefWall = 0;
     private double _simRate = 1.0;       // sim seconds per wall second
+    private double _timeWarp = 1.0;      // announced by /state (--warp/--fast)
     private float _renderTarget = float.NegativeInfinity;
     private bool _rtClamped;             // render target waiting for data
-    // Camera samples for the same interpolation (world px + zoom).
-    private readonly List<(double T, float X, float Y, float Zoom)> _camBuf
-        = new();
     private Label _speedLabel;
     private string _lastSpeedText = "";
     private Label _testLabel;          // "5/21" from POST /label (via /state)
@@ -214,15 +209,11 @@ public partial class MapRenderer : Node2D
     }
     private string _lastTestText = null;
 
-    // Follow mode mirrors the SIM's own camera (pygame parity: same lerp
-    // follow, snap on teleport, zoom level - all computed in the sim).
-    private float _simCamX, _simCamY;   // world pixels
-    private float _simCamZoom;          // pygame multiplier (x Ppm -> px/m)
-    private bool _simCamValid;
-    // Manual camera input pauses the mirror temporarily (pygame: follow
-    // resumes as soon as the drag ends) instead of releasing it forever.
+    // The view is a CLIENT feature: a Godot Camera2D follows the node of the
+    // bound car (engine position smoothing gives the follow lag), and manual
+    // pan/zoom takes over until the input stops. The sim has no camera state.
     private ulong _lastManualMs = 0;
-    private float _localZoom = -1f;     // wheel/pinch override while following
+    private Vector2 _lastFollowTarget;  // previous follow target (snap rule)
 
     // Per-car display state from /state (multi-car, docs/MULTI_CAR_PLAN.md):
     // color name, blinker/hazard lights, the car's OWN test flags + label.
@@ -396,6 +387,18 @@ public partial class MapRenderer : Node2D
         else
             GD.Print("Source: HTTP (external server on :5001)");
 
+        // The window title carries the REST port: two windows of this
+        // project differ ONLY by the server they talk to - the e2e host and
+        // a scratch run look identical otherwise, which made "which map is
+        // this?" unanswerable from the screen.
+        var port = embedded ? _embeddedPort : PortOfUrl(MapUrl);
+        if (port > 0)
+        {
+            var title = GetTree().Root.Title;
+            if (title.Length == 0) title = "DrivingGame";
+            GetTree().Root.Title = $"{title} :{port}";
+        }
+
         _http = GetNode<HttpRequest>("Http");
         // use_threads: without it, Godot's HTTPRequest does ONE socket read
         // per rendered frame (godotengine/godot#120425) - every request then
@@ -407,9 +410,7 @@ public partial class MapRenderer : Node2D
         _world = new Node2D { Name = "World" };
         AddChild(_world);
         _markLayer = new Node2D { Name = "Markings" };
-        _dotLayer = new Node2D { Name = "JunctionDots" };
         _world.AddChild(_markLayer);
-        _world.AddChild(_dotLayer);
         _http.RequestCompleted += OnMapResponse;
         if (embedded)
         {
@@ -475,18 +476,11 @@ public partial class MapRenderer : Node2D
         if (_quitOnTestDone)
             StartPolling();
 
-        // --zoom also pins the follow-camera zoom (like a wheel-zoom at
-        // start): without this, FollowCamera() overwrites the initial view
-        // with the sim's camera_zoom as soon as it starts following.
-        if (_overrideZoom.HasValue) _localZoom = _overrideZoom.Value;
-
         if (_motionLogPath != null)
             _motionLog = new StreamWriter(_motionLogPath, append: false);
 
-        // pygame renders locked to 60 fps; an uncapped Godot loop (113 fps
-        // on this machine) has 4-20 ms frame pacing which reads as micro-
-        // stutter. Cap to the sim's own rate.
-        Engine.MaxFps = 60;
+        // Frame pacing is the display's: Godot's default adaptive vsync caps
+        // the loop, and everything here is delta-driven, so no manual fps cap.
 
         if (_testPan && _screenshotPath != null)
         {
@@ -522,16 +516,13 @@ public partial class MapRenderer : Node2D
 
     private void BuildMap(JsonElement root)
     {
-        // Free the static geometry, but keep the two dynamic layers alive
-        // (they are rebuilt by RebuildDynamic, not re-created here).
+        // Free the static geometry, but keep the marking layer alive (its
+        // meshes are rebuilt by RebuildMarkings, not re-created here).
         foreach (var child in _world.GetChildren())
-            if (child != _markLayer && child != _dotLayer)
+            if (child != _markLayer)
                 child.QueueFree();
         _markings.Clear();
-        _junctionCenters.Clear();
-        _fadedStatic.Clear();
-        _fadedDyn.Clear();
-        _lastLinePx = _lastDotPx = -1;
+        _crossingDots.Clear();
         // The child sweep above also kills trail lines / flag nodes created
         // before the map arrived (state polls start immediately) - drop the
         // dangling references and force a rebuild on the next frame.
@@ -559,16 +550,19 @@ public partial class MapRenderer : Node2D
         }
         _bounds = new Rect2(bx0, by0, bx1 - bx0, by1 - by0);
 
-        // --- Roads (z 0); holes punched with the bg colour (z 1) — exactly
-        // what pygame does (it cannot fill a polygon with a hole in one go).
-        if (root.TryGetProperty("roads", out var roadsEl))
-            foreach (var r in roadsEl.EnumerateArray())
-            {
+        // --- Road paint (z 0): one filled ribbon PER ROAD. Nothing is
+        // punched out behind the paint, so an island (a roundabout, a
+        // figure-8 lobe) is simply the area no ribbon covers and a road that
+        // crosses itself paints its crossing twice in the same colour — what
+        // a crossing actually looks like. (The old single unioned polygon
+        // needed a background punch for its holes; as a global layer that
+        // painted grass over anything else at z 0 inside a ring, which is
+        // what hid the junction fillets at the plain figure-8 crossing.)
+        if (root.TryGetProperty("road_strips", out var stripsEl))
+            AddRoadStrips(stripsEl, roadColor);
+        if (root.TryGetProperty("road_polygons", out var fillsEl))
+            foreach (var r in fillsEl.EnumerateArray())
                 AddPolygon(Pts(r.GetProperty("exterior")), roadColor, 0);
-                if (r.TryGetProperty("holes", out var holes))
-                    foreach (var h in holes.EnumerateArray())
-                        AddPolygon(Pts(h), bg, 1);
-            }
 
         // Minimap segments (sim coords, metres).
         _mmSegs.Clear();
@@ -589,17 +583,32 @@ public partial class MapRenderer : Node2D
             _pDash = ms.GetProperty("park_dash_m").GetSingle();
             _pGap = ms.GetProperty("park_gap_m").GetSingle();
         }
+        // Halt-/wart line width (Ze. 294): the sim's, 0.5 m of paint.
+        float stopW = 0.5f;
+        if (root.TryGetProperty("marking_style", out var ms2))
+            stopW = ms2.TryGetProperty("stop_line_width_m", out var sw)
+                ? sw.GetSingle() : 0.5f;
 
         var white = new Color(1f, 1f, 1f);
         var cream = new Color(251 / 255f, 251 / 255f, 245 / 255f);
         var rail = new Color(183 / 255f, 189 / 255f, 186 / 255f);
 
-        // Centerlines: dashed white, 0.15 m wide (pygame parity).
+        // Centerlines: white paint, 0.15 m wide. The network decides the
+        // style per piece - solid in front of a junction mouth, dashed
+        // beyond it - so the renderer just paints what it is told.
         if (root.TryGetProperty("centerlines", out var cl))
             foreach (var line in cl.EnumerateArray())
-                _markings.Add(new MarkingLine { Pts = Pts(line), DashM = _cDash, GapM = _cGap,
-                                                 Color = white, WidthM = 0.15f,
-                                                 FadeRefM = _cDash });
+            {
+                var pts = Pts(line.GetProperty("pts"));
+                if (line.GetProperty("style").GetString() == "solid")
+                    _markings.Add(new MarkingLine { Pts = pts, Solid = true,
+                                                     Color = white, WidthM = 0.15f,
+                                                     FarCull = true });
+                else
+                    _markings.Add(new MarkingLine { Pts = pts, DashM = _cDash, GapM = _cGap,
+                                                     Color = white, WidthM = 0.15f,
+                                                     FarCull = true });
+            }
 
         // Elevated centrelines: the ground-level ones under a bridge deck
         // are covered by it (z 2 < 20), so the sim exports the deck's own
@@ -608,7 +617,7 @@ public partial class MapRenderer : Node2D
             foreach (var line in ecl.EnumerateArray())
                 _markings.Add(new MarkingLine { Pts = Pts(line), DashM = _cDash, GapM = _cGap,
                                                  Color = white, WidthM = 0.15f,
-                                                 FadeRefM = _cDash, Elevated = true });
+                                                 Elevated = true });
 
         // Lane markings (RQ 31 styles from the sim).
         if (root.TryGetProperty("lane_markings", out var lm))
@@ -621,39 +630,60 @@ public partial class MapRenderer : Node2D
                 {
                     case "dashed":
                         _markings.Add(new MarkingLine { Pts = pts, DashM = _lDash, GapM = _lGap,
-                                                         Color = white, WidthM = 0.15f,
-                                                         FadeRefM = _lDash });
+                                                         Color = white, WidthM = 0.15f });
                         break;
                     case "p_dash":
                         _markings.Add(new MarkingLine { Pts = pts, DashM = _pDash, GapM = _pGap,
-                                                         Color = white, WidthM = 0.15f,
-                                                         FadeRefM = _pDash });
+                                                         Color = white, WidthM = 0.15f });
                         break;
                     case "solid":
                         _markings.Add(new MarkingLine { Pts = pts, Solid = true,
                                                         Color = cream, WidthM = widthM,
-                                                        FadeRefM = _lDash });
+                                                        Breitstrich = widthM >= 0.25f });
                         break;
                     case "guardrail":
                         _markings.Add(new MarkingLine { Pts = pts, Solid = true,
-                                                        Color = rail, WidthM = 0.15f,
-                                                        FadeRefM = _lDash });
+                                                        Color = rail, WidthM = 0.15f });
                         break;
                 }
             }
 
-        // --- Arrows + painted P marks (z 2): plain polygons. Fade refs
-        // mirror pygame: arrows ~3 m long, P letters ~2 m tall.
-        foreach (var kv in new[] { ("oneway_arrows", 3f), ("parking_marks", 2f) })
-            if (root.TryGetProperty(kv.Item1, out var arr))
-                foreach (var poly in arr.EnumerateArray())
-                    if (AddPolygon(Pts(poly), white, 2) is { } p)
-                        _fadedStatic.Add((p, kv.Item2));
+        // --- Halt-/wart lines (Ze. 294): the broad white band across the
+        // mouth of every yielding approach. The sim places it where the
+        // corner roundings touch the approach (RoadNetwork.GetStopLines /
+        // GetCrossingMouths) - German practice paints exactly there: at the
+        // mouth, never inside the crossing. In Germany the yield position is
+        // a solid broad line, not shark's teeth (those are a Danish marking;
+        // here the rule is carried by the triangular 205 sign), so the paint
+        // is one continuous band at the physical halt-line width.
+        if (root.TryGetProperty("stop_lines", out var sl))
+            foreach (var l in sl.EnumerateArray())
+            {
+                var a = new Vector2(l[0].GetSingle(), -l[1].GetSingle());
+                var b = new Vector2(l[2].GetSingle(), -l[3].GetSingle());
+                _markings.Add(new MarkingLine { Pts = new List<Vector2> { a, b },
+                                                 Solid = true, Color = white,
+                                                 WidthM = stopW, FarCull = true });
+            }
 
-        // --- Paved-edge outline (z 3, above markings — pygame draws it
-        // after the road tiles): one closed Line2D per unioned ring.
-        // Physical width like the centreline - NO 1 px floor (user
-        // decision): at low zoom it thins out naturally.
+        // --- The crossing's own middle marker: a small white disc at its
+        // centre. Not a German rule - the user asked for it, and it keeps a
+        // crossing readable where no other paint exists.
+        if (root.TryGetProperty("crossing_markers", out var cm))
+            foreach (var d in cm.EnumerateArray())
+                _crossingDots.Add((W(d[0].GetSingle(), d[1].GetSingle()),
+                                   d[2].GetSingle()));
+
+        // --- Arrows + painted P marks (z 2): plain polygons.
+        foreach (var key in new[] { "oneway_arrows", "parking_marks" })
+            if (root.TryGetProperty(key, out var arr))
+                foreach (var poly in arr.EnumerateArray())
+                    AddPolygon(Pts(poly), white, 2);
+
+        // --- Kerb outline (z 3, above the road fill): the TRUE paved
+        // perimeter, one closed Line2D per ring of the unioned paved area,
+        // inset by EDGE_LINE_INSET_M so a tarmac shoulder stays outside the
+        // paint. Physical width - at low zoom it thins out naturally.
         foreach (var l in _edgeLines) l.QueueFree();
         _edgeLines.Clear();
         foreach (var l in _bridgeEdges) l.QueueFree();
@@ -683,20 +713,10 @@ public partial class MapRenderer : Node2D
         var sidewalk = new Color(0.63f, 0.63f, 0.65f);
         if (root.TryGetProperty("elevated_roads", out var er))
             foreach (var r in er.EnumerateArray())
-            {
-                AddPolygon(Pts(r.GetProperty("exterior")), sidewalk, 20);
-                if (r.TryGetProperty("holes", out var eholes))
-                    foreach (var h in eholes.EnumerateArray())
-                        AddPolygon(Pts(h), bg, 21);
-            }
+                AddDeckFill(r, sidewalk, 20, bg);
         if (root.TryGetProperty("elevated_roadways", out var erw))
             foreach (var r in erw.EnumerateArray())
-            {
-                AddPolygon(Pts(r.GetProperty("exterior")), roadColor, 20);
-                if (r.TryGetProperty("holes", out var erholes))
-                    foreach (var h in erholes.EnumerateArray())
-                        AddPolygon(Pts(h), bg, 21);
-            }
+                AddDeckFill(r, roadColor, 20, bg);
         if (root.TryGetProperty("elevated_edge_lines", out var eer))
             foreach (var line in eer.EnumerateArray())
             {
@@ -705,21 +725,12 @@ public partial class MapRenderer : Node2D
                     Points = Pts(line).ToArray(),
                     Closed = false,
                     DefaultColor = white,
-                    Width = EdgeLineWidthM,     // physical, no 1 px floor
+                    Width = EdgeLineWidthM,
                     ZIndex = 22,
                 };
                 _world.AddChild(edge);
                 _bridgeEdges.Add(edge);
             }
-
-        // --- Junction dots: physical radius with a 1 px screen floor
-        // (pygame: max(1, round(r*pppm*zoom)) px) — rebuilt on zoom change.
-        if (root.TryGetProperty("junction_dot_radius_m", out var jEl))
-            _dotRadiusM = jEl.GetSingle();
-        if (root.TryGetProperty("junctions", out var js))
-            foreach (var j in js.EnumerateArray())
-                _junctionCenters.Add(W(j.GetProperty("x").GetSingle(),
-                                       j.GetProperty("y").GetSingle()));
 
         // --- Road signs (z 3, above markings, below cars): the real sign
         // artwork from assets/signs/ (Vorfahrt gewähren / Vorfahrtstraße).
@@ -754,10 +765,9 @@ public partial class MapRenderer : Node2D
         if (_overrideCenter.HasValue) center = _overrideCenter.Value;
         _cam.Zoom = new Vector2(zoom, zoom);
         _cam.GlobalPosition = center;
-        RebuildDynamic();
+        RebuildMarkings();
 
-        // Screen-space overlays: minimap (top right) + zoom indicator
-        // (top left, pygame parity: renderer.draw_zoom_indicator).
+        // Screen-space overlays: minimap (top right) + zoom readout.
         if (_minimap == null)
         {
             var layer = new CanvasLayer { Layer = 10 };
@@ -788,8 +798,8 @@ public partial class MapRenderer : Node2D
             _speedLabel.Visible = false;
             layer.AddChild(_speedLabel);
 
-            // Test number label (pygame parity: yellow text on dark panel,
-            // under the minimap; set by the e2e suite via POST /label).
+            // Test number label: yellow text on a dark panel under the
+            // minimap, set by the e2e suite via POST /label.
             _testLabel = new Label();
             _testLabel.AddThemeStyleboxOverride("normal", sb);
             _testLabel.AddThemeColorOverride("font_color",
@@ -865,48 +875,32 @@ public partial class MapRenderer : Node2D
             GetTree().CreateTimer(_shotDelay).Timeout += () => SaveShot(_screenshotPath);
     }
 
-    // ------------------------------------------- zoom-dependent (px floor)
+    // ------------------------------------------- static marking geometry
 
-    /// <summary>pygame floors marking line widths and junction-dot radii to
-    /// whole screen pixels (max(1, ...) px). The world-space meshes cannot
-    /// express that directly, so whenever the pixel size changes we rebuild
-    /// the marking + dot layers at width = max(physical, 1/zoom) metres.</summary>
-    private float _lastRebuildS = 0f;
-
-    private void RebuildDynamic()
+    /// <summary>Markings are paint: every line keeps its PHYSICAL width (a
+    /// centreline is 0.15 m of white, a Breitstrich twice that) at full
+    /// opacity, so the meshes are world-space and built ONCE per map -
+    /// nothing depends on the zoom, so nothing is rebuilt when the camera
+    /// moves. The only zoom response is switching whole batches off (the
+    /// far-cull ones: centre and halt lines). Sub-pixel edges belong to
+    /// the anti-aliasing pass (MSAA 4x in project settings), not to a
+    /// fade.</summary>
+    private void RebuildMarkings()
     {
-        float s = _cam.Zoom.X;                       // px per metre
-        int linePx = Mathf.Max(1, (int)(0.15f * s)); // pygame: max(1, int(0.15*pppm*zoom))
-        int dotPx = Mathf.Max(1, (int)Mathf.Round(_dotRadiusM * s));
-        // The 1 px floor is stored in METRES (linePx / s at build time), so
-        // the on-screen width drifts with zoom between integer changes.
-        // Pygame recomputes the pixel width every frame; we rebuild whenever
-        // the drift exceeds ~8 % of a pixel (invisible) — e.g. the whole
-        // range 0.24..6.7 px/m sits in bucket linePx=1 and would otherwise
-        // freeze at the fit-zoom width (~2.3 m wide slabs).
-        bool drifted = _lastRebuildS > 0f && Mathf.Abs(s - _lastRebuildS) / s > 0.08f;
-        if (linePx == _lastLinePx && dotPx == _lastDotPx && !drifted) return;
-        _lastLinePx = linePx;
-        _lastDotPx = dotPx;
-        _lastRebuildS = s;
-
         foreach (var child in _markLayer.GetChildren())
             child.QueueFree();
-        foreach (var child in _dotLayer.GetChildren())
-            child.QueueFree();
-        _fadedDyn.Clear();
+        _farMarkings.Clear();
 
-        float wDashM = linePx / s;
-        // Keyed by (width, fade ref, COLOR) so each pattern group gets its
-        // own mesh + pygame-fade reference. Color must be in the key -
-        // without it all markings merge into one white mesh.
-        var verts = new Dictionary<(float w, float refM, Color c, bool elev), List<Vector3>>();
-        void Quad(Color c, float w, float refM, Vector2 a, Vector2 b, bool elev)
+        var verts = new Dictionary<(float w, Color c, bool elev, bool cull), List<Vector3>>();
+        // The class the CURRENT line belongs to; Quad reads it, so lines
+        // that switch off when zooming out get their own mesh.
+        bool cull = false;
+        void Quad(Color c, float w, Vector2 a, Vector2 b, bool elev)
         {
-            if (!verts.TryGetValue((w, refM, c, elev), out var list))
+            if (!verts.TryGetValue((w, c, elev, cull), out var list))
             {
                 list = new List<Vector3>();
-                verts[(w, refM, c, elev)] = list;
+                verts[(w, c, elev, cull)] = list;
             }
             Vector2 d = b - a;
             float len = d.Length();
@@ -922,25 +916,42 @@ public partial class MapRenderer : Node2D
 
         foreach (var line in _markings)
         {
+            cull = line.FarCull;
             if (line.Solid)
             {
-                // Breitstrich (width_m >= 0.25): twice the normal thickness,
-                // with its own 2 px floor — mirrors renderer._draw_solid_polyline.
-                float w = line.WidthM >= 0.25f
-                    ? Mathf.Max(2, 2 * linePx) / s
-                    : wDashM;
+                // Lane boundaries get the Breitstrich (double width); a
+                // halt line is painted at its own physical width.
+                float w = line.Breitstrich ? 2f * line.WidthM : line.WidthM;
                 for (int i = 0; i < line.Pts.Count - 1; i++)
-                    Quad(line.Color, w, line.FadeRefM, line.Pts[i], line.Pts[i + 1],
-                         line.Elevated);
+                    Quad(line.Color, w, line.Pts[i], line.Pts[i + 1], line.Elevated);
             }
             else if (line.DashM > 0f)
                 AddDashes(line.Elevated
-                    ? (Color c, float w, float r, Vector2 a, Vector2 b) =>
-                        Quad(c, w, r, a, b, true)
-                    : (Color c, float w, float r, Vector2 a, Vector2 b) =>
-                        Quad(c, w, r, a, b, false),
-                    line.Color, wDashM, line.FadeRefM,
-                    line.Pts, line.DashM, line.GapM);
+                    ? (Color c, float w, Vector2 a, Vector2 b) =>
+                        Quad(c, w, a, b, true)
+                    : (Color c, float w, Vector2 a, Vector2 b) =>
+                        Quad(c, w, a, b, false),
+                    line.Color, line.WidthM, line.Pts, line.DashM, line.GapM);
+        }
+
+        // A disc is a triangle fan - batched with the rest of the paint.
+        cull = false;
+        const int segs = 16;
+        var white = new Color(1f, 1f, 1f);
+        foreach (var (c, r) in _crossingDots)
+        {
+            if (!verts.TryGetValue((2f * r, white, false, false), out var list))
+            {
+                list = new List<Vector3>();
+                verts[(2f * r, white, false, false)] = list;
+            }
+            for (int i = 0; i < segs; i++)
+            {
+                float a0 = Mathf.Tau * i / segs, a1 = Mathf.Tau * (i + 1) / segs;
+                list.Add(new Vector3(c.X, c.Y, 0));
+                list.Add(new Vector3(c.X + r * Mathf.Cos(a0), c.Y + r * Mathf.Sin(a0), 0));
+                list.Add(new Vector3(c.X + r * Mathf.Cos(a1), c.Y + r * Mathf.Sin(a1), 0));
+            }
         }
 
         foreach (var kv in verts)
@@ -955,24 +966,23 @@ public partial class MapRenderer : Node2D
             var mi = new MeshInstance2D { Mesh = mesh,
                                           ZIndex = kv.Key.elev ? 21 : 2 };
             _markLayer.AddChild(mi);
-            _fadedDyn.Add((mi, kv.Key.refM));
-        }
-
-        float rM = dotPx / s;
-        foreach (var c in _junctionCenters)
-        {
-            var pts = new List<Vector2>(24);
-            for (int i = 0; i < 24; i++)
-            {
-                float a = Mathf.Tau * i / 24f;
-                pts.Add(c + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * rM);
-            }
-            _dotLayer.AddChild(new Polygon2D { Polygon = pts.ToArray(),
-                                               Color = new Color(1, 1, 1), ZIndex = 3 });
+            if (kv.Key.cull) _farMarkings.Add(mi);
         }
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /// <summary>The port a REST URL names ("http://127.0.0.1:5001/map" ->
+    /// 5001); 0 when it does not name one.</summary>
+    private static int PortOfUrl(string url)
+    {
+        var at = url.LastIndexOf(':');
+        if (at < 0) return 0;
+        var n = 0;
+        for (int i = at + 1; i < url.Length && url[i] >= '0' && url[i] <= '9'; i++)
+            n = n * 10 + (url[i] - '0');
+        return n;
+    }
 
     static Color FromRgb(JsonElement el) => new(
         el[0].GetSingle() / 255f, el[1].GetSingle() / 255f, el[2].GetSingle() / 255f);
@@ -1003,19 +1013,62 @@ public partial class MapRenderer : Node2D
         return poly;
     }
 
-    /// <summary>pygame's dash_alpha: fully opaque at >= 4 px dash length,
-    /// fully transparent at <= 1 px, linear between.</summary>
-    static float DashAlpha(float refM, float pxPerMetre)
+    /// <summary>Fills every road ribbon as triangles in ONE mesh. A strip is
+    /// vertex-paired, so quad i is (left[i], left[i+1], right[i+1], right[i])
+    /// — no triangulation of a possibly self-crossing outline is needed, a
+    /// figure-8 crossing is simply two quads of the same colour on top of
+    /// each other, which is what it looks like from above.</summary>
+    private void AddRoadStrips(JsonElement stripsEl, Color color)
     {
-        float d = refM * pxPerMetre;
-        return Mathf.Clamp((d - 1f) / 3f, 0f, 1f);
+        var mesh = new ImmediateMesh();
+        mesh.SurfaceBegin(Mesh.PrimitiveType.Triangles);
+        mesh.SurfaceSetColor(color);
+        int quads = 0;
+        foreach (var s in stripsEl.EnumerateArray())
+        {
+            var left = Pts(s.GetProperty("left"));
+            var right = Pts(s.GetProperty("right"));
+            if (left.Count != right.Count || left.Count < 2) continue;
+            for (int i = 0; i + 1 < left.Count; i++)
+            {
+                Vector2 a = left[i], b = left[i + 1], c = right[i + 1], d = right[i];
+                mesh.SurfaceAddVertex(new(a.X, a.Y, 0));
+                mesh.SurfaceAddVertex(new(b.X, b.Y, 0));
+                mesh.SurfaceAddVertex(new(c.X, c.Y, 0));
+                mesh.SurfaceAddVertex(new(a.X, a.Y, 0));
+                mesh.SurfaceAddVertex(new(c.X, c.Y, 0));
+                mesh.SurfaceAddVertex(new(d.X, d.Y, 0));
+                quads += 1;
+            }
+        }
+        mesh.SurfaceEnd();
+        if (quads == 0) return;
+        _world.AddChild(new MeshInstance2D { Mesh = mesh, ZIndex = 0 });
     }
 
-    delegate void QuadFn(Color c, float w, float refM, Vector2 a, Vector2 b);
+    /// <summary>Bridge decks (z 20) sit above everything else in the world,
+    /// so painting their islands with the background cannot cover anything it
+    /// shouldn't — unlike the ground roads, which are painted as ribbons and
+    /// need no paint-out at all.</summary>
+    private void AddDeckFill(JsonElement r, Color color, int z, Color bg)
+    {
+        var pts = Pts(r.GetProperty("exterior"));
+        if (pts.Count < 3) return;
+        AddPolygon(pts, color, z);
+        if (r.TryGetProperty("holes", out var holes))
+            foreach (var h in holes.EnumerateArray())
+            {
+                var hp = Pts(h);
+                if (hp.Count >= 3) AddPolygon(hp, bg, z + 1);
+            }
+    }
+
+    delegate void QuadFn(Color c, float w, Vector2 a, Vector2 b);
 
     /// <summary>Walk a polyline at constant arc length emitting dash quads —
-    /// mirrors renderer._draw_dashed_polyline so the pattern is identical.</summary>
-    static void AddDashes(QuadFn quad, Color c, float widthM, float refM,
+    /// the dash/gap pattern comes from the sim (marking_style), so the paint
+    /// matches what the road network says.</summary>
+    static void AddDashes(QuadFn quad, Color c, float widthM,
                           List<Vector2> pts, float dashM, float gapM)
     {
         float period = dashM + gapM;
@@ -1035,7 +1088,7 @@ public partial class MapRenderer : Node2D
                 float remaining = drawing ? dashM - phase : period - phase;
                 float step = Mathf.Min(remaining, segLen - traveled);
                 if (drawing)
-                    quad(c, widthM, refM, a + u * traveled, a + u * (traveled + step));
+                    quad(c, widthM, a + u * traveled, a + u * (traveled + step));
                 traveled += step;
                 intoPeriod += step;
             }
@@ -1044,16 +1097,24 @@ public partial class MapRenderer : Node2D
 
     // ---------------------------------------------------------------- camera
 
-    // Parity with pygame: config.MIN_ZOOM/MAX_ZOOM × PPPM=2 → 0.24–32 px/m.
+    // Camera zoom limits in px/m (the client's own view, not the sim's):
+    // 0.24 px/m shows ~5 km across a 1280 px window, 64 px/m shows ~20 m.
     const float ZoomMin = 0.24f;
-    const float ZoomMax = 64f;   // = 32x in the label (pygame units)
-    // Edge line width in METRES: same as the lane centreline. No pixel
-    // floor - it scales purely with zoom (user decision).
+    const float ZoomMax = 64f;
+    // Paint widths in METRES: a kerb line, a centreline and a tyre track are
+    // all ~15 cm of paint, so they scale with the view instead of being
+    // floored to screen pixels.
     const float EdgeLineWidthM = 0.15f;
-    // Edge lines are hidden entirely below this zoom (6 px/m = 3x in
-    // the label) instead of fading out as sub-pixel noise (user decision).
+    const float TrailWidthM = 0.15f;
+    // Edge lines are hidden entirely below this zoom (6 px/m) instead of
+    // turning into sub-pixel noise (user decision).
     const float EdgeLineMinZoom = 6.0f;
-    const float ZoomStep = 1.15f; // config.ZOOM_STEP
+    /// <summary>Centre and halt lines stay longer than the kerb lines: the
+    /// user asked for them to survive further out, so they switch off at a
+    /// LOWER zoom than the road's outer lines (6 px/m) - only when the road
+    /// itself is already tiny. Below this they would be sub-pixel noise.</summary>
+    const float MarkingMinZoom = 2.0f;
+    const float ZoomStep = 1.15f;   // wheel/pinch step per notch
 
     bool _dragging;
     Vector2 _dragStartMouse, _dragStartCam;
@@ -1071,8 +1132,8 @@ public partial class MapRenderer : Node2D
             // reflexively - closing the window is how you quit.)
             if (k.Pressed && !k.Echo)
             {
-                // Pan keys pause the mirror temporarily (pygame parity: it
-                // resumes once the input stops) - F releases for real.
+                // Pan keys pause the follow temporarily - it resumes once
+                // the input stops. F releases the car for real.
                 if (k.Keycode is Key.A or Key.D or Key.W or Key.S or
                     Key.Left or Key.Right or Key.Up or Key.Down)
                     _lastManualMs = Time.GetTicksMsec();
@@ -1150,16 +1211,15 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
-    /// <summary>Top-left readout, pygame parity: 'zoom N.Nx (X m wide)'.
-    /// The number is in PYGAME zoom units (px/m divided by PPPM=2), so the
-    /// same view shows the same value in both frontends.</summary>
+    /// <summary>Top-left readout: the view width in metres and the camera
+    /// zoom in px/m (Godot world units are metres, so Camera2D.zoom IS
+    /// px/m).</summary>
     void UpdateZoomLabel()
     {
         if (_zoomLabel == null) return;
         float g = _cam.Zoom.X;                       // px per metre
-        float zPygame = g / 2f;                      // PPPM = 2
         float viewWm = GetViewport().GetVisibleRect().Size.X / g;
-        _zoomLabel.Text = $"zoom {zPygame:F1}x  ({viewWm:F0} m wide)";
+        _zoomLabel.Text = $"view {viewWm:F0} m wide  ({g:F1} px/m)";
     }
 
     void ZoomBy(float f, Vector2? at = null)
@@ -1171,9 +1231,9 @@ public partial class MapRenderer : Node2D
         Vector2 s = at ?? vp / 2f;
         _cam.GlobalPosition += (s - vp / 2f) * (1f / z0 - 1f / z1);
         _cam.Zoom = new Vector2(z1, z1);
-        // While following, the mirror must keep THIS zoom (pygame: wheel
-        // zoom changes the shared camera and follow continues).
-        if (_followUid.HasValue) { _localZoom = z1; _lastManualMs = Time.GetTicksMsec(); }
+        // While following, a wheel-zoom counts as manual control: the follow
+        // resumes once the input stops (the zoom itself is never overridden).
+        if (_followUid.HasValue) _lastManualMs = Time.GetTicksMsec();
     }
 
     public override void _Process(double delta)
@@ -1219,22 +1279,20 @@ public partial class MapRenderer : Node2D
         // Breadcrumb trails + test flags (rebuild on data/zoom change).
         UpdateOverlays();
 
-        // Rebuild markings/dots only when the pixel floor changes.
-        RebuildDynamic();
-
-        // Apply pygame's low-zoom fade (cheap: a handful of modulates).
+        // Kerb lines are 0.15 m of paint: below ~1.5x they are sub-pixel and
+        // would only shimmer, so they switch off instead of fading in and out.
         float s = _cam.Zoom.X;
-
-        // Edge lines: hard cut-off below 1.5x instead of sub-pixel fade.
         bool edgeVisible = s >= EdgeLineMinZoom;
         foreach (var l in _edgeLines)
             l.Visible = edgeVisible;
         foreach (var l in _bridgeEdges)
             l.Visible = edgeVisible;
-        foreach (var kv in _fadedStatic)
-            kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
-        foreach (var kv in _fadedDyn)
-            kv.ci.Modulate = new Color(1, 1, 1, DashAlpha(kv.refM, s));
+        // Centre and halt lines keep going where the kerb lines have gone:
+        // they switch off only below MarkingMinZoom, further out than the
+        // road's outer lines (user decision).
+        bool paintVisible = s >= MarkingMinZoom;
+        foreach (var m in _farMarkings)
+            m.Visible = paintVisible;
 
         // Minimap only changes when the camera moves.
         if (_minimap != null &&
@@ -1320,6 +1378,13 @@ public partial class MapRenderer : Node2D
             double prevMax = _lastMaxTime;
             _lastMaxTime = Math.Max(_lastMaxTime, t);
 
+            // The host's pacing switch: how much sim time runs per wall
+            // second (--warp N; --fast announces 0 = "measure it"). The
+            // render clock below scales its bounds by it, so a warped run
+            // still interpolates instead of starving to hold-and-jump.
+            if (root.TryGetProperty("time_warp", out var twEl))
+                _timeWarp = Math.Max(0.0, twEl.GetDouble());
+
             // Snap only on the very first arrival or a big discontinuity
             // (restart/teleport).
             bool newFrame = t > prevMax;
@@ -1329,7 +1394,7 @@ public partial class MapRenderer : Node2D
                 _simNow = t;
                 _rateRefSim = t;
                 _rateRefWall = Time.GetTicksMsec() / 1000.0;
-                _simRate = 1.0;
+                _simRate = _timeWarp >= 1.0 ? _timeWarp : 1.0;
             }
 
             var seen = new HashSet<long>();
@@ -1440,23 +1505,8 @@ public partial class MapRenderer : Node2D
                     root.GetProperty("speed_kmh").GetSingle(),
                     root.GetProperty("level").GetInt32());
 
-            // Sim camera: follow mode mirrors it exactly (pygame parity -
-            // the lerp follow, snap-on-teleport and zoom live in the sim).
-            if (root.TryGetProperty("camera_x", out var cx) &&
-                root.TryGetProperty("camera_y", out var cy) &&
-                root.TryGetProperty("camera_zoom", out var cz))
-            {
-                _simCamX = cx.GetSingle();
-                _simCamY = cy.GetSingle();
-                _simCamZoom = cz.GetSingle();
-                _simCamValid = true;
-                if (newFrame)
-                {
-                    _camBuf.Add((t, _simCamX, _simCamY, _simCamZoom));
-                    while (_camBuf.Count > 2 && _camBuf[0].T < t - 1.0)
-                        _camBuf.RemoveAt(0);
-                }
-            }
+            // The view is the client's own Camera2D - /state carries no
+            // camera state (see FollowCamera()).
 
             // Blinker state: the multi-car shape carries it per car above;
             // the legacy single-car form uses the top-level fields.
@@ -1538,7 +1588,6 @@ public partial class MapRenderer : Node2D
         _simNow = double.NegativeInfinity;
         _rateRefSim = -1;
         _simRate = 1.0;
-        _camBuf.Clear();
         _renderTarget = float.NegativeInfinity;
     }
 
@@ -1565,7 +1614,7 @@ public partial class MapRenderer : Node2D
             Scale = new Vector2(size.W / tex.GetSize().X, size.L / tex.GetSize().Y),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
-        // Blinker corner lights (pygame parity): one at each body corner,
+        // Blinker corner lights: one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
         // centre; orange, 0.5 s blink period.
         // Corners follow the SPRITE's physical size, not the sedan box,
@@ -1653,14 +1702,17 @@ public partial class MapRenderer : Node2D
         double frameDt = Math.Max(0, nowWall - _lastFrameWall);
         if (_simNow > double.NegativeInfinity)
         {
+            // Rate bounds scale with the announced warp; an unbounded run
+            // (--fast) is measured like any other stream.
+            double warpCap = Math.Max(1.0, _timeWarp);
             if (nowWall - _rateRefWall >= 1.0 && _rateRefSim > 0)
             {
                 double r = (_lastMaxTime - _rateRefSim) / (nowWall - _rateRefWall);
-                if (r > 0.05 && r < 2.0) _simRate = r;   // else keep old
+                if (r > 0.05 && r < 2.0 * warpCap) _simRate = r;   // else keep old
                 _rateRefSim = _lastMaxTime;
                 _rateRefWall = nowWall;
             }
-            _simNow += frameDt * Mathf.Clamp(_simRate, 0.0, 1.5);
+            _simNow += frameDt * Mathf.Clamp(_simRate, 0.0, 1.5 * warpCap);
             // Re-sync the clock to the data (measured 2026-09-06): a
             // one-off offset - e.g. the sim stutters while spawning 150
             // cars and the free-running clock races ~400 ms ahead - used
@@ -1677,7 +1729,7 @@ public partial class MapRenderer : Node2D
             {
                 double desired = _lastMaxTime + RenderDelaySec;
                 float err = (float)(desired - _simNow);
-                float maxStep = (float)(frameDt * 3.0);
+                float maxStep = (float)(frameDt * 3.0 * warpCap);
                 _simNow += Mathf.Clamp(err * Math.Min(1.0f, frameDt * 3.0),
                                        -maxStep, maxStep);
             }
@@ -1831,7 +1883,7 @@ public partial class MapRenderer : Node2D
             _minimap.QueueRedraw();
         }
 
-        // Test number under the speed readout (pygame parity).
+        // Test number under the speed readout.
         if (_testLabel != null && _lastTestText != null)
         {
             bool show = _lastTestText.Length > 0;
@@ -1981,42 +2033,29 @@ public partial class MapRenderer : Node2D
         _infoPanel.Size = new Vector2(vp.Size.X - 2 * m, FooterHeight);
     }
 
-    /// <summary>Follow mode mirrors the SIM's own camera (pygame parity:
-    /// same lerp follow, snap on teleport, zoom level). Free after any
-    /// manual pan/zoom; Tab/F rebind.</summary>
+    /// <summary>Follow mode: the Camera2D tracks the node of the bound car.
+    /// The engine's position smoothing gives the follow lag; a rebind (Tab)
+    /// or a teleported car resets that smoothing instead of gliding across
+    /// the map. F releases the bound car for good - the view then stays
+    /// wherever the user panned it.</summary>
     void FollowCamera()
     {
         if (_followUid == null && _autoFollow && _carNodes.Count > 0)
             _followUid = _carNodes.Keys.Min();
-        // Manual input pauses the mirror for 500 ms (pygame: follow
-        // resumes as soon as the drag ends).
-        bool holding = Time.GetTicksMsec() - _lastManualMs < 500;
-        if (_followUid.HasValue && _simCamValid && !holding)
-        {
-            // Interpolate the camera like the car (same render target):
-            // copying the newest packet value made the view step with
-            // every /state response.
-            float cxp, cyp, czm;
-            var cb = _camBuf;
-            if (cb.Count >= 2 && _renderTarget > cb[0].T &&
-                _renderTarget < cb[^1].T + 0.2)
-            {
-                int i = cb.Count - 2;
-                while (i > 0 && cb[i].T > _renderTarget) i--;
-                var a = cb[i]; var b = cb[i + 1];
-                float f = (float)((_renderTarget - a.T) / (b.T - a.T));
-                // f > 1 = extrapolate (same as the car: no freeze-stutter)
-                cxp = Mathf.Lerp(a.X, b.X, f);
-                cyp = Mathf.Lerp(a.Y, b.Y, f);
-                czm = Mathf.Lerp(a.Zoom, b.Zoom, f);
-            }
-            else { cxp = _simCamX; cyp = _simCamY; czm = _simCamZoom; }
-            _cam.GlobalPosition = new Vector2(cxp / Ppm, -cyp / Ppm);
-            float z = _localZoom > 0
-                ? Mathf.Clamp(_localZoom, ZoomMin, ZoomMax)
-                : Mathf.Clamp(czm * Ppm, ZoomMin, ZoomMax);
-            _cam.Zoom = new Vector2(z, z);
-        }
+        if (_followUid == null) return;   // unfollowed: manual view only
+        if (!_carNodes.TryGetValue(_followUid.Value, out var node))
+        { _followUid = null; return; }   // car gone
+        // Manual control (drag, pan keys, wheel) wins while it is held.
+        if (Time.GetTicksMsec() - _lastManualMs < 500) return;
+        // The car node already sits at its interpolated render position, so
+        // the camera just points at it.
+        var target = node.GlobalPosition;
+        // A jump bigger than a real car could drive in one frame (a rebind,
+        // a teleport): no glide across the map - reset the smoothing.
+        if ((target - _lastFollowTarget).Length() > 10f)
+            _cam.ResetSmoothing();
+        _cam.GlobalPosition = target;
+        _lastFollowTarget = target;
     }
 
     static float LerpAngleDeg(float a, float b, float f)
@@ -2029,7 +2068,7 @@ public partial class MapRenderer : Node2D
         return a + d * f;
     }
 
-    // --- Breadcrumb trails + test flags (pygame parity) ---
+    // --- Breadcrumb trails + test flags ---
 
     void UpdateOverlays()
     {
@@ -2156,7 +2195,7 @@ public partial class MapRenderer : Node2D
             // Update in place (the trail grows ~10x/s; recreating the node
             // every time double-frees it - QueueFree is deferred).
             line.Points = tracks[i];
-            line.Width = 2f / _cam.Zoom.X;   // pygame: fixed 2 screen px
+            line.Width = TrailWidthM;   // a tyre track is paint, not a screen px
         }
     }
 
@@ -2205,7 +2244,7 @@ public partial class MapRenderer : Node2D
         {
             Points = new[] { b, p1, p2, ap },
             DefaultColor = outline,
-            Width = 2f / _cam.Zoom.X,   // pygame: fixed 2 screen px
+            Width = TrailWidthM,
             Closed = true,
             ZIndex = 3,
         };
@@ -2444,7 +2483,7 @@ public partial class MapRenderer : Node2D
 }
 
 /// <summary>
-/// Top-right overview map, pygame parity (renderer.draw_minimap): 180 px
+/// Top-right overview map: a 180 px box
 /// box, dark-green background, gray road network, red car dot (M2), yellow
 /// viewport rectangle. Lives on a CanvasLayer so it ignores the camera.
 /// All input is in SIM coords (x east, y north); the y-flip happens here.

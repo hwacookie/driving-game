@@ -62,9 +62,7 @@ Returns current game state:
   },
   "trail_enabled": false,
   "validator_enabled": true,
-  "camera_x": 1234.5,
-  "camera_y": 2345.6,
-  "camera_zoom": 2.0
+  "time_warp": 1.0
 }
 ```
 
@@ -76,12 +74,19 @@ the e2e suite waits for on reverse-in scenarios, because a back-in park
 deliberately crosses the end flag to stage the reverse (see
 `docs/TESTING.md` §3).
 
+**Time warp (`--warp N` / `--fast` on the host):** `time_warp` says how
+much SIM time runs per wall second (1.0 = real time, `0.0` = `--fast`,
+which is unbounded and must be measured). The physics step never changes
+- the host just runs more 60 Hz steps per wall second - so every consumer
+paces on `time` and scales its bounds by `time_warp`. The Godot client
+and the e2e suite do; the visible window at a high warp is a sped-up
+playback, not a smooth one.
+
 **Multi-car (docs/MULTI_CAR_PLAN.md):** several cars can be on the map
 at once. The top-level fields above always describe the PRIMARY car -
-the most recently spawned one, which the sim camera follows - so
-single-car clients keep working unchanged. ALL cars are additionally
-exported in a `cars` array (empty when no car is on the map); the Godot
-frontend prefers that array:
+the most recently spawned one - so single-car clients keep working
+unchanged. ALL cars are additionally exported in a `cars` array (empty
+when no car is on the map); the Godot frontend prefers that array:
 ```json
 "cars": [
   {"car_uid": 1, "x": ..., "y": ..., "heading": ..., "speed_kmh": ...,
@@ -149,7 +154,9 @@ Content-Type: application/json
 Default behavior is REPLACE: all current cars are removed and one fresh
 car appears (the e2e suite and cockpit rely on this). With
 `"add": true` a new car joins the existing ones - each teleport spawns a
-new uid, and the sim camera + primary-car state switch to the newest.
+new uid, and the primary-car state switches to the newest. The view is
+not part of the API at all: the client owns its `Camera2D` and follows
+whichever car it is bound to (its own `--center`/`--zoom` and Tab/F keys).
 Named start points come from `GET /start_points` (synthetic test maps).
 
 **Command ordering:** all command endpoints (`/teleport`, `/cars`,

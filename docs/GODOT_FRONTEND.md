@@ -127,9 +127,12 @@ problem**, not beforehand.
 
 ### Phase 1 — frontend swap (behavior-frozen)
 
-Godot renders the existing world in **2D top-down with exact parity to
-pygame**; the AI driver stays inside the simulator. Zero behavior change,
-e2e stays green. Parity against the pygame output is the acceptance test.
+Godot renders the existing world in **2D top-down**; the AI driver stays
+inside the simulator. Zero behavior change, e2e stays green.
+
+Parity against the retired pygame frontend was only the transition-phase
+acceptance test; it is **not** a requirement any more - the e2e suite and
+the visible Godot window are the standard.
 
 - **M1** — DONE: `GET /map` + Godot renders the static map (roads,
   markings, junction dots, colors per current config)

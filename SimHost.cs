@@ -68,21 +68,11 @@ public partial class SimHost : Node
         var obstacleMgr = new ObstacleManager(_mapName ?? "kleinmachnow");
         Engine = new SimEngine(network, obstacleMgr);
 
-        // --- Spawn + camera (mirror of Program.cs) --------------------------
-        if (_mapName is not null)
-        {
-            // Test maps do NOT auto-spawn a car: the e2e suite teleports its
-            // own car in (same as the console host). Open at driving zoom.
-            Engine.Camera.Zoom = 7.0;
-            Engine.Camera.SnapTo(network.WorldWidth / 2, network.WorldHeight / 2,
-                                 network.WorldWidth, network.WorldHeight);
-        }
-        else
-        {
-            var initialCar = Engine.SpawnInitialCar(null);
-            Engine.Camera.SnapTo(initialCar.X, initialCar.Y,
-                                 network.WorldWidth, network.WorldHeight);
-        }
+        // --- Spawn (the view is the client's own Camera2D) -----------------
+        // Test maps do NOT auto-spawn a car: the e2e suite teleports its
+        // own car in (same as the console host).
+        if (_mapName == null)
+            Engine.SpawnInitialCar(null);
         GD.Print("Navigation model: BICYCLE (kinematic, free particle)");
 
         // --- Embedded REST API (external test injection) --------------------

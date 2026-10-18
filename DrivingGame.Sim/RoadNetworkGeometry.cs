@@ -123,6 +123,181 @@ public static class RoadNetworkGeometry
         return chains;
     }
 
+    /// <summary>A merged chain as a smooth curve THROUGH its shape points:
+    /// centripetal Catmull-Rom resampled every 0.5 m - the same spline the
+    /// width-varying ribbons already use. This replaces the fixed
+    /// ROAD_CORNER_RADIUS_M fillet, whose curvature came from a constant: a
+    /// gentle chain (a figure-8 lobe sampled by 30 m chords, 22 deg at each
+    /// node) kinked 0.12 m at every node instead of curving at its own
+    /// ~115 m radius.
+    ///
+    /// A bend sharper than MAX_CURVE_TURN_DEG is NOT a sampled curve but a
+    /// real corner, and keeps the fixed-radius fillet: a pure spline there
+    /// interpolates with tangents blended 45 deg off the legs and swung
+    /// 18.5 m outside the test map's 90 deg corner (250 m legs), which the
+    /// RightTurn unit test caught. The rule is therefore: many small bends
+    /// = recover the curve, one big bend = fillet the corner.
+    ///
+    /// Closed chains (a loop: first point == last) are continued past the
+    /// seam with the loop's own next nodes and cut back where the loop
+    /// closes, so the curve stays continuous there - but only when the seam
+    /// is itself a gentle bend: a seam that is a real corner (a figure-8
+    /// lobe closing at its crossing node) keeps the rule above and stays
+    /// sharp. Open chains keep their end tangents along the first/last
+    /// chord (SmoothCurve's virtual knots), so a chain still meets a
+    /// junction exactly where the network says it does.</summary>
+    public static List<(double X, double Y)> SmoothChain(
+        List<(double X, double Y)> coords, double pppm)
+    {
+        if (coords.Count < 3)
+            return new List<(double X, double Y)>(coords);
+
+        // Real corners: a bend sharper than this is not a sampled curve.
+        const double maxCurveTurnRad = 30.0 * Math.PI / 180.0;
+        var hard = new List<int>();
+        for (var i = 1; i < coords.Count - 1; i++)
+        {
+            var gap = CornerGap(coords, i);
+            if (gap >= 0.0 && gap < Math.PI - maxCurveTurnRad) hard.Add(i);
+        }
+
+        if (hard.Count == 0)
+        {
+            var closed = Math.Hypot(coords[0].X - coords[^1].X,
+                                    coords[0].Y - coords[^1].Y) < 1e-6;
+            // A closed chain's seam is a vertex like any other, so it gets
+            // the same rule. A lobe of a figure-8 closes AT its crossing
+            // node: an ~86 deg turn there. Continued through the loop's own
+            // nodes, the spline blends that corner and hooks the arriving
+            // arm 29 deg / 3.2 m off its chord while the leaving arm stays
+            // exact - two asymmetric arms, and the crossing reads as a
+            // pinch. A real corner at the seam stays sharp: the chain ends
+            // along its own chords, which is what the network says. Only a
+            // gentle seam (a roundabout ring, where the seam is an
+            // arbitrary point on a curve) is worth continuing through.
+            var seamGap = SeamGap(coords);
+            if (closed && seamGap >= 0.0 && seamGap < Math.PI - maxCurveTurnRad)
+                return SplineThrough(coords, pppm);
+
+            var ctrl = new List<(double X, double Y)>(coords);
+            if (closed)
+                for (var i = 1; i <= 2 && i < coords.Count - 1; i++)
+                    ctrl.Add(coords[i]);   // past the seam: the loop's own next nodes
+            return SplineThrough(ctrl, pppm, closed ? coords[0] : null);
+        }
+
+        // Mixed chain: smooth the runs between corners, fillet the corners.
+        var chain = new List<(double X, double Y)>();
+        var hasResume = false;
+        var resume = default((double X, double Y));
+        var runStart = 0;
+        foreach (var h in hard)
+        {
+            var run = new List<(double X, double Y)>();
+            if (hasResume) run.Add(resume);
+            for (var i = runStart; i < h; i++) run.Add(coords[i]);
+
+            var gap = CornerGap(coords, h);
+            SmoothGeometry.CornerFilletResult? fillet = null;
+            if (gap >= 0.0)
+            {
+                // One arc vertex per sample step, so a fillet is never
+                // coarser than the chain around it.
+                var arcSteps = Math.Max(8,
+                    (int)(Config.ROAD_CORNER_RADIUS_M * (Math.PI - gap) / 0.5));
+                fillet = SmoothGeometry.CornerFillet(
+                    coords[h - 1], coords[h], coords[h + 1],
+                    Config.ROAD_CORNER_RADIUS_M * pppm, arcSteps);
+            }
+            if (fillet is null)
+            {
+                // Degenerate (doubled back): keep the vertex, no arc to cut.
+                run.Add(coords[h]);
+                chain.AddRange(SplineThrough(run, pppm));
+                hasResume = false;
+                runStart = h + 1;
+                continue;
+            }
+            run.Add(fillet.T1);          // the arc takes over at the tangent
+            chain.AddRange(SplineThrough(run, pppm));
+            chain.AddRange(fillet.Arc);
+            resume = fillet.T2;
+            hasResume = true;
+            runStart = h + 1;
+        }
+        var tail = new List<(double X, double Y)>();
+        if (hasResume) tail.Add(resume);
+        for (var i = runStart; i < coords.Count; i++) tail.Add(coords[i]);
+        chain.AddRange(SplineThrough(tail, pppm));
+        return chain;
+    }
+
+    /// <summary>The turn at a closed chain's seam (coords[0] == coords[^1]),
+    /// between its last leg and its first leg — the vertex the chain
+    /// closes on, which CornerGap cannot see because it is both ends.</summary>
+    private static double SeamGap(List<(double X, double Y)> coords) =>
+        CornerGap(new List<(double X, double Y)>
+            { coords[^2], coords[0], coords[1] }, 1);
+
+    /// <summary>Angle (radians) between the two edges at coords[i], both
+    /// pointing away from the vertex: pi = straight through, 0 = doubled
+    /// back. -1 for a degenerate vertex.</summary>
+    private static double CornerGap(List<(double X, double Y)> coords, int i)
+    {
+        var (px, py) = coords[i - 1];
+        var (vx, vy) = coords[i];
+        var (nx, ny) = coords[i + 1];
+        double ax = px - vx, ay = py - vy, bx = nx - vx, by = ny - vy;
+        double aLen = Math.Hypot(ax, ay), bLen = Math.Hypot(bx, by);
+        if (aLen < 1e-9 || bLen < 1e-9) return -1.0;
+        double dot = Math.Clamp((ax * bx + ay * by) / (aLen * bLen), -1.0, 1.0);
+        return Math.Acos(dot);
+    }
+
+    /// <summary>The chain as a Catmull-Rom through `ctrl`, resampled every
+    /// 0.5 m. `seamTo` (a closed chain's start point) cuts the output at the
+    /// SECOND pass through that point instead of the spline's end.</summary>
+    private static List<(double X, double Y)> SplineThrough(
+        List<(double X, double Y)> ctrl, double pppm, (double X, double Y)? seamTo = null)
+    {
+        if (ctrl.Count < 2)
+            return new List<(double X, double Y)>(ctrl);
+        var curve = new SmoothGeometry.SmoothCurve(ctrl, pppm);
+        if (curve.Total <= 0)
+            return new List<(double X, double Y)>(ctrl);
+
+        var endS = curve.Total;
+        if (seamTo is not null)
+        {
+            // Arc length of the SECOND pass through the seam point: coarse
+            // scan of the back half, then a local refine.
+            var (sx, sy) = seamTo.Value;
+            double bestS = curve.Total * 0.5, bestD2 = double.PositiveInfinity;
+            for (var k = 0; k <= 400; k++)
+            {
+                var s = curve.Total * (0.5 + 0.5 * k / 400.0);
+                var (x, y) = curve.PointAt(s);
+                var d2 = (x - sx) * (x - sx) + (y - sy) * (y - sy);
+                if (d2 < bestD2) { bestD2 = d2; bestS = s; }
+            }
+            for (var k = -20; k <= 20; k++)
+            {
+                var s = Math.Max(0.0, Math.Min(curve.Total, bestS + k * 0.05));
+                var (x, y) = curve.PointAt(s);
+                var d2 = (x - sx) * (x - sx) + (y - sy) * (y - sy);
+                if (d2 < bestD2) { bestD2 = d2; bestS = s; }
+            }
+            endS = bestS;
+        }
+
+        const double sampleM = 0.5;   // same arc-length step as the ribbons
+        var n = Math.Max(2, (int)(endS / sampleM) + 1);
+        var pts = new List<(double X, double Y)>(n);
+        for (var i = 0; i < n; i++)
+            pts.Add(curve.PointAt(endS * i / (n - 1.0)));
+        return pts;
+    }
+
     /// <summary>Group segments by (highway, width), merge contiguous ones
     /// through plain degree-2 nodes, and round each merged line's own corners.
     /// Shared by BuildRoadPolygons (buffers these into fillable polygons) and
@@ -139,7 +314,6 @@ public static class RoadNetworkGeometry
             HashSet<int>? excludeSegs = null)
     {
         double pppm = Config.PIXELS_PER_METER;
-        double cornerRadiusPx = Config.ROAD_CORNER_RADIUS_M * pppm;
 
         var groups = new Dictionary<(string, double), List<RoadSegment>>();
         for (int si = 0; si < network.Segments.Count; si++)
@@ -187,7 +361,7 @@ public static class RoadNetworkGeometry
                         .Select(c => (c.X, c.Y)).ToList())
                     .ToList();
             }
-            result[key] = raw.Select(coords => RoundPolylineCorners(coords, cornerRadiusPx)).ToList();
+            result[key] = raw.Select(coords => SmoothChain(coords, pppm)).ToList();
         }
         return result;
     }
@@ -242,27 +416,385 @@ public static class RoadNetworkGeometry
     /// <summary>(start_trim, end_trim) in pixels for PAINTED lane markings:
     /// where a line's end sits at a real junction, the paint stops half the
     /// WIDEST arm's width plus CENTERLINE_JUNCTION_GAP_M before the node centre.</summary>
+    /// <summary>The mouth of a junction per approach: the fillet tangent
+    /// points that sit on that approach's two road edges. A normal approach
+    /// gets two of them - one from each adjacent corner - and the line
+    /// through them is exactly where a stop line runs across the
+    /// carriageway, and how far the centreline paint has to back off. Keyed
+    /// by (node, segment index leading into it), built from the same
+    /// SmoothedNetwork.junction_fillets that paint the corners, so the
+    /// traffic rule and the tarmac cannot disagree.</summary>
+    public static Dictionary<(string Node, int SegIdx), List<(double X, double Y)>>
+        BuildCrossingMouths(RoadNetwork network)
+    {
+        var smNet = SmoothGeometry.For(network);
+        var result = new Dictionary<(string, int), List<(double X, double Y)>>();
+        void Put(string node, int seg, (double X, double Y) p)
+        {
+            if (seg < 0 || seg >= network.Segments.Count) return;
+            if (!result.TryGetValue((node, seg), out var l)) result[(node, seg)] = l = new();
+            l.Add(p);
+        }
+        foreach (var f in smNet.JunctionFillets)
+        {
+            if (f.Arc.Count < 2) continue;
+            // The arc starts at the tangent point on SegA's edge and ends on
+            // SegB's.
+            Put(f.Node, f.SegA, f.Arc[0]);
+            Put(f.Node, f.SegB, f.Arc[^1]);
+        }
+        return result;
+    }
+
+    /// <summary>(start_trim, end_trim) in pixels for PAINTED lane markings:
+    /// where a line's end sits at a real junction, the paint stops half the
+    /// WIDEST arm's width plus CENTERLINE_JUNCTION_GAP_M before the node
+    /// centre - further still when the crossing is signed, because a stop
+    /// line is painted at the mouth of the approach and paint belongs
+    /// behind it.</summary>
     public static (double Start, double End) JunctionMarkingTrimPx(RoadNetwork network,
         List<(double X, double Y)> coords)
     {
         double pppm = Config.PIXELS_PER_METER;
+        var mouths = network.GetCrossingMouths();
 
-        double GapAt(double px, double py)
+        double GapAt(double px, double py, double dirx, double diry)
         {
             foreach (var (nid, nxy) in network.Nodes)
             {
                 if (network.NodeDegree.GetValueOrDefault(nid, 0) < 3) continue;
-                if ((nxy.X - px) * (nxy.X - px) + (nxy.Y - py) * (nxy.Y - py) <= Math.Pow(0.5 * pppm, 2))
+                if ((nxy.X - px) * (nxy.X - px) + (nxy.Y - py) * (nxy.Y - py) > Math.Pow(0.5 * pppm, 2))
+                    continue;
+                var connected = network.GetConnectedSegments(nid);
+                double widest = connected.Max(i => network.Segments[i].Width);
+                double gap = (widest / 2.0 + Config.CENTERLINE_JUNCTION_GAP_M) * pppm;
+
+                // Which arm of the junction this line belongs to: the
+                // connected segment pointing most along the line's own way
+                // out of the node.
+                int bestSeg = -1; double bestDot = 0.2;
+                foreach (int i in connected)
                 {
-                    var connected = network.GetConnectedSegments(nid);
-                    double widest = connected.Max(i => network.Segments[i].Width);
-                    return (widest / 2.0 + Config.CENTERLINE_JUNCTION_GAP_M) * pppm;
+                    var s = network.Segments[i];
+                    double ax = s.X1 - nxy.X, ay = s.Y1 - nxy.Y;
+                    if (Math.Hypot(ax, ay) < 1e-6) { ax = s.X2 - nxy.X; ay = s.Y2 - nxy.Y; }
+                    double l = Math.Max(Math.Hypot(ax, ay), 1e-9);
+                    double dot = ax / l * dirx + ay / l * diry;
+                    if (dot > bestDot) { bestDot = dot; bestSeg = i; }
                 }
+                if (bestSeg >= 0 && mouths.TryGetValue((nid, bestSeg), out var pts))
+                    foreach (var (tx, ty) in pts)
+                        gap = Math.Max(gap, (tx - nxy.X) * dirx + (ty - nxy.Y) * diry);
+                return gap;
             }
             return 0.0;
         }
 
-        return (GapAt(coords[0].X, coords[0].Y), GapAt(coords[^1].X, coords[^1].Y));
+        if (coords.Count < 2) return (0.0, 0.0);
+        var (d0x, d0y) = Unit(coords[1].X - coords[0].X, coords[1].Y - coords[0].Y);
+        var (d1x, d1y) = Unit(coords[^2].X - coords[^1].X, coords[^2].Y - coords[^1].Y);
+        return (GapAt(coords[0].X, coords[0].Y, d0x, d0y),
+                GapAt(coords[^1].X, coords[^1].Y, d1x, d1y));
+    }
+
+    /// <summary>A point at an arc distance (px) along a polyline.</summary>
+    public static (double X, double Y) PointAtArc(
+        List<(double X, double Y)> coords, double s)
+    {
+        double acc = 0.0;
+        for (int i = 0; i < coords.Count - 1; i++)
+        {
+            var (ax, ay) = coords[i];
+            var (bx, by) = coords[i + 1];
+            double segLen = Math.Hypot(bx - ax, by - ay);
+            if (acc + segLen >= s && segLen > 0)
+            {
+                double t = (s - acc) / segLen;
+                return (ax + t * (bx - ax), ay + t * (by - ay));
+            }
+            acc += segLen;
+        }
+        return coords[^1];
+    }
+
+    /// <summary>The sub-polyline between two arc positions (px from the
+    /// start), endpoints interpolated and vertices OUTSIDE the range dropped
+    /// - unlike TrimEnds, which only shortens the ends and keeps every
+    /// interior vertex, this really cuts a line into pieces.</summary>
+    public static List<(double X, double Y)> SubArc(
+        List<(double X, double Y)> coords, double from, double to)
+    {
+        if (coords.Count < 2) return new List<(double X, double Y)>();
+        double total = 0.0;
+        for (int i = 0; i < coords.Count - 1; i++)
+            total += Math.Hypot(coords[i + 1].X - coords[i].X,
+                                coords[i + 1].Y - coords[i].Y);
+        from = Math.Max(0.0, Math.Min(from, total));
+        to = Math.Max(0.0, Math.Min(to, total));
+        if (to - from < 0.01) return new List<(double X, double Y)>();
+        if (from <= 0.0 && to >= total) return new List<(double X, double Y)>(coords);
+        var out_ = new List<(double X, double Y)> { PointAtArc(coords, from) };
+        double acc = 0.0;
+        for (int i = 1; i < coords.Count; i++)
+        {
+            acc += Math.Hypot(coords[i].X - coords[i - 1].X,
+                              coords[i].Y - coords[i - 1].Y);
+            if (acc > from && acc < to) out_.Add(coords[i]);
+        }
+        out_.Add(PointAtArc(coords, to));
+        return out_.Count >= 2 ? out_ : new List<(double X, double Y)>();
+    }
+
+    /// <summary>A centreline is not painted across a junction: cut it
+    /// wherever it passes through a real one, so every piece ENDS at the
+    /// mouth of an approach - the same place its halt line sits, or would
+    /// sit on an un-signed arm (the cut therefore does not depend on signs,
+    /// only on the paved corners). Reports which piece ends are junction
+    /// mouths, because the paint on an approach turns solid, not dashed,
+    /// on the way in. Returns (coords, solidAtStart, solidAtEnd) pieces in
+    /// line order.</summary>
+    public static List<(List<(double X, double Y)>, bool, bool)>
+        SplitCentrelineAtJunctions(RoadNetwork network, List<(double X, double Y)> coords)
+    {
+        var pieces = new List<(List<(double X, double Y)>, bool, bool)>();
+        if (coords.Count < 2) return pieces;
+        double pppm = Config.PIXELS_PER_METER;
+        var mouths = network.GetCrossingMouths();
+
+        double total = 0.0;
+        var acc = new List<double>(coords.Count);
+        for (int i = 0; i < coords.Count; i++)
+        {
+            acc.Add(total);
+            if (i + 1 < coords.Count)
+                total += Math.Hypot(coords[i + 1].X - coords[i].X,
+                                    coords[i + 1].Y - coords[i].Y);
+        }
+
+        // How far the mouth of the arm of `nid` pointing along (dirx,diry)
+        // is from the node: the halt line's distance, so the paint stops
+        // where the line does. Half the widest arm plus a margin is the
+        // fallback for a junction without painted corners; the wider of
+        // the two wins, so paint never sits inside the crossing box.
+        double MouthAt(string nid, double dirx, double diry)
+        {
+            if (!network.Nodes.TryGetValue(nid, out var nxy)) return 0.0;
+            var connected = network.GetConnectedSegments(nid);
+            double gap = connected.Max(i => network.Segments[i].Width) / 2.0 * pppm
+                         + Config.CENTERLINE_JUNCTION_GAP_M * pppm;
+            int bestSeg = -1; double bestDot = 0.2;
+            foreach (int i in connected)
+            {
+                var s = network.Segments[i];
+                double ax = s.X1 - nxy.X, ay = s.Y1 - nxy.Y;
+                if (Math.Hypot(ax, ay) < 1e-6)
+                { ax = s.X2 - nxy.X; ay = s.Y2 - nxy.Y; }
+                double l = Math.Max(Math.Hypot(ax, ay), 1e-9);
+                double dot = ax / l * dirx + ay / l * diry;
+                if (dot > bestDot) { bestDot = dot; bestSeg = i; }
+            }
+            if (bestSeg >= 0 && mouths.TryGetValue((nid, bestSeg), out var pts))
+                foreach (var (tx, ty) in pts)
+                    gap = Math.Max(gap, (tx - nxy.X) * dirx + (ty - nxy.Y) * diry);
+            return gap;
+        }
+
+        var zones = new List<(double From, double To)>();
+        // The place nearest vertex `idx` where the line crosses the mouth
+        // LINE of the arm pointing (dirx,diry) - the line perpendicular to
+        // that arm at distance `gap` from the node, where that arm's halt
+        // line is drawn. Every crossing of that line is a sign change of
+        // the projection; the one nearest the pass is the mouth that bounds
+        // this paint.
+        double MouthCross(int idx, double dirx, double diry, double gap,
+                          double nx, double ny)
+        {
+            double best = -1.0, bestDist = double.MaxValue;
+            double prev = (coords[0].X - nx) * dirx + (coords[0].Y - ny) * diry;
+            double accLen = 0.0;
+            for (int i = 0; i + 1 < coords.Count; i++)
+            {
+                var (ax, ay) = coords[i];
+                var (bx, by) = coords[i + 1];
+                double segLen = Math.Hypot(bx - ax, by - ay);
+                double cur = (bx - nx) * dirx + (by - ny) * diry;
+                if ((prev - gap) * (cur - gap) < 0.0 && cur != prev)
+                {
+                    double f = (gap - prev) / (cur - prev);
+                    double at = accLen + f * segLen;
+                    double px = ax + f * (bx - ax), py = ay + f * (by - ay);
+                    double dd = Math.Hypot(px - coords[idx].X, py - coords[idx].Y);
+                    if (dd < bestDist) { bestDist = dd; best = at; }
+                }
+                prev = cur;
+                accLen += segLen;
+            }
+            return best >= 0.0 ? best : acc[Math.Min(idx, coords.Count - 1)];
+        }
+
+        // The line's own extent: a junction node outside it cannot cut it,
+        // and testing that first keeps this off the per-vertex loop for
+        // every junction of a big OSM network.
+        double bx0 = coords[0].X, bx1 = bx0, by0 = coords[0].Y, by1 = by0;
+        foreach (var (qx, qy) in coords)
+        {
+            bx0 = Math.Min(bx0, qx); bx1 = Math.Max(bx1, qx);
+            by0 = Math.Min(by0, qy); by1 = Math.Max(by1, qy);
+        }
+        foreach (var (nid, nxy) in network.Nodes)
+        {
+            if (network.NodeDegree.GetValueOrDefault(nid, 0) < 3) continue;
+            var connected = network.GetConnectedSegments(nid);
+            double widest = connected.Max(i => network.Segments[i].Width);
+            // How close a line has to get to this node to be inside its
+            // crossing at all: as far out as the farthest painted mouth.
+            double reach = widest / 2.0 * pppm + Config.CENTERLINE_JUNCTION_GAP_M * pppm;
+            foreach (int i in connected)
+                if (mouths.TryGetValue((nid, i), out var pts))
+                    foreach (var (tx, ty) in pts)
+                        reach = Math.Max(reach, Math.Hypot(tx - nxy.X, ty - nxy.Y));
+            if (nxy.X < bx0 - reach || nxy.X > bx1 + reach ||
+                nxy.Y < by0 - reach || nxy.Y > by1 + reach) continue;
+
+            // Every pass of the line through this junction - a self-crossing
+            // is passed twice by one loop, so the closest approach alone is
+            // not enough. Vertices inside the crossing box group into runs;
+            // one run is one pass, and its two ends say which arm the line
+            // comes from and which it leaves on.
+            int runStart = -1;
+            for (int i = 0; i <= coords.Count; i++)
+            {
+                bool inside = i < coords.Count &&
+                    Math.Hypot(coords[i].X - nxy.X, coords[i].Y - nxy.Y) <= reach;
+                if (!inside)
+                {
+                    if (runStart >= 0)
+                    {
+                        int runEnd = i - 1;
+                        // Direction of travel at both ends of the pass -
+                        // measured against the PREVIOUS vertex when an end
+                        // is the line's own end and has no next one.
+                        double tx0, ty0;
+                        if (runStart + 1 < coords.Count)
+                        {
+                            var (ux, uy) = Unit(coords[runStart + 1].X - coords[runStart].X,
+                                                coords[runStart + 1].Y - coords[runStart].Y);
+                            tx0 = ux; ty0 = uy;
+                        }
+                        else
+                        {
+                            var (ux, uy) = Unit(coords[runStart].X - coords[runStart - 1].X,
+                                                coords[runStart].Y - coords[runStart - 1].Y);
+                            tx0 = ux; ty0 = uy;
+                        }
+                        double tx1, ty1;
+                        if (runEnd + 1 < coords.Count)
+                        {
+                            var (ux, uy) = Unit(coords[runEnd + 1].X - coords[runEnd].X,
+                                                coords[runEnd + 1].Y - coords[runEnd].Y);
+                            tx1 = ux; ty1 = uy;
+                        }
+                        else
+                        {
+                            var (ux, uy) = Unit(coords[runEnd].X - coords[runEnd - 1].X,
+                                                coords[runEnd].Y - coords[runEnd - 1].Y);
+                            tx1 = ux; ty1 = uy;
+                        }
+                        // Where the paint stops at each end of the pass:
+                        // always at the mouth line of the ARM THE LINE
+                        // LIES ON there - the same place that arm's halt
+                        // line is drawn, signed or not.
+                        double entryCut, exitCut;
+                        if (runStart > 0)
+                        {
+                            // The line comes in over this arm: its paint
+                            // stops at that arm's mouth.
+                            double gapIn = MouthAt(nid, -tx0, -ty0);
+                            entryCut = MouthCross(runStart, -tx0, -ty0, gapIn,
+                                                 nxy.X, nxy.Y);
+                        }
+                        else entryCut = acc[0];   // the line starts inside
+                        if (runEnd + 1 < coords.Count)
+                        {
+                            // The line leaves over another arm: its paint
+                            // stops at that arm's mouth.
+                            double gapOut = MouthAt(nid, tx1, ty1);
+                            exitCut = MouthCross(runEnd, tx1, ty1, gapOut,
+                                                nxy.X, nxy.Y);
+                        }
+                        else
+                        {
+                            // The line ENDS in the crossing (its chain was
+                            // already cut at the junction): nothing beyond
+                            // the end is painted, so the zone runs to the
+                            // end of the line and the mouth of the arm it
+                            // lies on - taken at the start of the pass -
+                            // bounds it.
+                            exitCut = acc[coords.Count - 1];
+                        }
+                        zones.Add((entryCut, exitCut));
+                        runStart = -1;
+                    }
+                    continue;
+                }
+                if (runStart < 0) runStart = i;
+            }
+        }
+
+        // Subtract the zones from the line: what is left is paint, and a
+        // boundary that is not the line's own end is a junction mouth.
+        zones.Sort((a, b) => a.From.CompareTo(b.From));
+        void Add(double from, double to, bool solidStart, bool solidEnd)
+        {
+            if (to - from < 0.01) return;
+            var piece = SubArc(coords, from, to);
+            if (piece.Count >= 2) pieces.Add((piece, solidStart, solidEnd));
+        }
+        double cursor = 0.0; bool cutBefore = false;
+        for (int i = 0; i < zones.Count;)
+        {
+            double zf = zones[i].From, zt = zones[i].To;
+            int k = i;
+            while (k + 1 < zones.Count && zones[k + 1].From <= zt)
+            { zt = Math.Max(zt, zones[k + 1].To); k++; }
+            if (zf > cursor) Add(cursor, Math.Min(zf, total), cutBefore, zf < total);
+            cursor = Math.Max(cursor, zt);
+            cutBefore = true;
+            i = k + 1;
+        }
+        if (cursor < total) Add(cursor, total, cutBefore, false);
+        return pieces;
+    }
+
+    /// <summary>How one centreline piece gets painted: solid for the stretch
+    /// in front of a junction mouth (the approach line is continuous, it
+    /// does not invite a lane change), dashed beyond. Ends that are not
+    /// mouths (a road end) stay dashed. Returns (style, coords) in line
+    /// order.</summary>
+    public static List<(string, List<(double X, double Y)>)>
+        StyleCentrelinePiece(List<(double X, double Y)> coords, bool solidStart,
+        bool solidEnd)
+    {
+        var out_ = new List<(string, List<(double X, double Y)>)>();
+        if (coords.Count < 2) return out_;
+        double total = 0.0;
+        for (int i = 0; i + 1 < coords.Count; i++)
+            total += Math.Hypot(coords[i + 1].X - coords[i].X,
+                                coords[i + 1].Y - coords[i].Y);
+        double solidM = Math.Min(Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M
+                                 * Config.PIXELS_PER_METER, total);
+        double a = solidStart ? solidM : 0.0;
+        double b = solidEnd ? total - solidM : total;
+        if (b < a) b = a;   // shorter than two solid stretches: all solid
+        void Add(double from, double to, string style)
+        {
+            if (to - from < 0.01) return;
+            out_.Add((style, SubArc(coords, from, to)));
+        }
+        if (a > 0.0) Add(0.0, a, "solid");
+        if (b > a) Add(a, b, "dashed");
+        if (b < total) Add(b, total, "solid");
+        return out_;
     }
 
     /// <summary>Drop `startM` / `endM` pixels of arc length from a polyline's
@@ -443,7 +975,7 @@ public static class RoadNetworkGeometry
             var oriented = new List<List<(double X, double Y)>>();
             foreach (var coords0 in raw)
             {
-                var coords = RoundPolylineCorners(coords0, cornerRadiusPx);
+                var coords = SmoothChain(coords0, pppm);
                 // linemerge does not preserve our direction of travel — re-
                 // orient the line so its first point is a segment START.
                 if (!segs.Any(s => Math.Abs(s.X1 - coords[0].X) < 1e-6 &&
@@ -741,6 +1273,80 @@ public static class RoadNetworkGeometry
         return result;
     }
 
+    // --- Road paint (strokes) --------------------------------------------------
+
+    /// <summary>One road = one ribbon: the two boundary polylines offset from
+    /// the smoothed centreline, plus the fills that are NOT constant-width
+    /// ribbons (width-varying chains, junction corner roundings).
+    ///
+    /// The renderer fills these directly instead of filling ONE unioned
+    /// polygon per colour, so the paint needs no holes and no background
+    /// punch: a roundabout island is simply the area no ribbon covers, and a
+    /// road that crosses itself (a figure-8) paints its crossing twice in the
+    /// same colour - which is what a crossing looks like. The unioned paved
+    /// polygon stays for the KERB LINE (a kerb follows the true outer
+    /// perimeter, not each road's own edge) and for the physics on-road test
+    /// - see RoadNetwork.GetPavedPolygon.</summary>
+    public static (List<RoadStroke> Strips, List<RoadPolygonGroup> Fills)
+        BuildRoadPaint(RoadNetwork network)
+    {
+        double pppm = Config.PIXELS_PER_METER;
+        var smNet = SmoothGeometry.For(network);
+        var (ribbons, covered) = BuildWidthVaryingRibbons(network, pppm);
+
+        // smNet line -> its segment indices, so lines consumed by a ribbon can
+        // be skipped below (the paved area must not be painted twice).
+        var lineSegs = new Dictionary<SmoothGeometry.SmoothedLine, HashSet<int>>();
+        foreach (var (skey, cref) in smNet.SegmentCurve)
+        {
+            if (cref.Line is null) continue;
+            if (!lineSegs.TryGetValue(cref.Line, out var set)) lineSegs[cref.Line] = set = new();
+            set.Add(skey.SegIdx);
+        }
+
+        var strips = new List<RoadStroke>();
+        foreach (var line in smNet.Lines)
+        {
+            if (lineSegs.TryGetValue(line, out var lsegs) && lsegs.Count > 0 && lsegs.All(covered.Contains))
+                continue;   // painted as a width-varying ribbon below
+            var (left, right) = Ribbon(line.Resampled, (line.Width / 2) * pppm);
+            if (left.Count >= 2) strips.Add(new RoadStroke(left, right));
+        }
+
+        var fills = new List<RoadPolygonGroup>();
+        fills.AddRange(ribbons);
+        fills.AddRange(BuildSmoothedJunctionFillets(network, smNet));
+        return (strips, fills);
+    }
+
+    /// <summary>Offset a densely resampled polyline by ±halfWidth per vertex.
+    /// The vertex normal is the bisector of the adjacent edge directions,
+    /// normalised, so the offset sits exactly halfWidth off the centreline
+    /// (a miter join). Resampled splines turn a fraction of a degree per
+    /// vertex, so this is as accurate as OffsetCurve - and the two edges stay
+    /// vertex-paired, which is what a triangle strip needs.</summary>
+    private static (List<(double X, double Y)> Left, List<(double X, double Y)> Right)
+        Ribbon(List<(double X, double Y)> coords, double halfPx)
+    {
+        var left = new List<(double X, double Y)>();
+        var right = new List<(double X, double Y)>();
+        if (coords.Count < 2) return (left, right);
+        for (int i = 0; i < coords.Count; i++)
+        {
+            var (ax, ay) = i > 0 ? coords[i - 1] : coords[i];
+            var (bx, by) = coords[i];
+            var (cx, cy) = i + 1 < coords.Count ? coords[i + 1] : coords[i];
+            var (ux, uy) = Unit(cx - ax, cy - ay);      // travel direction
+            left.Add((bx - uy * halfPx, by + ux * halfPx));
+            right.Add((bx + uy * halfPx, by - ux * halfPx));
+        }
+        return (left, right);
+    }
+
+    /// <summary>One road's paint: two vertex-paired boundary polylines.</summary>
+    public sealed record RoadStroke(List<(double X, double Y)> Left,
+        List<(double X, double Y)> Right);
+
     /// <summary>Build ONE continuous variable-width ribbon per highway chain
     /// that changes width along its length. The chain is splined through the
     /// width-change nodes (bends rounded), then offset by a half-width that
@@ -922,19 +1528,33 @@ public static class RoadNetworkGeometry
         ring.Add(left[0]);
         return ring;
     }
-    /// <summary>Build the Eckausrundung patches: at every junction corner, the
-    /// curvilinear triangle between the corner point and the rounding arc —
-    /// the paved fill that lets a car swing from one road into the other
-    /// without leaving the pavement. The arcs come precomputed from
-    /// SmoothedNetwork.junction_fillets.</summary>
+    /// <summary>Build the Eckausrundung patches: at every junction corner,
+    /// the curvilinear triangle between the corner point and the rounding arc
+    /// - the paved fill that lets a car swing from one road into the other
+    /// without leaving the pavement - closed back at the junction node so the
+    /// patch is part of the paved area rather than a neighbour of it. The
+    /// arcs come precomputed from SmoothedNetwork.junction_fillets.</summary>
     public static List<RoadPolygonGroup> BuildSmoothedJunctionFillets(
         RoadNetwork network, SmoothGeometry.SmoothedNetwork smNet)
     {
         var extras = new List<RoadPolygonGroup>();
         foreach (var fillet in smNet.JunctionFillets)
         {
-            var ring = new List<(double X, double Y)> { fillet.Corner };
-            ring.AddRange(fillet.Arc);
+            // The patch must be PART of the paved area, not merely touch it.
+            // Closed at the corner point it is bounded by the two road EDGES,
+            // so at an X crossing - where the corner wedge sits between two
+            // arms whose edges meet exactly on those lines - it shares only
+            // a line with the tarmac: zero overlap, and the paved union keeps
+            // it as its own ring, which draws as a kerb outline floating in
+            // the grass (measured: 0.0 % overlap east/west, 3.7-4.5 % where
+            // the corner geometry happened to bite into the road). Closing
+            // the patch at the junction node - which is inside the road -
+            // gives it a real overlap; the extra triangle is tarmac the
+            // junction already paints, so nothing is painted that was not
+            // painted before.
+            var ring = new List<(double X, double Y)>(fillet.Arc);
+            if (network.Nodes.TryGetValue(fillet.Node, out var nxy))
+                ring.Add((nxy.X, nxy.Y));
             var color = Config.ROAD_TYPES.TryGetValue(
                 network.Segments[fillet.SegA].Highway, out var rt) ? rt.Color : ((150, 150, 150));
             extras.Add(new RoadPolygonGroup(color, new() { new PolygonRing(ring, new()) }));

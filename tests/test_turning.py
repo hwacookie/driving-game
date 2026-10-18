@@ -99,6 +99,21 @@ def cyan(text: str) -> str:   return _c(text, "36")
 def dim(text: str) -> str:    return _c(text, "2")
 
 
+def _poll_dt(state: dict, prev_sim, prev_wall: float, now_wall: float) -> float:
+    """Seconds of SIM time between the previous /state read and this one.
+
+    The teleport/jump bounds ask "could this speed have covered that
+    distance in that time" - the distance is driven in SIM time, so the
+    time must be SIM time too. Under --warp/--fast the sim advances more
+    than wall time, and a wall-clock bound would call normal driving a
+    jump. Wall time is only the fallback for streams without 'time'.
+    """
+    t = state.get('time')
+    if isinstance(t, (int, float)) and isinstance(prev_sim, (int, float)):
+        return max(t - prev_sim, 1e-6)
+    return max(now_wall - prev_wall, 1e-6)
+
+
 # --- Result persistence (tests/turning_results.json) ---
 
 def _parse_test_spec(spec_str: str):
@@ -539,6 +554,7 @@ class TurnTester:
     
     def __init__(self):
         self.test_results = []
+        self._time_warp = None   # announced by /state, fetched once
         # One persistent (keep-alive) connection for the stress scenario.
         # Flask serves each request on its own thread, so back-to-back
         # POSTs over SEPARATE connections can be processed OUT OF ORDER -
@@ -611,7 +627,7 @@ class TurnTester:
                 return   # game unreachable - the caller deals with it
             if st.get('has_car') and st.get('car_uid') != old_uid:
                 return
-            time.sleep(0.05)
+            self._psleep(0.05)
 
     def create_car_at_random(self):
         """Replace car with a fresh one at random location."""
@@ -720,11 +736,11 @@ class TurnTester:
                 bad_streak += 1
                 if bad_streak >= 5:      # ~10 s of no answer -> give up
                     return False
-                time.sleep(0.5)
+                self._psleep(0.5)
                 continue
             if len(st.get('cars', [])) == 0:
                 return True
-            time.sleep(0.05)
+            self._psleep(0.05)
         return False
 
     def _stress_scenario_result(self, phases: dict, overall_passed: bool,
@@ -842,6 +858,36 @@ class TurnTester:
                 best_d, best_off = min_d, off
         return best_off
 
+    def _time_warp_announced(self) -> float:
+        """The host's pacing switch as announced by /state (1.0 = real
+        time, 0.0 = --fast/unbounded, absent = an older host: 1.0)."""
+        try:
+            st = self._api_session.get(f"{API_URL}/state", timeout=2).json()
+        except (requests.exceptions.RequestException, ValueError):
+            return 1.0
+        w = st.get('time_warp')
+        return float(w) if isinstance(w, (int, float)) else 1.0
+
+    def _time_warp_cached(self) -> float:
+        """The announced warp, fetched once (0.0 = --fast/unbounded)."""
+        if self._time_warp is None:
+            self._time_warp = self._time_warp_announced()
+        return self._time_warp
+
+    def _psleep(self, sim_s: float) -> None:
+        """Sleep between two looks at the sim.
+
+        The monitors watch the sim at a fixed SIM-time resolution (sim_s of
+        driving per look). When the host runs warped (--warp N), that
+        resolution has to come from more looks per wall second - with
+        wall-clock sleeps the car covers metres between two polls and the
+        stop/control commands arrive far too late. --fast announces 0
+        (unbounded): then poll at the transport floor and accept that the
+        resolution is what it is.
+        """
+        w = self._time_warp_cached()
+        time.sleep(0.005 if w <= 0 else max(sim_s / w, 0.005))
+
     def run_multi_car_stress_test(self, results: dict | None = None,
                                   abort_check: "callable | None" = None,
                                   label: str | None = None,
@@ -935,12 +981,12 @@ class TurnTester:
                     bad_streak += 1
                     if bad_streak >= 5:      # ~10 s of no answer
                         break
-                    time.sleep(0.5)
+                    self._psleep(0.5)
                     continue
                 uids = [c['car_uid'] for c in st.get('cars', [])]
                 if len(uids) == n_cars:
                     break
-                time.sleep(0.05)
+                self._psleep(0.05)
             all_spawned = len(uids) == n_cars
             if not all_spawned:
                 print(f"   ❌ Only {len(uids)}/{n_cars} cars appeared - "
@@ -959,7 +1005,7 @@ class TurnTester:
                     pass
 
             # 4. Run the phase: poll every STRESS_POLL_S, count jitters.
-            prev: dict[int, tuple] = {}   # uid -> (wall_t, x_px, y_px)
+            prev: dict[int, tuple] = {}   # uid -> (sim_t, x_px, y_px)
             jitters = 0
             worst_jump_m = 0.0
             off_road_hits = 0
@@ -991,6 +1037,12 @@ class TurnTester:
                 cars = st.get('cars', [])
                 max_cars_seen = max(max_cars_seen, len(cars))
                 now = time.time()
+                # The SIM clock, not the wall clock: the jitter bound below
+                # counts "what could this speed cover per SIM second", so it
+                # stays the same under --warp/--fast.
+                sim_t = st.get('time')
+                if not isinstance(sim_t, (int, float)):
+                    sim_t = now            # pre-clock streams: wall fallback
                 for c in cars:
                     uid = c['car_uid']
                     x, y = c['x'], c['y']
@@ -1000,7 +1052,7 @@ class TurnTester:
                         wrong_side_hits += 1
                     if uid in prev:
                         t0, x0, y0 = prev[uid]
-                        poll_dt = now - t0
+                        poll_dt = sim_t - t0
                         if poll_dt > 0:
                             moved_m = math.hypot(x - x0, y - y0) / 2.0
                             # The suite's teleport/jump bound (see
@@ -1017,8 +1069,7 @@ class TurnTester:
                                       f"{moved_m:.2f} m in {poll_dt*1000:.0f} ms "
                                       f"(max plausible {max_plausible_m:.2f} m, "
                                       f"{c['speed_kmh']:.0f} km/h)")
-                    prev[uid] = (now, x, y)
-                sim_t = st.get('time')
+                    prev[uid] = (sim_t, x, y)
                 if t0_sim is None and isinstance(sim_t, (int, float)):
                     t0_sim = sim_t
                 if t0_sim is not None:
@@ -1035,7 +1086,7 @@ class TurnTester:
                           f"{elapsed:.1f} s of sim time elapsed - "
                           f"ending the phase early")
                     break
-                time.sleep(self.STRESS_POLL_S)
+                self._psleep(self.STRESS_POLL_S)
 
             # 5. Tear the phase down before the next one - and WAIT for it,
             #    so this clear can't race against the next phase's spawns.
@@ -1216,12 +1267,12 @@ class TurnTester:
                 bad_streak += 1
                 if bad_streak >= 5:
                     break
-                time.sleep(0.5)
+                self._psleep(0.5)
                 continue
             uids = [c['car_uid'] for c in st.get('cars', [])]
             if len(uids) == n_cars:
                 break
-            time.sleep(0.05)
+            self._psleep(0.05)
         if len(uids) != n_cars:
             print(f"   ❌ Only {len(uids)}/{n_cars} cars appeared - fails")
             return self._crossing_result(start_point, passed=False,
@@ -1281,7 +1332,7 @@ class TurnTester:
             if time.time() > wall_deadline:
                 print("   ⚠️  Wall-clock hang guard hit - ending early")
                 break
-            time.sleep(self.CROSSING_POLL_S)
+            self._psleep(self.CROSSING_POLL_S)
 
         if crash_info is not None:
             # FREEZE the sim on the crash and LEAVE the cars in place so the
@@ -1368,6 +1419,7 @@ class TurnTester:
         last_heading = None
         last_pos = None
         last_time = time.time()
+        last_sim = None
         braking_commanded = False
         deadline = time.time() + max_extra_time
         
@@ -1403,7 +1455,7 @@ class TurnTester:
             
             now = time.time()
             if last_pos is not None:
-                poll_dt = now - last_time
+                poll_dt = _poll_dt(state, last_sim, now, last_time)
                 moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5 / 2.0
                 max_plausible_m = max(state['speed_kmh'] / 3.6, 50.0) * poll_dt * 1.5 + 1.0
                 if moved_m > max_plausible_m:
@@ -1412,6 +1464,7 @@ class TurnTester:
                     return pos, False, details
             last_pos = pos
             last_time = now
+            last_sim = state.get('time', last_sim)
             
             if state['segment'] != target_segment:
                 # Drove clean through and out the other side without ever
@@ -1433,7 +1486,7 @@ class TurnTester:
                 self.send_control(accelerate=False, brake=False)
                 return pos, True, details
             
-            time.sleep(0.05)
+            self._psleep(0.05)
         
         # Ran out of time without coming to a stop on the target segment.
         return (last_pos or (0, 0)), False, details
@@ -1454,6 +1507,7 @@ class TurnTester:
         last_heading = None
         last_pos = None
         last_time = time.time()
+        last_sim = None
         deadline = time.time() + max_wait
         
         self.send_control(accelerate=False, brake=True)
@@ -1490,7 +1544,7 @@ class TurnTester:
             
             now = time.time()
             if last_pos is not None:
-                poll_dt = now - last_time
+                poll_dt = _poll_dt(state, last_sim, now, last_time)
                 moved_m = ((pos[0] - last_pos[0]) ** 2 + (pos[1] - last_pos[1]) ** 2) ** 0.5 / 2.0
                 max_plausible_m = max(state['speed_kmh'] / 3.6, 50.0) * poll_dt * 1.5 + 1.0
                 if moved_m > max_plausible_m:
@@ -1499,12 +1553,13 @@ class TurnTester:
                     return pos, False, details
             last_pos = pos
             last_time = now
+            last_sim = state.get('time', last_sim)
             
             if state['speed_kmh'] < 1.0:
                 # Parked - keep the brake latched (see docstring).
                 return pos, True, details
             
-            time.sleep(0.05)
+            self._psleep(0.05)
         
         # Ran out of time without coming to a stop.
         return (last_pos or (0, 0)), False, details
@@ -1755,7 +1810,7 @@ class TurnTester:
                 state = self.get_state()
                 if state['speed_kmh'] >= target_speed * 0.9:
                     break
-                time.sleep(0.1)
+                self._psleep(0.1)
             
             print(f"   Reached {state['speed_kmh']:.0f} km/h")
             
@@ -1773,7 +1828,7 @@ class TurnTester:
                         break
                     state = self.get_state()
                     dist = state.get('distance_to_junction')
-                    time.sleep(0.1)
+                    self._psleep(0.1)
                 if dist is not None and dist <= SIGNAL_DISTANCE_M:
                     self.send_control(**{blinker_key: True})
                     print(f"   {direction.upper()} blinker activated at {dist:.0f} m before the junction")
@@ -1828,6 +1883,7 @@ class TurnTester:
         last_poll_pos = initial_pos
         last_poll_speed_kmh = 0.0
         last_poll_time = time.time()
+        last_poll_sim = None
         
         if setup_crashed:
             game_crashed = True
@@ -1870,7 +1926,7 @@ class TurnTester:
             # POLLS too, using the actual measured wall-clock gap (not an
             # assumed fixed frame dt, since polling isn't frame-locked).
             now = time.time()
-            poll_dt = now - last_poll_time
+            poll_dt = _poll_dt(state, last_poll_sim, now, last_poll_time)
             moved_px = ((state['x'] - last_poll_pos[0]) ** 2 + (state['y'] - last_poll_pos[1]) ** 2) ** 0.5
             moved_m = moved_px / 2.0  # PIXELS_PER_METER (see src/config.py)
             # Generous margin: highest plausible speed (~50 m/s cruise)
@@ -1900,6 +1956,7 @@ class TurnTester:
             last_poll_pos = (state['x'], state['y'])
             last_poll_speed_kmh = state['speed_kmh']
             last_poll_time = now
+            last_poll_sim = state.get('time', last_poll_sim)
             
             # Calculate heading change (handle 360° wrap). Skip the very
             # first poll: `last_heading` was initialised to the TELEPORT
@@ -2209,7 +2266,7 @@ class TurnTester:
                     break
             
             last_heading = current_heading
-            time.sleep(0.05)  # Check at ~20 FPS
+            self._psleep(0.05)  # Check at ~20 FPS
         else:
             final_pos = (state['x'], state['y'])
 
@@ -2513,8 +2570,18 @@ class TurnTester:
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
             print(f"{'#'*60}")
 
-            if start_point in SKIPPED_TESTS:
-                print(f"\n⏭  SKIPPED: '{start_point}' - {SKIPPED_TESTS[start_point]}\n")
+            skip_reason = SKIPPED_TESTS.get(start_point)
+            if start_point == 'fig8_stress' and self._time_warp_cached() != 1.0:
+                # (user decision 2026-10-18): the capacity probe answers
+                # "how many cars can we run/render at max" - a REAL-TIME
+                # question. A warped run outruns the wall clock by design,
+                # which is exactly the metric it measures, so it only runs
+                # unwarped.
+                skip_reason = ("capacity probe needs real time - this run is "
+                               "warped (--warp/--fast); run it without the "
+                               "switch to measure cars/second")
+            if skip_reason:
+                print(f"\n⏭  SKIPPED: '{start_point}' - {skip_reason}\n")
                 # Result in monitor_turn's shape (summary/exit-code keys),
                 # marked skipped so neither counts it as a failure.
                 result = {'passed': False, 'aborted': False, 'skipped': True,

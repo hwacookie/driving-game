@@ -108,11 +108,10 @@ public sealed partial class BicycleNav
     public const double CREEP_SPEED = 1.0;            // m/s - creep applies below this speed
     public const double CREEP_SCALE = 0.3;            // minimum accel scale while creeping
 
-    /// <summary>Corner-rounding radius for the reference line: the same
-    /// radius as the renderer's paved fillet (6 m) so the reference line
-    /// follows the same corner the car is actually allowed to occupy.</summary>
-    public static readonly double CORNER_RADIUS_M = Config.ROAD_CORNER_RADIUS_M;  // 6.0
-    public const int CORNER_ARC_STEPS = 48;      // must out-resolve Raceline.SampleM
+    // The route line is no longer filleted at a fixed radius: it follows the
+    // same smooth chain the roads are drawn and paved from
+    // (RoadNetworkGeometry.SmoothChain), so nav and pavement agree by
+    // construction.
     public const int HORIZON_SEGMENTS = 6;       // how many segments ahead to build the route
 
     /// <summary>Right-hand-traffic lane offset: quarter of the road width for
