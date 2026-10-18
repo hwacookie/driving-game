@@ -1157,6 +1157,26 @@ class TurnTester:
     CROSSING_N_CARS = 50
     CROSSING_MAX_SIM_SECONDS = 300.0
     CROSSING_POLL_S = 0.1
+
+    @staticmethod
+    def _crossing_trace_path_from_argv() -> "str | None":
+        """Optional CLI `--trace <path>`: dump one JSONL line per /state poll
+        of the crossing-stress runners, so a crash's APPROACH can be read at
+        the poll's own resolution (pose, speed, braking, segment, progress
+        per car) instead of only the post-impact decision dump in logs/.
+        Read from sys.argv here (not in main()) so every entry point - CLI
+        suite, /run_test subprocess, `--tests 23` - honours it without
+        threading a parameter through. None = no tracing (default).
+        """
+        if '--trace' not in sys.argv:
+            return None
+        idx = sys.argv.index('--trace')
+        raw = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ''
+        if not raw.strip():
+            print("--trace needs a file path, e.g. --trace /tmp/xing_trace.jsonl")
+            return None
+        return raw
+
     # start_point name -> the loop's node-id prefix on the basic map.
     CROSSING_NODE_PREFIX = {
         'fig8_xing': 'xing_',        # tile (2,3): WITH Vorfahrt signs
@@ -1296,6 +1316,28 @@ class TurnTester:
 
         # 4. Run: poll /state, fail on the FIRST crash, stop at 300 s sim.
         print(f"   GO! {n_cars} cars accelerating - watching for crashes")
+        # --trace <path>: keep every poll's full fleet state (see the
+        # crash's approach, not just its aftermath).
+        trace_path = self._crossing_trace_path_from_argv()
+        trace_fh = None
+        if trace_path:
+            try:
+                trace_fh = open(trace_path, 'w')
+            except OSError as e:
+                print(f"   ⚠️  --trace {trace_path} could not open: {e}")
+                trace_path = None
+
+        def _trace_line(sim_t, cars):
+            if trace_fh is None:
+                return
+            keep = ('car_uid', 'x', 'y', 'heading', 'speed_kmh', 'segment',
+                    'progress', 'braking', 'hazard', 'in_contact',
+                    'contact_with', 'level')
+            trace_fh.write(json.dumps(
+                {'time': sim_t,
+                 'cars': [{k: c.get(k) for k in keep} for c in cars]},
+                separators=(',', ':')) + '\n')
+
         t0_sim = None
         aborted = game_crashed = False
         crash_info = None
@@ -1313,6 +1355,7 @@ class TurnTester:
                 break
             cars = st.get('cars', [])
             sim_t = st.get('time')
+            _trace_line(sim_t, cars)
             if t0_sim is None and isinstance(sim_t, (int, float)):
                 t0_sim = sim_t
             elapsed = (sim_t - t0_sim) if t0_sim is not None else 0.0
@@ -1340,6 +1383,12 @@ class TurnTester:
                 print("   ⚠️  Wall-clock hang guard hit - ending early")
                 break
             self._psleep(self.CROSSING_POLL_S)
+
+        if trace_fh is not None:
+            trace_fh.close()
+            print(f"   🧵 state trace: {trace_path} "
+                  f"({'%.1f s' % ((sim_t - t0_sim) if (t0_sim is not None and isinstance(sim_t, (int, float))) else 0.0)} of sim, "
+                  f"{self.CROSSING_POLL_S:.2f} s resolution)")
 
         if crash_info is not None:
             # FREEZE the sim on the crash and LEAVE the cars in place so the
