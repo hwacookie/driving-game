@@ -85,7 +85,7 @@ public sealed class PhysicsValidator
     private void CheckJump(Car car, double oldX, double oldY, double dt, double simTime)
     {
         // Impossible position jump.
-        double distanceM = Math.Hypot(car.X - oldX, car.Y - oldY) / Config.PIXELS_PER_METER;
+        double distanceM = Math.Hypot(car.X - oldX, car.Y - oldY);
         // abs(): speed is signed (negative = reverse gear); the bound is on
         // how far the car can travel per frame in EITHER direction.
         double maxAllowed = Math.Abs(car.Speed) * dt + 0.1 * dt + 0.01;
@@ -152,7 +152,7 @@ public sealed class PhysicsValidator
 
         if (diffDeg <= HeadingEpsilonDeg) return;
 
-        double distM = Math.Hypot(car.X - oldX, car.Y - oldY) / Config.PIXELS_PER_METER;
+        double distM = Math.Hypot(car.X - oldX, car.Y - oldY);
         double radiusM = distM / Math.Radians(diffDeg);
 
         if (radiusM < MinRealisticRadiusM)

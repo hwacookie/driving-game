@@ -34,7 +34,7 @@ public class BicycleNavTests
         double l2 = dx * dx + dy * dy;
         if (l2 < 1e-9) return double.PositiveInfinity;
         double t = Math.Clamp(((car.X - seg.X1) * dx + (car.Y - seg.Y1) * dy) / l2, 0.0, 1.0);
-        return Math.Hypot(car.X - (seg.X1 + t * dx), car.Y - (seg.Y1 + t * dy)) / Config.PIXELS_PER_METER;
+        return Math.Hypot(car.X - (seg.X1 + t * dx), car.Y - (seg.Y1 + t * dy));
     }
 
     record DriveResult(double Time, double MaxLat, double MaxSpeed);
@@ -91,17 +91,17 @@ public class BicycleNavTests
             t += Dt;
             maxLat = Math.Max(maxLat, LatOffsetM(car, net));
             peak = Math.Max(peak, Math.Abs(car.Speed));
-            if (Math.Hypot(car.X - cx, car.Y - cy) < 20.0 * Config.PIXELS_PER_METER)
+            if (Math.Hypot(car.X - cx, car.Y - cy) < 20.0)
                 cornerMax = Math.Max(cornerMax, Math.Abs(car.Speed));
             // Stop once the car is well onto the west leg.
-            if (car.X < cx - 50.0 * Config.PIXELS_PER_METER && Math.Abs(car.Y - cy) < 4.0 * Config.PIXELS_PER_METER)
+            if (car.X < cx - 50.0 && Math.Abs(car.Y - cy) < 4.0)
                 break;
         }
 
         // Completed the turn: ended up on the west leg, well west of the corner.
-        Assert.True(car.X < cx - 50.0 * Config.PIXELS_PER_METER,
-                    $"car did not reach the west leg (x={car.X / 2:F0} m, corner x={cx / 2:F0} m)");
-        Assert.True(Math.Abs(car.Y - cy) < 4.0 * Config.PIXELS_PER_METER, "not on the west leg's line");
+        Assert.True(car.X < cx - 50.0,
+                    $"car did not reach the west leg (x={car.X:F0} m, corner x={cx:F0} m)");
+        Assert.True(Math.Abs(car.Y - cy) < 4.0, "not on the west leg's line");
         // Never left the pavement through the turn.
         var seg = net.Segments[car.SegIdx];
         Assert.True(maxLat < seg.Width / 2.0 + 0.6,
@@ -128,9 +128,9 @@ public class BicycleNavTests
         Assert.True(parked,
             $"not parked after 90 s (phase={nav.ParkPhase}, style={nav.ParkStyle}, " +
             $"d_dest={nav.DistanceToDestination()?.ToString("F1") ?? "?"} m)");
-        // dead_end node: tile (0,2), (250, 100+1000) m -> px (500, 2200). The rear
+        // dead_end node: (250, 100+1000) m in the world frame. The rear
         // axle stops a car length short of the pavement edge.
-        double d = Math.Hypot(car.X - 500.0, car.Y - 2200.0) / Config.PIXELS_PER_METER;
+        double d = Math.Hypot(car.X - 250.0, car.Y - 1100.0);
         Assert.True(d < 7.0, $"stopped {d:F1} m from the dead-end node");
         // The parked latch fires below 0.3 m/s; allow the latching frame itself.
         Assert.True(Math.Abs(car.Speed) < 0.35, $"still rolling at {car.Speed * 3.6:F1} km/h");
@@ -144,9 +144,10 @@ public class BicycleNavTests
         var (car, driver, net) = Spawn("straight");
         // Flag 150 m south of spawn, at the right-kerb parking position
         // (ParkOffsetM(7) ~ 2.4 m left of centreline when heading south):
-        // straight_n is at (100, 350) m -> px (200, 700); flag at y = 700 - 150*2.
-        double fx = 2.0 * (100.0 - Config.ParkOffsetM(7.0));
-        const double fy = 400.0;
+        // straight_n is at (100, 350) m; flag 150 m south at the right-kerb
+        // parking position: x = 100 - ParkOffsetM(7), y = 350 - 150.
+        double fx = 100.0 - Config.ParkOffsetM(7.0);
+        const double fy = 200.0;
         car.BicycleNav ??= new BicycleNav(car, net);
         car.BicycleNav.SetDestination(fx, fy);
 
@@ -160,9 +161,9 @@ public class BicycleNavTests
         // Spec §1: the FRONT BUMPER rests on the flag. X/Y is the rear axle, so
         // measure the bumper.
         double rad = Math.Radians(car.Heading);
-        double bx = car.X + Math.Sin(rad) * BicycleNav.FRONT_OVERHANG_M * Config.PIXELS_PER_METER;
-        double by = car.Y + Math.Cos(rad) * BicycleNav.FRONT_OVERHANG_M * Config.PIXELS_PER_METER;
-        double d = Math.Hypot(bx - fx, by - fy) / Config.PIXELS_PER_METER;
+        double bx = car.X + Math.Sin(rad) * BicycleNav.FRONT_OVERHANG_M;
+        double by = car.Y + Math.Cos(rad) * BicycleNav.FRONT_OVERHANG_M;
+        double d = Math.Hypot(bx - fx, by - fy);
         Assert.True(d < 2.5, $"front bumper {d:F1} m from the flag");
     }
 

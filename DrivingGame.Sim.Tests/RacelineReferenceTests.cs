@@ -13,6 +13,13 @@ namespace DrivingGame.Sim.Tests;
 /// at ~1e-9 tolerance. The strict tests inject the PYTHON paved + eroded-safe
 /// polygons so both implementations solve on IDENTICAL geometry; a separate
 /// test runs the production path (NTS-computed erosion) with a looser bound.
+///
+/// The dump is a self-describing artifact: it declares its own scale
+/// ("pxPerM", legacy "pppm") and keeps its geometry in that frame. Reading
+/// it is therefore a frame crossing into the sim's metre frame - see
+/// FixturePxPerM below. Lengths that are NOT frame values (offsets, lo/hi,
+/// base_prof, cum, props widths) and frame-independent scalars (K = rad/m,
+/// unit normals) are read as they are.
 /// </summary>
 public class RacelineReferenceTests
 {
@@ -77,9 +84,10 @@ public class RacelineReferenceTests
         using var doc = JsonDocument.Parse(File.ReadAllText(FindReferenceFile()));
         var root = doc.RootElement;
 
+        double pxPerM = FixturePxPerM(root);
         var nodes = new Dictionary<string, (double X, double Y)>();
         foreach (var kv in root.GetProperty("nodes").EnumerateObject())
-            nodes[kv.Name] = (kv.Value[0].GetDouble(), kv.Value[1].GetDouble());
+            nodes[kv.Name] = (kv.Value[0].GetDouble() / pxPerM, kv.Value[1].GetDouble() / pxPerM);
 
         var degree = new Dictionary<string, int>();
         foreach (var kv in root.GetProperty("node_degree").EnumerateObject())
@@ -90,9 +98,9 @@ public class RacelineReferenceTests
         {
             string Name(string p) => c.GetProperty(p).GetString()!;
 
-            var rounded = Pts(c.GetProperty("rounded"));
-            var p = Pts(c.GetProperty("P"));
-            var n = Pts(c.GetProperty("N"));
+            var rounded = FramePts(c.GetProperty("rounded"), pxPerM);
+            var p = FramePts(c.GetProperty("P"), pxPerM);
+            var n = Pts(c.GetProperty("N"));   // unit normals: no scale
             double[] Arr(string q) => c.GetProperty(q).EnumerateArray().Select(e => e.GetDouble()).ToArray();
 
             var props = c.GetProperty("props").EnumerateArray()
@@ -101,7 +109,7 @@ public class RacelineReferenceTests
             var junction = c.GetProperty("junction").EnumerateArray()
                 .Select(e => e.ValueKind == JsonValueKind.Null
                     ? ((double X, double Y)?)null
-                    : (e[0].GetDouble(), e[1].GetDouble()))
+                    : (e[0].GetDouble() / pxPerM, e[1].GetDouble() / pxPerM))
                 .ToArray();
 
             cases.Add(new CaseData(
@@ -125,8 +133,8 @@ public class RacelineReferenceTests
             SegmentCount = root.GetProperty("segment_count").GetInt32(),
             Nodes = nodes,
             NodeDegree = degree,
-            Paved = BuildGeometry(root.GetProperty("paved")),
-            Safe = BuildGeometry(root.GetProperty("safe")),
+            Paved = BuildGeometry(root.GetProperty("paved"), pxPerM),
+            Safe = BuildGeometry(root.GetProperty("safe"), pxPerM),
             Cases = cases,
         };
         _reference = reference;
@@ -151,27 +159,43 @@ public class RacelineReferenceTests
                v.ValueKind == JsonValueKind.True;
     }
 
+    /// <summary>Fixture points that are NOT lengths (unit normals).</summary>
     static List<(double X, double Y)> Pts(JsonElement arr) =>
         arr.EnumerateArray().Select(e => (e[0].GetDouble(), e[1].GetDouble())).ToList();
 
+    /// <summary>Fixture points that ARE frame coordinates -> sim frame (m).</summary>
+    static List<(double X, double Y)> FramePts(JsonElement arr, double pxPerM) =>
+        arr.EnumerateArray().Select(e => (e[0].GetDouble() / pxPerM,
+                                          e[1].GetDouble() / pxPerM)).ToList();
+
+    /// <summary>The scale the fixture declares for its own geometry frame
+    /// (px per metre); 1 means it is already in the sim's metre frame.</summary>
+    static double FixturePxPerM(JsonElement root)
+    {
+        if (root.TryGetProperty("pxPerM", out var now)) return now.GetDouble();
+        if (root.TryGetProperty("pppm", out var legacy)) return legacy.GetDouble();
+        return 1.0;
+    }
+
     /// <summary>Build an NTS geometry from a shapely __geo_interface__ object.</summary>
-    static Geometry BuildGeometry(JsonElement gi)
+    static Geometry BuildGeometry(JsonElement gi, double pxPerM)
     {
         string type = gi.GetProperty("type").GetString()!;
         var coords = gi.GetProperty("coordinates");
         List<Polygon> polys = type switch
         {
-            "Polygon" => new() { ToPolygon(coords[0]) },
-            "MultiPolygon" => coords.EnumerateArray().Select(p => ToPolygon(p)).ToList(),
+            "Polygon" => new() { ToPolygon(coords[0], pxPerM) },
+            "MultiPolygon" => coords.EnumerateArray().Select(p => ToPolygon(p, pxPerM)).ToList(),
             _ => throw new NotSupportedException($"geometry type {type}"),
         };
         return polys.Count > 1 ? new MultiPolygon(polys.ToArray()) : polys[0];
     }
 
-    static Polygon ToPolygon(JsonElement ringArr)
+    static Polygon ToPolygon(JsonElement ringArr, double pxPerM)
     {
         Coordinate[] Ring(JsonElement r) =>
-            r.EnumerateArray().Select(c => new Coordinate(c[0].GetDouble(), c[1].GetDouble())).ToArray();
+            r.EnumerateArray().Select(c => new Coordinate(c[0].GetDouble() / pxPerM,
+                                                          c[1].GetDouble() / pxPerM)).ToArray();
         var shell = NtsCompat.RingOf(Ring(ringArr[0]));
         var holes = ringArr.GetArrayLength() > 1
             ? ringArr.EnumerateArray().Skip(1).Select(h => (LinearRing)NtsCompat.RingOf(Ring(h))).ToArray()
@@ -400,9 +424,14 @@ public class RacelineReferenceTests
 
         using var origDoc = JsonDocument.Parse(File.ReadAllText(FindReferenceFile()));
         var root = origDoc.RootElement;
+        // The dump keeps its geometry in its own frame, so everything
+        // frame-valued gets written back in that frame.
+        double pxPerM = FixturePxPerM(root);
 
         JsonArray PtsJson(List<(double X, double Y)> pts) =>
-            new(pts.Select(p => (JsonNode)new JsonArray(p.X, p.Y)).ToArray());
+            PtsJsonInto(pts, pxPerM);
+        JsonArray PtsJsonInto(List<(double X, double Y)> pts, double pxPerM) =>
+            new(pts.Select(p => (JsonNode)new JsonArray(p.X * pxPerM, p.Y * pxPerM)).ToArray());
         JsonArray Arr(double[] a) =>
             new(a.Select(v => (JsonNode)v).ToArray());
 
@@ -451,20 +480,21 @@ public class RacelineReferenceTests
                     (JsonNode)new JsonArray(p.Oneway ? 1 : 0, p.Width, p.Lanes, p.Parking)).ToArray()),
                 ["junction"] = new JsonArray(c.Junction.Select(j =>
                     j is null ? (JsonNode?)null
-                              : new JsonArray(j.Value.X, j.Value.Y)).ToArray()),
+                              : new JsonArray(j.Value.X * pxPerM, j.Value.Y * pxPerM)).ToArray()),
             });
         }
 
         var outDoc = new JsonObject
         {
             ["map"] = root.GetProperty("map").GetString()!,
-            ["pxPerM"] = root.GetProperty("pxPerM").GetDouble(),
+            ["pxPerM"] = pxPerM,
             ["corner_radius_m"] = root.GetProperty("corner_radius_m").GetDouble(),
             ["corner_arc_steps"] = root.GetProperty("corner_arc_steps").GetInt32(),
             ["node_count"] = reference.NodeCount,
             ["segment_count"] = reference.SegmentCount,
             ["nodes"] = new JsonObject(reference.Nodes.ToDictionary(
-                kv => kv.Key, kv => (JsonNode)new JsonArray(kv.Value.X, kv.Value.Y))),
+                kv => kv.Key, kv => (JsonNode)new JsonArray(kv.Value.X * pxPerM,
+                                                            kv.Value.Y * pxPerM))),
             ["node_degree"] = new JsonObject(reference.NodeDegree.ToDictionary(
                 kv => kv.Key, kv => (JsonNode)kv.Value)),
             ["paved"] = JsonNode.Parse(root.GetProperty("paved").GetRawText())!,

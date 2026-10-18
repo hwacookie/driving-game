@@ -22,7 +22,6 @@ namespace DrivingGame.Sim;
 /// Build() shifts everything so the world starts at (0, 0).</summary>
 public sealed class MapBuilder
 {
-    private readonly double PxPerM = Config.PIXELS_PER_METER;
     private readonly Dictionary<string, (double X, double Y)> _nodesM = new();
     private readonly List<RoadSegment> _segments = new();
     private readonly List<(int SegIdx, string NodeId, SignType Type)> _signs = new();
@@ -60,8 +59,8 @@ public sealed class MapBuilder
         _segments.Add(new RoadSegment
         {
             Id = _nextSegId++,
-            X1 = x1M * PxPerM, Y1 = y1M * PxPerM,
-            X2 = x2M * PxPerM, Y2 = y2M * PxPerM,
+            X1 = x1M, Y1 = y1M,
+            X2 = x2M, Y2 = y2M,
             Highway = highway,
             Oneway = oneway,
             Width = width.Value,
@@ -122,9 +121,9 @@ public sealed class MapBuilder
                 shifted[kv.Key] = (kv.Value.X - minX, kv.Value.Y - minY);
             _nodesM.Clear();
             foreach (var kv in shifted) _nodesM[kv.Key] = kv.Value;
-            // Shift segment endpoints (stored in px). Same direction as the
-            // node shift above: new = old - min.
-            double sdx = minX * PxPerM, sdy = minY * PxPerM;
+            // Shift segment endpoints (stored in the world frame). Same
+            // direction as the node shift above: new = old - min.
+            double sdx = minX, sdy = minY;
             foreach (var seg in _segments)
             {
                 seg.X1 -= sdx; seg.Y1 -= sdy;
@@ -134,7 +133,7 @@ public sealed class MapBuilder
 
         var nodes = new Dictionary<string, (double X, double Y)>();
         foreach (var kv in _nodesM)
-            nodes[kv.Key] = (kv.Value.X * PxPerM, kv.Value.Y * PxPerM);
+            nodes[kv.Key] = (kv.Value.X, kv.Value.Y);
 
         // node_connections + node_degree
         var nodeConnections = new Dictionary<string, List<int>>();
@@ -151,13 +150,13 @@ public sealed class MapBuilder
         }
 
         // node_max_width (skip degree-2 straight nodes, like FromOsmData does)
-        var nodeInfo = new Dictionary<string, (double HalfWidthPx, string Highway)>();
+        var nodeInfo = new Dictionary<string, (double HalfWidth, string Highway)>();
         foreach (var seg in _segments)
         {
-            double half = (seg.Width / 2.0) * PxPerM;
+            double half = seg.Width / 2.0;
             foreach (string nid in new[] { seg.StartNode, seg.EndNode })
             {
-                if (!nodeInfo.TryGetValue(nid, out var cur) || half > cur.HalfWidthPx)
+                if (!nodeInfo.TryGetValue(nid, out var cur) || half > cur.HalfWidth)
                     nodeInfo[nid] = (half, seg.Highway);
             }
         }
@@ -173,8 +172,8 @@ public sealed class MapBuilder
             {
                 mx = Math.Max(mx, x); my = Math.Max(my, y);
             }
-            maxX = (mx + marginM) * PxPerM;
-            maxY = (my + marginM) * PxPerM;
+            maxX = mx + marginM;
+            maxY = my + marginM;
         }
 
         // Resolve named start points: (x, y, heading, seg_idx, forward, lateral_offset_m).

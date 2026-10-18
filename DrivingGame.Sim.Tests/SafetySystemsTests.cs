@@ -38,16 +38,16 @@ public class SafetySystemsTests
     static void Advance(Car car, double meters)
     {
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * meters * Config.PIXELS_PER_METER;
-        car.Y += Math.Cos(rad) * meters * Config.PIXELS_PER_METER;
+        car.X += Math.Sin(rad) * meters;
+        car.Y += Math.Cos(rad) * meters;
     }
 
     /// <summary>Move the car to its right (right = heading rotated -90°).</summary>
     static void ShiftRight(Car car, double meters)
     {
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Cos(rad) * meters * Config.PIXELS_PER_METER;
-        car.Y += -Math.Sin(rad) * meters * Config.PIXELS_PER_METER;
+        car.X += Math.Cos(rad) * meters;
+        car.Y += -Math.Sin(rad) * meters;
     }
 
     static (double X, double Y) StraightMidpoint(RoadNetwork net, Car atStraight)
@@ -74,7 +74,7 @@ public class SafetySystemsTests
     /// penetrate only if they overlap on EVERY axis, in which case the depth
     /// is the SMALLEST overlap across all axes. &lt;= 0 means separated or
     /// merely touching.</summary>
-    static double PenetrationPx(List<(double X, double Y)> a, List<(double X, double Y)> b)
+    static double PenetrationM(List<(double X, double Y)> a, List<(double X, double Y)> b)
     {
         double minOverlap = double.PositiveInfinity;
         foreach (var poly in new[] { a, b })
@@ -109,8 +109,7 @@ public class SafetySystemsTests
 
         var (mx, my) = StraightMidpoint(net, car);
         var (rx, ry) = StraightRight(net, car);
-        double pxPerM = Config.PIXELS_PER_METER;
-        var ob = mgr.Place(net, "car", "blue", mx + rx * 1.5 * pxPerM, my + ry * 1.5 * pxPerM);
+        var ob = mgr.Place(net, "car", "blue", mx + rx * 1.5, my + ry * 1.5);
 
         var seg = net.Segments[car.SegIdx];
         double expected = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
@@ -127,8 +126,7 @@ public class SafetySystemsTests
 
         var (mx, my) = StraightMidpoint(net, car);
         var (rx, ry) = StraightRight(net, car);
-        double pxPerM = Config.PIXELS_PER_METER;
-        var ob = mgr.Place(net, "car", "blue", mx - rx * 1.5 * pxPerM, my - ry * 1.5 * pxPerM);
+        var ob = mgr.Place(net, "car", "blue", mx - rx * 1.5, my - ry * 1.5);
 
         var seg = net.Segments[car.SegIdx];
         double alongFlow = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
@@ -168,10 +166,9 @@ public class SafetySystemsTests
         var mgr = new ObstacleManager("basic", TempDir());
         var (bx, by) = car.BodyCenter();
         double rad = Math.Radians(car.Heading);
-        double pxPerM = Config.PIXELS_PER_METER;
         // Parked car 12 m ahead in the same lane.
         var ob = mgr.Place(net, "car", "blue",
-            bx + Math.Sin(rad) * 12.0 * pxPerM, by + Math.Cos(rad) * 12.0 * pxPerM);
+            bx + Math.Sin(rad) * 12.0, by + Math.Cos(rad) * 12.0);
 
         var driver = new KeyboardDriver();
         var keys = new Dictionary<string, bool> { [Config.KEY_W] = true };
@@ -188,19 +185,19 @@ public class SafetySystemsTests
         Assert.Equal(0.0, car.Speed);   // braked to a true rest (deadband)
 
         // No interpenetration: body box may touch, but not sink in.
-        double pen = PenetrationPx(ObstacleGeometry.PlayerBodyCorners(car),
+        double pen = PenetrationM(ObstacleGeometry.PlayerBodyCorners(car),
                                    ObstacleGeometry.ObstacleFootprint(ob));
-        Assert.True(pen < 1.0 / pxPerM, $"body penetrates obstacle by {pen / pxPerM:F3} m");
+        Assert.True(pen < 1.0, $"body penetrates obstacle by {pen:F3} m");
 
         // The car stopped in front of (or at) the obstacle, not through it.
         // The obstacle is auto-aligned to the same flow direction as the car,
         // so both faces project onto the travel axis:
         var (cbx, cby) = car.BodyCenter();
         double alongX = Math.Sin(rad), alongY = Math.Cos(rad);
-        double carFront = cbx * alongX + cby * alongY + Config.CAR_LENGTH_M * pxPerM / 2.0;
-        double obRear = ob.X * alongX + ob.Y * alongY - Config.CAR_LENGTH_M * pxPerM / 2.0;
+        double carFront = cbx * alongX + cby * alongY + Config.CAR_LENGTH_M / 2.0;
+        double obRear = ob.X * alongX + ob.Y * alongY - Config.CAR_LENGTH_M / 2.0;
         Assert.True(carFront <= obRear + 0.05,
-            $"car front passed the obstacle's rear face by {((carFront - obRear) / pxPerM):F3} m");
+            $"car front passed the obstacle's rear face by {(carFront - obRear):F3} m");
     }
 
     // --- layout save / load ----------------------------------------------------
@@ -216,9 +213,8 @@ public class SafetySystemsTests
             var mgr = new ObstacleManager("basic", dir);
             var (mx, my) = StraightMidpoint(net, car);
             var (rx, ry) = StraightRight(net, car);
-            double pxPerM = Config.PIXELS_PER_METER;
             for (double off = -1.5; off <= 1.5; off += 1.5)
-                mgr.Place(net, "car", "blue", mx + rx * off * pxPerM, my + ry * off * pxPerM);
+                mgr.Place(net, "car", "blue", mx + rx * off, my + ry * off);
 
             string path = mgr.Save("a/b:c");   // sanitizes to a_b_c
             Assert.EndsWith(Path.Combine("obstacles", "basic", "a_b_c.json"), path);
@@ -345,7 +341,7 @@ public class SafetySystemsTests
 
         var v = new PhysicsValidator();
         v.Check(car, Dt, net);   // prime
-        car.X += 50 * Config.PIXELS_PER_METER;   // teleport 50 m in one frame
+        car.X += 50.0;   // teleport 50 m in one frame
         Assert.Throws<PhysicsViolationException>(() => v.Check(car, Dt, net));
     }
 

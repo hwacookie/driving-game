@@ -7,7 +7,7 @@ namespace DrivingGame.Sim;
 
 public sealed class RefLine
 {
-    /// <summary>Polyline vertices, world pixels.</summary>
+    /// <summary>Polyline vertices, world metres.</summary>
     public List<(double X, double Y)> Pts { get; }
     public List<double> SegLen { get; } = new();
     public List<double> Cum { get; } = new() { 0.0 };
@@ -18,14 +18,14 @@ public sealed class RefLine
         Pts = pts;
         for (int i = 0; i < pts.Count - 1; i++)
         {
-            double d = Math.Hypot(pts[i + 1].X - pts[i].X, pts[i + 1].Y - pts[i].Y) / RefLineMath.pxPerM;
+            double d = Math.Hypot(pts[i + 1].X - pts[i].X, pts[i + 1].Y - pts[i].Y);
             SegLen.Add(d);
             Cum.Add(Cum[^1] + d);
         }
         Total = Cum.Count > 0 ? Cum[^1] : 0.0;
     }
 
-    /// <summary>World-pixel position at arc length s (clamped).</summary>
+    /// <summary>Position at arc length s (clamped), in world metres.</summary>
     public (double X, double Y) PointAt(double s)
     {
         s = Math.Max(0.0, Math.Min(Total, s));
@@ -92,12 +92,10 @@ public sealed class RefLine
 
 public static class RefLineMath
 {
-    public const double pxPerM = Config.PIXELS_PER_METER;
-
     /// <summary>How much closer an off-route segment must be before it
     /// displaces the route we are actually following (see
     /// BicycleNav.SyncSegment).</summary>
-    public const double ROUTE_STICKINESS_PX = 3.0 * pxPerM;
+    public const double ROUTE_STICKINESS_M = 3.0;
 
     /// <summary>Per-frame parking / route-cut tracing. Off by default: these
     /// fire on EVERY frame of a pull-over and drowned the console (and any
@@ -136,8 +134,8 @@ public static class RefLineMath
             }
             double length = Math.Hypot(dx, dy); if (length == 0) length = 1.0;
             double rx = dy / length, ry = -dx / length;   // right vector
-            double offPx = offsetsM[i] * pxPerM;
-            outPts.Add((pts[i].X + rx * offPx, pts[i].Y + ry * offPx));
+            double off = offsetsM[i];
+            outPts.Add((pts[i].X + rx * off, pts[i].Y + ry * off));
         }
         return outPts;
     }
@@ -154,7 +152,7 @@ public static class RefLineMath
     {
         int n = pts.Count;
         if (n < 2 || offsetM == 0) return new List<(double X, double Y)>(pts);
-        double offPx = offsetM * pxPerM;
+        double off = offsetM;
         var outPts = new List<(double X, double Y)>(n);
         for (int i = 0; i < n; i++)
         {
@@ -178,7 +176,7 @@ public static class RefLineMath
             }
             double length = Math.Hypot(dx, dy); if (length == 0) length = 1.0;
             double rx = dy / length, ry = -dx / length;   // right vector
-            outPts.Add((pts[i].X + rx * offPx, pts[i].Y + ry * offPx));
+            outPts.Add((pts[i].X + rx * off, pts[i].Y + ry * off));
         }
         return outPts;
     }
@@ -235,7 +233,7 @@ public static class RefLineMath
             double d2 = (px - x) * (px - x) + (py - y) * (py - y);
             if (d2 < bestD2) { bestD2 = d2; bestS = s; }
         }
-        if (globalFallback && Math.Sqrt(bestD2) > 25.0 * pxPerM)
+        if (globalFallback && Math.Sqrt(bestD2) > 25.0)
         {
             for (int k = 0; k < 200; k++)
             {

@@ -250,8 +250,7 @@ while True:
         xs += s["x1"]; ys += s["y1"]; n += 1
     i += 1
 if n:
-    ppm = 2.0   # config.PIXELS_PER_METER
-    print(f"{xs / n / ppm:.2f} {ys / n / ppm:.2f}")
+    print(f"{xs / n:.2f} {ys / n:.2f}")   # /segment answers metres
 EOF
 ) || CAM=""
   if [ -n "$CAM" ]; then

@@ -172,7 +172,7 @@ public sealed partial class BicycleNav
         if (Math.Abs(psi0) > Math.Radians(20.0)) return false;
         // Car position in the road frame (origin: the centreline point abeam of
         // the car).
-        double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.pxPerM;
+        double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry);
         double oPark = Config.ParkOffsetM(seg.Width);
         double dvFull = oPark - v0;
         if (dvFull < PARK_REVERSE_MIN_TUCK_M) return false;
@@ -233,11 +233,11 @@ public sealed partial class BicycleNav
         int nTail = Math.Max(1, (int)(tail / 0.02));
         for (int i_ = 1; i_ <= nTail; i_++)
             pts.Add((uEnd - i_ * tail / nTail, vEnd, 0.0, 0.0));
-        // To world pixels. The path is anchored at the car's rear axle, so the
+        // To world metres. The path is anchored at the car's rear axle, so the
         // line starts exactly under the car - no lateral step to absorb.
         double p0x = car.X, p0y = car.Y;
-        var line = pts.Select(p => (p0x + (tx * p.U + rx * (p.V - v0)) * RefLineMath.pxPerM,
-                                    p0y + (ty * p.U + ry * (p.V - v0)) * RefLineMath.pxPerM))
+        var line = pts.Select(p => (p0x + tx * p.U + rx * (p.V - v0),
+                                    p0y + ty * p.U + ry * (p.V - v0)))
                       .ToList();
         var refLine = new RefLine(line);
         _ref = refLine;
@@ -281,7 +281,7 @@ public sealed partial class BicycleNav
         // --- state ---
         double psiCar = Math.Radians(Math.WrapDeg(car.Heading - st.RoadH));
         var seg = _network.Segments[st.Seg];
-        double vCar = ((car.X - seg.X1) * st.Rx + (car.Y - seg.Y1) * st.Ry) / RefLineMath.pxPerM;
+        double vCar = ((car.X - seg.X1) * st.Rx + (car.Y - seg.Y1) * st.Ry);
         double eOff = vCar - st.OPark;
         bool converged = Math.Abs(eOff) < 0.06 && Math.Abs(psiCar) < Math.Radians(1.5);
 
@@ -348,8 +348,8 @@ public sealed partial class BicycleNav
         double rate = Math.Max(-maxRate, Math.Min(maxRate, desiredRate));
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.X += Math.Sin(rad) * car.Speed * dt;
+        car.Y += Math.Cos(rad) * car.Speed * dt;
         SyncSegment();
 
         ParkPhase = "reverse";
@@ -388,7 +388,7 @@ public sealed partial class BicycleNav
     public bool UturnActive => _uturnActive;
 
     /// <summary>Generate the U-turn reference line from the car's current state.
-    /// Returns (ptsPx, stopsS, reverseZone, kappaPts, hdgPts) or null when the
+    /// Returns (worldPts, stopsS, reverseZone, kappaPts, hdgPts) or null when the
     /// maneuver cannot be executed safely here. NEVER returns a line whose body
     /// corners would leave the pavement - an infeasible U-turn is aborted, not
     /// driven (the hard rules apply to the car, so they apply to the planned
@@ -420,9 +420,10 @@ public sealed partial class BicycleNav
         double lane0 = Math.Min(LANE_OFFSET_M, c);
         // Local origin: the point on the CENTERLINE closest to the car, so that
         // pt(lat, along)'s lat is measured from the centerline (the car itself
-        // sits at lat = lat0, which is NOT zero). Work in metres, convert at end.
-        double p0x = car.X / RefLineMath.pxPerM, p0y = car.Y / RefLineMath.pxPerM;
-        double lat0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.pxPerM;
+        // sits at lat = lat0, which is NOT zero). The frame is metres, so no
+        // conversion is needed anywhere in here.
+        double p0x = car.X, p0y = car.Y;
+        double lat0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry);
         p0x -= rx * lat0;
         p0y -= ry * lat0;
 
@@ -446,8 +447,8 @@ public sealed partial class BicycleNav
                     double cy_ = y + fy * lf + ryn * lr;
                     // Lateral distance from the segment CENTERLINE (not from P0,
                     // which itself sits off-center on the kerb side).
-                    double lat = ((cx_ * RefLineMath.pxPerM - seg.X1) * rx +
-                                  (cy_ * RefLineMath.pxPerM - seg.Y1) * ry) / RefLineMath.pxPerM;
+                    double lat = (cx_ - seg.X1) * rx +
+                                  (cy_ - seg.Y1) * ry;
                     if (Math.Abs(lat) > width / 2.0 - UTURN_LINE_MARGIN_M) return false;
                 }
             return true;
@@ -469,8 +470,8 @@ public sealed partial class BicycleNav
                     {
                         double cx_ = px_ + fx * lf + rxn * lr;
                         double cy_ = py_ + fy * lf + ryn * lr;
-                        double lat = ((cx_ * RefLineMath.pxPerM - seg.X1) * rx +
-                                      (cy_ * RefLineMath.pxPerM - seg.Y1) * ry) / RefLineMath.pxPerM;
+                        double lat = (cx_ - seg.X1) * rx +
+                                      (cy_ - seg.Y1) * ry;
                         worst = Math.Max(worst, Math.Abs(lat));
                     }
             }
@@ -726,13 +727,13 @@ public sealed partial class BicycleNav
         if (!single)
             for (int i_ = sA2 + 1; i_ <= sA3; i_++) hdgPts[i_] += Math.PI;
 
-        var ptsPx = pts.Select(p => (p.X * RefLineMath.pxPerM, p.Y * RefLineMath.pxPerM)).ToList();
-        var refLine = new RefLine(ptsPx);
+        var worldPts = pts.Select(p => (p.X, p.Y)).ToList();
+        var refLine = new RefLine(worldPts);
         // Map the stop point indices to arc lengths (metres).
         var stopsS = stopIdx.Select(i => refLine.Cum[i]).ToList();
         (double A, double B)? revZoneS = reverseZone is null
             ? null : (refLine.Cum[reverseZone.Value.A], refLine.Cum[reverseZone.Value.B]);
-        return (ptsPx, stopsS, revZoneS, kappaPts, hdgPts);
+        return (worldPts, stopsS, revZoneS, kappaPts, hdgPts);
     }
 
     /// <summary>SIGNED v_max per metre for the U-turn line. Negative on the
@@ -785,8 +786,8 @@ public sealed partial class BicycleNav
             return false;
         }
         UturnRejectReason = "";
-        var (ptsPx, stopsS, revZone, kappaPts, hdgPts) = gen.Value;
-        _ref = new RefLine(ptsPx);
+        var (worldPts, stopsS, revZone, kappaPts, hdgPts) = gen.Value;
+        _ref = new RefLine(worldPts);
         _uturnProfile = BuildUturnProfile(_ref, revZone);
         _uturnStops = stopsS;
         _uturnKappa = kappaPts;
@@ -858,7 +859,7 @@ public sealed partial class BicycleNav
         if (ns is not null && _uturnState == "drive" && _uturnReleaseForce == 0.0)
         {
             var (spx, spy) = refLine.PointAt(ns.Value);
-            double dStop = Math.Hypot(car.X - spx, car.Y - spy) / RefLineMath.pxPerM;
+            double dStop = Math.Hypot(car.X - spx, car.Y - spy);
             // 1 m margin: the car may sit up to ~0.5-0.8 m OFF the line laterally,
             // and d_stop is measured to a point - with A_BRAKE = 10 m/s^2 the bare
             // v^2/2a + 0.3 threshold (0.69 m at 2.8 m/s) would never trigger
@@ -968,8 +969,8 @@ public sealed partial class BicycleNav
                 if (st_ > S) { lookahead = Math.Min(lookahead, Math.Max(0.1, st_ - S)); break; }
             }
             var (tx, ty) = refLine.PointAt(S + lookahead);
-            double dx = (tx - car.X) / RefLineMath.pxPerM;
-            double dy = (ty - car.Y) / RefLineMath.pxPerM;
+            double dx = tx - car.X;
+            double dy = ty - car.Y;
             double h = Math.Radians(car.Heading);
             double deltaPp;
             if (_uturnMode == "fwd")
@@ -1032,8 +1033,8 @@ public sealed partial class BicycleNav
         double rate = Math.Max(-maxRate, Math.Min(maxRate, desiredRate));
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.X += Math.Sin(rad) * car.Speed * dt;
+        car.Y += Math.Cos(rad) * car.Speed * dt;
 
         SyncSegment();
 
@@ -1205,8 +1206,8 @@ public sealed partial class BicycleNav
         if (pullingOut) lookahead = Math.Min(lookahead, 1.5);
 
         var (tx, ty) = refLine.PointAt(S + lookahead);
-        double dx = (tx - car.X) / RefLineMath.pxPerM;
-        double dy = (ty - car.Y) / RefLineMath.pxPerM;
+        double dx = tx - car.X;
+        double dy = ty - car.Y;
         double h = Math.Radians(car.Heading);
         double localRight = dx * Math.Cos(h) - dy * Math.Sin(h);
         double localForward = dx * Math.Sin(h) + dy * Math.Cos(h);
@@ -1249,7 +1250,7 @@ public sealed partial class BicycleNav
             // Right-hand normal of the line, in screen coordinates
             // (x = sin(h), y = cos(h) is "forward").
             double rnx = Math.Cos(lh), rny = -Math.Sin(lh);
-            double eRight = ((car.X - refX) * rnx + (car.Y - refY) * rny) / RefLineMath.pxPerM;
+            double eRight = ((car.X - refX) * rnx + (car.Y - refY) * rny);
             double headingErr = Math.Radians(Math.WrapDeg(lineHeading - car.Heading));
             double cross = Math.Atan2(PARK_ALIGN_GAIN * eRight, Math.Max(car.Speed, 1.0));
             // Fade the cross term out over the last metre (see constant): only the
@@ -1438,8 +1439,8 @@ public sealed partial class BicycleNav
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
 
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.X += Math.Sin(rad) * car.Speed * dt;
+        car.Y += Math.Cos(rad) * car.Speed * dt;
 
         DbgSpeedAtEnd = car.Speed;   // TEMPORARY debug
 
@@ -1478,7 +1479,7 @@ public sealed partial class BicycleNav
         // Measured on the Y-junction: 1.3 m before the node the car flipped to the far
         // fork and was off the road 0.5 s later. We know which way we intend to go; a
         // couple of centimetres of projection noise should not overrule it.
-        if (routeSeg is not null && routeDist <= bestDist + RefLineMath.ROUTE_STICKINESS_PX)
+        if (routeSeg is not null && routeDist <= bestDist + RefLineMath.ROUTE_STICKINESS_M)
         {
             bestSeg = routeSeg.Value; bestT = routeT;
         }

@@ -26,10 +26,8 @@ import json
 
 API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
 
-# This script works in METRES (as /state and /map do). /segment still
-# answers in the sim's internal world pixels, so its coordinates are
-# converted once, in find_segment, where they are read.
-PX_PER_M = 2.0   # config.PIXELS_PER_METER
+# Everything this script reads is in METRES now (as /state, /map and
+# /segment all answer - see docs/UNITS.md); nothing converts any more.
 
 # (color, width_m, length_m) - MUST mirror Config.CAR_COLORS
 # (DrivingGame.Sim/Config.cs) and CarSizes in MapRenderer.cs.
@@ -90,8 +88,6 @@ def find_segment(needed_m, min_width_m):
             if e.code == 404:
                 break
             raise
-        for k in ("x1", "y1", "x2", "y2"):
-            seg[k] /= PX_PER_M          # world pixels -> metres
         if seg["length"] >= needed_m + 2 * MARGIN_M and seg["width"] >= min_width_m:
             return idx, seg
     raise RuntimeError(f"no segment long enough (>= {needed_m + 2 * MARGIN_M:.0f} m) "

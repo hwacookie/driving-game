@@ -46,7 +46,7 @@ public sealed class OsmData
 
 public sealed record OsmWay(int Id, List<string> Nodes, string Highway, bool Oneway);
 
-/// <summary>One polygon: exterior ring + holes (world pixels).</summary>
+/// <summary>One polygon: exterior ring + holes (world metres).</summary>
 public sealed record PolygonRing(List<(double X, double Y)> Exterior,
     List<List<(double X, double Y)>> Holes);
 
@@ -79,7 +79,7 @@ public class RoadNetwork
     public double WorldHeight { get; init; }
     public Dictionary<string, List<int>> NodeConnections { get; private set; } = new();  // node_id -> [segment_indices]
     public Dictionary<string, int> NodeDegree { get; private set; } = new();            // node_id -> connection count
-    public Dictionary<string, (double HalfWidthPx, string Highway)> NodeMaxWidth { get; private set; } = new();
+    public Dictionary<string, (double HalfWidth, string Highway)> NodeMaxWidth { get; private set; } = new();
     /// <summary>name → (x, y, heading, seg_idx, forward, lateral_offset_m).</summary>
     public Dictionary<string, (double X, double Y, double Heading, int SegIdx, bool Forward, double LateralOffsetM)> StartPoints { get; } = new();
 
@@ -126,12 +126,10 @@ public class RoadNetwork
     /// <summary>Build a RoadNetwork from parsed OSM data.</summary>
     public static RoadNetwork FromOsmData(OsmData data, double north, double south, double west, double east)
     {
-        double pxPerM = Config.PIXELS_PER_METER;
-
         // Project all nodes.
         var nodes = new Dictionary<string, (double X, double Y)>();
         foreach (var (nid, n) in data.Nodes)
-            nodes[nid] = RoadNetworkGeometry.LatLonToWorld(n.Lat, n.Lon, south, west, pxPerM);
+            nodes[nid] = RoadNetworkGeometry.LatLonToWorld(n.Lat, n.Lon, south, west);
 
         // Build segments with node references.
         var segments = new List<RoadSegment>();
@@ -150,7 +148,7 @@ public class RoadNetwork
                 else
                     width = 3.5;
 
-                double segLength = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y) / pxPerM;
+                double segLength = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y);
 
                 segments.Add(new RoadSegment
                 {
@@ -168,7 +166,7 @@ public class RoadNetwork
         }
 
         // Snap dangling endpoints onto nearby roads.
-        int snapped = RoadNetworkGeometry.SnapEndpoints(segments, pxPerM);
+        int snapped = RoadNetworkGeometry.SnapEndpoints(segments);
         if (snapped > 0)
             Console.WriteLine($"  Snapped {snapped} dangling endpoints");
 
@@ -205,35 +203,35 @@ public class RoadNetwork
 
         // Junction info: widest road at each node (for rendering). Skip
         // degree-2 nodes (straight road continuation).
-        var nodeInfo = new Dictionary<string, (double HalfWidthPx, string Highway)>();
+        var nodeInfo = new Dictionary<string, (double HalfWidth, string Highway)>();
         foreach (var seg in segments)
         {
-            double halfPx = (seg.Width / 2) * pxPerM;
+            double halfW = seg.Width / 2;
             foreach (string nid in new[] { seg.StartNode, seg.EndNode })
             {
-                if (!nodeInfo.TryGetValue(nid, out var cur) || halfPx > cur.HalfWidthPx)
-                    nodeInfo[nid] = (halfPx, seg.Highway);
+                if (!nodeInfo.TryGetValue(nid, out var cur) || halfW > cur.HalfWidth)
+                    nodeInfo[nid] = (halfW, seg.Highway);
             }
         }
         nodeInfo = nodeInfo.Where(kv => nodeDegree.GetValueOrDefault(kv.Key, 0) != 2).ToDictionary(kv => kv.Key, kv => kv.Value);
 
-        double worldWidthPx = RoadNetworkGeometry.LatLonToWorld(south, east, south, west, pxPerM).X;
-        double worldHeightPx = RoadNetworkGeometry.LatLonToWorld(north, west, south, west, pxPerM).Y;
+        double worldWidth = RoadNetworkGeometry.LatLonToWorld(south, east, south, west).X;
+        double worldHeight = RoadNetworkGeometry.LatLonToWorld(north, west, south, west).Y;
 
         return CreateFromParts(nodes, segments, south, west,
-            worldWidthPx, worldHeightPx, nodeConnections, nodeDegree, nodeInfo);
+            worldWidth, worldHeight, nodeConnections, nodeDegree, nodeInfo);
     }
 
     internal static RoadNetwork CreateFromParts(
         Dictionary<string, (double X, double Y)> nodes, List<RoadSegment> segments,
-        double originLat, double originLon, double worldWidthPx, double worldHeightPx,
+        double originLat, double originLon, double worldWidth, double worldHeight,
         Dictionary<string, List<int>> nodeConnections, Dictionary<string, int> nodeDegree,
-        Dictionary<string, (double HalfWidthPx, string Highway)> nodeMaxWidth)
+        Dictionary<string, (double HalfWidth, string Highway)> nodeMaxWidth)
     {
         var net = new RoadNetwork
         {
             OriginLat = originLat, OriginLon = originLon,
-            WorldWidth = worldWidthPx, WorldHeight = worldHeightPx,
+            WorldWidth = worldWidth, WorldHeight = worldHeight,
         };
         net.Nodes = nodes;
         net.Segments = segments;
@@ -350,8 +348,8 @@ public class RoadNetwork
     /// fillets included) — not a cruder rectangle+circle approximation.</summary>
     public bool IsOnRoad(double wx, double wy)
     {
-        double tolerancePx = Config.ROAD_EDGE_TOLERANCE_M * Config.PIXELS_PER_METER;
-        return GetPavedPolygon().Distance(new Point(wx, wy)) <= tolerancePx;
+        double tolerance = Config.ROAD_EDGE_TOLERANCE_M;
+        return GetPavedPolygon().Distance(new Point(wx, wy)) <= tolerance;
     }
 
     /// <summary>Check if a 4-wheel car (not just its center point) is on the
@@ -361,20 +359,19 @@ public class RoadNetwork
     public bool IsCarOnRoad(double wx, double wy, double headingDeg,
         double lengthM = 4.5, double widthM = 1.8)
     {
-        double tolerancePx = Config.ROAD_EDGE_TOLERANCE_M * Config.PIXELS_PER_METER;
+        double tolerance = Config.ROAD_EDGE_TOLERANCE_M;
         double h = headingDeg * Math.PI / 180.0;
         double fx = Math.Sin(h), fy = Math.Cos(h);   // forward
         double rx = Math.Cos(h), ry = -Math.Sin(h);  // right
-        double pxPerM = Config.PIXELS_PER_METER;
-        double halfLPx = (lengthM / 2.0) * pxPerM;
-        double halfWPx = (widthM / 2.0) * pxPerM;
+        double halfL = lengthM / 2.0;
+        double halfW = widthM / 2.0;
         var poly = GetPavedPolygon();
         foreach (double sfx in new[] { 1.0, -1.0 })
             foreach (double srx in new[] { 1.0, -1.0 })
             {
-                double cx = wx + (sfx * fx * halfLPx + srx * rx * halfWPx);
-                double cy = wy + (sfx * fy * halfLPx + srx * ry * halfWPx);
-                if (poly.Distance(new Point(cx, cy)) > tolerancePx)
+                double cx = wx + (sfx * fx * halfL + srx * rx * halfW);
+                double cy = wy + (sfx * fy * halfL + srx * ry * halfW);
+                if (poly.Distance(new Point(cx, cy)) > tolerance)
                     return false;
             }
         return true;
@@ -496,29 +493,28 @@ public class RoadNetwork
                             break;
                         }
             }
-            double pxPerM = Config.PIXELS_PER_METER;
-            var curve = new SmoothGeometry.SmoothCurve(ext, pxPerM: pxPerM);
-            double s0Px = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[0]);
-            double s1Px = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[^1]);
-            if (s0Px > s1Px) (s0Px, s1Px) = (s1Px, s0Px);
-            double halfWPx = (width / 2.0) * pxPerM;
-            int n = Math.Max(2, (int)((s1Px - s0Px) / (0.5 * pxPerM)) + 1);
+            var curve = new SmoothGeometry.SmoothCurve(ext);
+            double s0 = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[0]);
+            double s1 = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[^1]);
+            if (s0 > s1) (s0, s1) = (s1, s0);
+            double halfW = width / 2.0;
+            int n = Math.Max(2, (int)((s1 - s0) / 0.5) + 1);
             var pts = new List<(double X, double Y)>(n);
             for (int i = 0; i < n; i++)
-                pts.Add(curve.PointAt(s0Px + (s1Px - s0Px) * i / (n - 1)));
+                pts.Add(curve.PointAt(s0 + (s1 - s0) * i / (n - 1)));
 
             var line = ToLineString(pts);
             // Two surfaces from the same spline: full deck (carriageway +
             // BRIDGE_SIDEWALK_M per side, concrete) and the carriageway itself.
-            deckParts.Add(line.Buffer(halfWPx + Config.BRIDGE_SIDEWALK_M * pxPerM,
+            deckParts.Add(line.Buffer(halfW + Config.BRIDGE_SIDEWALK_M,
                 new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0)));
-            roadParts.Add(line.Buffer(halfWPx,
+            roadParts.Add(line.Buffer(halfW,
                 new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0)));
             centerlines.Add(pts);
 
             // Open white edge lines: centreline offset by (width/2 - inset),
             // one polyline per side, OPEN at the ends.
-            double offPx = (width / 2.0 - Config.EDGE_LINE_INSET_M) * pxPerM;
+            double off = width / 2.0 - Config.EDGE_LINE_INSET_M;
             var left = new List<(double X, double Y)>(n);
             var right = new List<(double X, double Y)>(n);
             for (int i = 0; i < n; i++)
@@ -528,8 +524,8 @@ public class RoadNetwork
                 double tx = x1 - x0, ty = y1 - y0;
                 double tl = Math.Hypot(tx, ty); if (tl == 0) tl = 1.0;
                 double nx = -ty / tl, ny = tx / tl;
-                left.Add((pts[i].X + nx * offPx, pts[i].Y + ny * offPx));
-                right.Add((pts[i].X - nx * offPx, pts[i].Y - ny * offPx));
+                left.Add((pts[i].X + nx * off, pts[i].Y + ny * off));
+                right.Add((pts[i].X - nx * off, pts[i].Y - ny * off));
             }
             edgeLines.Add(left); edgeLines.Add(right);
         }
@@ -576,20 +572,20 @@ public class RoadNetwork
         return result;
     }
 
-    /// <summary>Full bridge DECKS incl. sidewalks (world pixels).</summary>
+    /// <summary>Full bridge DECKS incl. sidewalks (world metres).</summary>
     public List<PolygonRing> GetElevatedPolygons() => RingsOf(ElevatedGeometry().Deck);
 
-    /// <summary>The asphalt CARRIAGEWAY of every bridge (world pixels).</summary>
+    /// <summary>The asphalt CARRIAGEWAY of every bridge (world metres).</summary>
     public List<PolygonRing> GetElevatedRoadwayPolygons() => RingsOf(ElevatedGeometry().Roadway);
 
-    /// <summary>Open white edge lines for the decks (world pixels).</summary>
+    /// <summary>Open white edge lines for the decks (world metres).</summary>
     public List<List<(double X, double Y)>> GetElevatedEdgeLines()
     {
         ElevatedGeometry();
         return _elevatedEdgeLinesCache ?? new();
     }
 
-    /// <summary>Centreline polylines of the elevated decks (world pixels).</summary>
+    /// <summary>Centreline polylines of the elevated decks (world metres).</summary>
     public List<List<(double X, double Y)>> GetElevatedCenterlines()
     {
         GetElevatedPolygons();
@@ -660,12 +656,12 @@ public class RoadNetwork
                     if (d2 < bestD2) { bestD2 = d2; bestLine = new List<(double X, double Y)>(coords); }
                 }
             }
-        if (bestLine is null || bestD2 > Math.Pow(30.0 * Config.PIXELS_PER_METER, 2))
+        if (bestLine is null || bestD2 > 30.0 * 30.0)
             return null;
         if (bestLine[0].X != nx || bestLine[0].Y != ny)
             bestLine.Reverse(); // walk from the end at the node INTO the road
 
-        double target = Math.Max(0.0, distanceM) * Config.PIXELS_PER_METER;
+        double target = Math.Max(0.0, distanceM);
         double x = bestLine[0].X, y = bestLine[0].Y;
         double heading = 0.0;
         double remaining = target;
@@ -704,11 +700,11 @@ public class RoadNetwork
             foreach (var coords in lines)
             {
                 if (coords.Count < 2) continue;
-                var d = Math.Max(NearestOnPolyline(coords, seg.X1, seg.Y1).DistPx,
-                                 NearestOnPolyline(coords, seg.X2, seg.Y2).DistPx);
+                var d = Math.Max(NearestOnPolyline(coords, seg.X1, seg.Y1).Dist,
+                                 NearestOnPolyline(coords, seg.X2, seg.Y2).Dist);
                 if (d < bestD) { bestD = d; best = coords; }
             }
-        if (best is null || bestD > 30.0 * Config.PIXELS_PER_METER)
+        if (best is null || bestD > 30.0)
             return null;
         var (s0, _, tanX, tanY) = NearestOnPolyline(best, seg.X1, seg.Y1);
         bool withChain = tanX * (seg.X2 - seg.X1) + tanY * (seg.Y2 - seg.Y1) >= 0.0;
@@ -720,9 +716,9 @@ public class RoadNetwork
     }
 
     /// <summary>Nearest point on a polyline to (x, y): arc length along it in
-    /// METRES (RefLine's parameterization), distance in world pixels, and the
+    /// metres (RefLine's parameterization), distance in world metres, and the
     /// chain's unit tangent there.</summary>
-    private static (double S, double DistPx, double TanX, double TanY)
+    private static (double S, double Dist, double TanX, double TanY)
         NearestOnPolyline(List<(double X, double Y)> coords, double x, double y)
     {
         double bestD2 = double.PositiveInfinity, s = 0.0, tx = 1.0, ty = 0.0, acc = 0.0;
@@ -740,7 +736,7 @@ public class RoadNetwork
             if (d2 < bestD2)
             {
                 bestD2 = d2;
-                s = (acc + t * len) / Config.PIXELS_PER_METER;
+                s = acc + t * len;
                 tx = dx / len;
                 ty = dy / len;
             }
@@ -805,18 +801,17 @@ public class RoadNetwork
     /// into which node (RoadNetwork.Signs is keyed by exactly that), and the
     /// mouth comes from the corner roundings - so a stop line only appears
     /// where a yield rule and real paved corners agree. Returns (x1, y1, x2,
-    /// y2) in world px, with x1/y1 on the centreline. Cached.</summary>
+    /// y2) in world metres, with x1/y1 on the centreline. Cached.</summary>
     public List<(double X1, double Y1, double X2, double Y2)> GetStopLines()
     {
         if (_stopLineCache is not null) return _stopLineCache;
         var mouths = GetCrossingMouths();
         var out_ = new List<(double X1, double Y1, double X2, double Y2)>();
-        double pxPerM = Config.PIXELS_PER_METER;
         foreach (var ((segIdx, nodeId), type) in Signs)
         {
             if (type != SignType.Yield) continue;
             if (!mouths.TryGetValue((nodeId, segIdx), out var pts) || pts.Count < 2)
-                continue;   // nothing to spanPx the road between
+                continue;   // nothing to span the road between
             if (!Nodes.TryGetValue(nodeId, out var nxy)) continue;
             var seg = Segments[segIdx];
 
@@ -827,9 +822,9 @@ public class RoadNetwork
             bool atStart = seg.StartNode == nodeId;
             double awayX = (atStart ? seg.X2 - seg.X1 : seg.X1 - seg.X2);
             double awayY = (atStart ? seg.Y2 - seg.Y1 : seg.Y1 - seg.Y2);
-            double lenPx = Math.Hypot(awayX, awayY);
-            if (lenPx < 1e-9) continue;
-            awayX /= lenPx; awayY /= lenPx;
+            double len = Math.Hypot(awayX, awayY);
+            if (len < 1e-9) continue;
+            awayX /= len; awayY /= len;
             double rightX = -awayY, rightY = awayX;
 
             // Where the mouth is along the arm: the two corner roundings
@@ -837,25 +832,25 @@ public class RoadNetwork
             // two tangent points sit at different distances. The farther one
             // is the mouth - the nearer one would put paint inside the
             // crossing, where there is none.
-            double d0Px = (pts[0].X - nxy.X) * awayX + (pts[0].Y - nxy.Y) * awayY;
-            double d1Px = (pts[1].X - nxy.X) * awayX + (pts[1].Y - nxy.Y) * awayY;
-            double dPx = Math.Max(d0Px, d1Px);
-            if (dPx <= 0.0) continue;      // no mouth ahead of the node
+            double d0 = (pts[0].X - nxy.X) * awayX + (pts[0].Y - nxy.Y) * awayY;
+            double d1 = (pts[1].X - nxy.X) * awayX + (pts[1].Y - nxy.Y) * awayY;
+            double d = Math.Max(d0, d1);
+            if (d <= 0.0) continue;      // no mouth ahead of the node
 
             // The band is drawn CENTRED on the point below, so left as it
             // is its near half would hang into the crossing beyond the
             // mouth - and the centreline ends AT the mouth line. Push the
             // band out by half its own width: its near edge then IS the
             // mouth, so the centreline ends exactly where the white begins.
-            dPx += Config.STOP_LINE_WIDTH_M / 2.0 * pxPerM;
+            d += Config.STOP_LINE_WIDTH_M / 2.0;
 
             // The lane: centreline to right kerb, keeping the kerb clear.
-            double halfWPx = seg.Width / 2.0 * pxPerM;
-            double spanPx = halfWPx - Config.STOP_LINE_EDGE_GAP_M * pxPerM;
-            if (spanPx <= 0.0) continue;   // narrower than one lane: no paint
+            double halfW = seg.Width / 2.0;
+            double span = halfW - Config.STOP_LINE_EDGE_GAP_M;
+            if (span <= 0.0) continue;   // narrower than one lane: no paint
 
-            double bx = nxy.X + awayX * dPx, by = nxy.Y + awayY * dPx;
-            out_.Add((bx, by, bx + rightX * spanPx, by + rightY * spanPx));
+            double bx = nxy.X + awayX * d, by = nxy.Y + awayY * d;
+            out_.Add((bx, by, bx + rightX * span, by + rightY * span));
         }
         return _stopLineCache = out_;
     }
@@ -864,18 +859,17 @@ public class RoadNetwork
     /// node where two roads CROSS (degree >= 4 - a T, where one road merely
     /// joins, has no middle). Not a German rule, just the marker the user
     /// asked for, so the crossing's centre is visible even where no other
-    /// paint is. Returns (x, y, radius) in world px. Cached.</summary>
+    /// paint is. Returns (x, y, radius) in world metres. Cached.</summary>
     public List<(double X, double Y, double R)> GetCrossingMarkers()
     {
         if (_crossingMarkerCache is not null) return _crossingMarkerCache;
-        double pxPerM = Config.PIXELS_PER_METER;
-        double rPx = Config.CROSSING_MARKER_DIAMETER_M / 2.0 * pxPerM;
+        double r = Config.CROSSING_MARKER_DIAMETER_M / 2.0;
         var out_ = new List<(double X, double Y, double R)>();
         foreach (var (nid, deg) in NodeDegree)
         {
             if (deg < 4) continue;
             if (!Nodes.TryGetValue(nid, out var nxy)) continue;
-            out_.Add((nxy.X, nxy.Y, rPx));
+            out_.Add((nxy.X, nxy.Y, r));
         }
         return _crossingMarkerCache = out_;
     }

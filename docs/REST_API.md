@@ -67,14 +67,15 @@ Returns current game state:
 }
 ```
 
-**Units.** Every coordinate in this payload - `x`, `y`, the `body_corners`
-of a car, and the `flags` positions - is in **metres**, the same dialect
-`GET /map` uses. `speed` is m/s, `speed_kmh` km/h. The sim keeps its own
-internal frame in world pixels; the conversion happens once where the
-payload is built, so the API has exactly one dialect for positions. The
-two endpoints that still answer in world pixels (`GET /segment/{idx}` and
-`GET /start_points`) say so in the sections below. The project-wide rule
-for units and their naming is `docs/UNITS.md`.
+**Units.** Every coordinate anywhere in this API - `x`, `y`, the `body_corners`
+of a car, the `flags` positions, `GET /map`, `GET /segment/{idx}`, `GET /start_points`,
+`POST /obstacles` - is in **metres** (x east, y north, origin at the map's
+south-west corner). `speed` is m/s, `speed_kmh` km/h. There is no pixel
+frame left anywhere: the sim works in metres and the Godot client picks
+its own px/m at draw time. Payloads that are objects carry `"units":
+"meters"`; `GET /obstacles` answers a bare list and is metres by the
+section below. The project-wide rule for units and their naming is
+`docs/UNITS.md`.
 
 `parking` reflects the nav's parking state (fields are null when no
 parking plan is active): `style` is `"forward"` or `"reverse"`, `phase`
@@ -294,9 +295,9 @@ go through the same logic as the palette UI in the game window.
 ```bash
 GET /obstacles
 ```
-Returns `[{id, type, color, x, y, heading}, ...]` — `x`/`y` in world pixels
-(2 px per meter), `heading` in degrees (0 = north). Empty list if none are
-placed.
+Returns `[{id, type, color, x, y, heading}, ...]` — `x`/`y` in **metres**
+(the API's one dialect), `heading` in degrees (0 = north). Empty list if
+none are placed.
 
 **Place an obstacle**
 ```bash
@@ -307,7 +308,7 @@ Content-Type: application/json
 ```
 - `type`: currently only `"car"` (a parked car, same size as the player car)
 - `color`: `blue`, `yellow` or `white`
-- `x`, `y`: world pixels (2 px per meter — divide by 2 for meters)
+- `x`, `y`: metres (the API's one dialect)
 
 The heading is NOT an input: it is computed from the lane direction under the
 drop point (right half of the road faces forward, left/oncoming half faces

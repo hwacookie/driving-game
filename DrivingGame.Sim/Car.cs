@@ -46,7 +46,7 @@ public class Car
     public double WidthM => Size.WidthM;
     public double LengthM => Size.LengthM;
 
-    // Position and orientation (world pixels; heading degrees, 0 = north)
+    // Position and orientation (world metres; heading degrees, 0 = north)
     public double X { get; internal set; }
     public double Y { get; internal set; }
     public double Heading { get; internal set; }
@@ -310,8 +310,8 @@ public class Car
 
         // Movement (signed speed handles reverse)
         double rad = Math.Radians(Heading);
-        X += Math.Sin(rad) * Speed * dt * Config.PIXELS_PER_METER;
-        Y += Math.Cos(rad) * Speed * dt * Config.PIXELS_PER_METER;
+        X += Math.Sin(rad) * Speed * dt;
+        Y += Math.Cos(rad) * Speed * dt;
 
         // Keep seg_idx/progress/forward current: the lane guard (wrong-side
         // check) and API state read them, but FREE mode never updates them
@@ -328,9 +328,9 @@ public class Car
         if (lengthSq < 1e-9) { SnapToRoad(network); return; }
         double t = ((X - seg.X1) * dx + (Y - seg.Y1) * dy) / lengthSq;
         double projX = seg.X1 + t * dx, projY = seg.Y1 + t * dy;
-        double latPx = Math.Hypot(X - projX, Y - projY);
-        double halfWidthPx = (seg.Width / 2.0 + 1.0) * Config.PIXELS_PER_METER;
-        if (t < -0.15 || t > 1.15 || latPx > halfWidthPx) SnapToRoad(network);
+        double lat = Math.Hypot(X - projX, Y - projY);
+        double halfWidth = seg.Width / 2.0 + 1.0;
+        if (t < -0.15 || t > 1.15 || lat > halfWidth) SnapToRoad(network);
     }
 
     // --- Utility ---
@@ -388,7 +388,7 @@ public class Car
         Trail.Clear();
     }
 
-    /// <summary>Geometric centre of the car body, in world pixels.
+    /// <summary>Geometric centre of the car body, in world metres.
     /// X/Y are the REAR AXLE (the bicycle model's pivot), so the body sits
     /// Config.REAR_AXLE_OFFSET_M ahead of them along the heading. Anything
     /// that draws or measures the car's BODY (sprite, four-corner on-road
@@ -396,7 +396,7 @@ public class Car
     public (double X, double Y) BodyCenter()
     {
         double rad = Math.Radians(Heading);
-        double off = Config.REAR_AXLE_OFFSET_M * Config.PIXELS_PER_METER;
+        double off = Config.REAR_AXLE_OFFSET_M;
         return (X + Math.Sin(rad) * off, Y + Math.Cos(rad) * off);
     }
 
@@ -414,7 +414,7 @@ public class Car
         if (RenderState is null) return BodyCenter();
         var (x, y, h) = RenderState.Value;
         double rad = Math.Radians(h);
-        double off = Config.REAR_AXLE_OFFSET_M * Config.PIXELS_PER_METER;
+        double off = Config.REAR_AXLE_OFFSET_M;
         return (x + Math.Sin(rad) * off, y + Math.Cos(rad) * off);
     }
 

@@ -26,9 +26,8 @@ public static class Config
     public const double BOUNDING_BOX_SOUTH = 52.40714;
     public const double BOUNDING_BOX_EAST = 13.25033;
 
-    // --- Projection ---
-    /// <summary>Pixels per meter at zoom level 1.0.</summary>
-    public const double PIXELS_PER_METER = 2;
+    // --- World frame: the sim works in METRES (x east, y north). There is
+    // no pixel frame left; the Godot client picks its own px/m at draw time.
     /// <summary>Extra paved radius (m) added on top of the widest connected
     /// road's half-width at junctions (corner-cutting area confirmed via
     /// satellite imagery). Used when rendering junction nodes and validating

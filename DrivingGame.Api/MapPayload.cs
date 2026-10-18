@@ -15,10 +15,10 @@ public static class MapPayload
 {
     public static Dictionary<string, object?> Build(RoadNetwork net)
     {
-        double pxPerM = Config.PIXELS_PER_METER;
-
+        // The payload's coordinate emitter: the sim frame IS metres, so this
+        // only rounds for the wire.
         List<List<double>> M(IEnumerable<(double X, double Y)> pts) =>
-            pts.Select(p => new List<double> { Math.Round(p.X / pxPerM, 2), Math.Round(p.Y / pxPerM, 2) })
+            pts.Select(p => new List<double> { Math.Round(p.X, 2), Math.Round(p.Y, 2) })
                .ToList();
 
         // Road PAINT, not the paved area: one ribbon per road (the two
@@ -46,7 +46,7 @@ public static class MapPayload
         // offset INWARD by EDGE_LINE_INSET_M so a 15 cm tarmac shoulder
         // stays outside the white line (ALL roads).
         var pavedBuf = net.GetPavedPolygon().Buffer(
-            -Config.EDGE_LINE_INSET_M * pxPerM,
+            -Config.EDGE_LINE_INSET_M,
             new BufferParameters(16, EndCapStyle.Round, JoinStyle.Round, 5.0));
         var pavedPolys = pavedBuf is MultiPolygon mp
             ? mp.Geometries.Cast<Polygon>().ToList()
@@ -70,8 +70,8 @@ public static class MapPayload
             if (!net.Nodes.TryGetValue(nodeId, out var nxy)) continue;
             var s = net.Segments[segIdx];
             // Direction of travel toward the signed node.
-            double dxM = (nodeId == s.EndNode ? s.X2 - s.X1 : s.X1 - s.X2) / pxPerM;
-            double dyM = (nodeId == s.EndNode ? s.Y2 - s.Y1 : s.Y1 - s.Y2) / pxPerM;
+            double dxM = nodeId == s.EndNode ? s.X2 - s.X1 : s.X1 - s.X2;
+            double dyM = nodeId == s.EndNode ? s.Y2 - s.Y1 : s.Y1 - s.Y2;
             double lenM = Math.Max(Math.Sqrt(dxM * dxM + dyM * dyM), 1e-6);
             double fx = dxM / lenM, fy = dyM / lenM;          // forward (toward node)
             double rx = fy, ry = -fx;                     // right of travel
@@ -81,8 +81,8 @@ public static class MapPayload
             // Right of the curb: half the road width plus a small gap onto
             // the shoulder, so the sign sits beside the lane, not in it.
             double sideOffsetM = s.Width / 2.0 + CurbGapM;
-            double xM = nxy.X / pxPerM - fx * BeforeNodeM + rx * sideOffsetM;
-            double yM = nxy.Y / pxPerM - fy * BeforeNodeM + ry * sideOffsetM;
+            double xM = nxy.X - fx * BeforeNodeM + rx * sideOffsetM;
+            double yM = nxy.Y - fy * BeforeNodeM + ry * sideOffsetM;
             signs.Add(new Dictionary<string, object?>
             {
                 ["x"] = Math.Round(xM, 2), ["y"] = Math.Round(yM, 2),
@@ -95,7 +95,7 @@ public static class MapPayload
         foreach (var (name, (xM, yM, hdg, seg, fwd, lat)) in net.StartPoints)
             startPoints[name] = new Dictionary<string, object?>
             {
-                ["x"] = Math.Round(xM / pxPerM, 2), ["y"] = Math.Round(yM / pxPerM, 2),
+                ["x"] = Math.Round(xM, 2), ["y"] = Math.Round(yM, 2),
                 ["heading_deg"] = hdg, ["seg"] = seg,
                 ["forward"] = fwd, ["lateral_offset_m"] = lat,
             };
@@ -106,8 +106,8 @@ public static class MapPayload
         foreach (var (x1M, y1M, x2M, y2M) in net.GetStopLines())
             stopLines.Add(new List<double>
             {
-                Math.Round(x1M / pxPerM, 2), Math.Round(y1M / pxPerM, 2),
-                Math.Round(x2M / pxPerM, 2), Math.Round(y2M / pxPerM, 2),
+                Math.Round(x1M, 2), Math.Round(y1M, 2),
+                Math.Round(x2M, 2), Math.Round(y2M, 2),
             });
 
         // The small white disc in the middle of a real crossing (see
@@ -116,8 +116,8 @@ public static class MapPayload
         foreach (var (xM, yM, rM) in net.GetCrossingMarkers())
             crossingMarkers.Add(new List<double>
             {
-                Math.Round(xM / pxPerM, 2), Math.Round(yM / pxPerM, 2),
-                Math.Round(rM / pxPerM, 3),
+                Math.Round(xM, 2), Math.Round(yM, 2),
+                Math.Round(rM, 3),
             });
 
         // Painted centrelines: cut at every junction the line passes (no
@@ -140,8 +140,8 @@ public static class MapPayload
             ["bounds"] = new List<double>
             {
                 0.0, 0.0,
-                Math.Round(net.WorldWidth / pxPerM, 2),
-                Math.Round(net.WorldHeight / pxPerM, 2),
+                Math.Round(net.WorldWidth, 2),
+                Math.Round(net.WorldHeight, 2),
             },
             ["road_color"] = new List<int> { rcR, rcG, rcB },
             ["bg_color"] = new List<int> { bgR, bgG, bgB },
@@ -151,8 +151,8 @@ public static class MapPayload
             // the minimap. level: 0 = ground, 1 = bridge over the ground.
             ["segments"] = net.Segments.Select(s => new List<object?>
             {
-                Math.Round(s.X1 / pxPerM, 2), Math.Round(s.Y1 / pxPerM, 2),
-                Math.Round(s.X2 / pxPerM, 2), Math.Round(s.Y2 / pxPerM, 2),
+                Math.Round(s.X1, 2), Math.Round(s.Y1, 2),
+                Math.Round(s.X2, 2), Math.Round(s.Y2, 2),
                 s.Width, s.Level,
             }).ToList(),
             // Bridge decks: buffered smoothed surface of all level>=1

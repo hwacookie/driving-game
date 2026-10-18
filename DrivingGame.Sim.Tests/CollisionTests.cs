@@ -13,7 +13,6 @@ namespace DrivingGame.Sim.Tests;
 public class CollisionTests
 {
     const double Dt = SimEngine.DtFixed;
-    const double PxPerM = Config.PIXELS_PER_METER;
 
     static (SimEngine Engine, RoadNetwork Net) NewEngine()
     {
@@ -43,7 +42,7 @@ public class CollisionTests
     static void HoldAccelerate(SimEngine engine, Car car) =>
         engine.SetControl(car.Uid, new Dictionary<string, object?> { ["accelerate"] = true });
 
-    static double CenterM(Car a, Car b) => Math.Hypot(a.X - b.X, a.Y - b.Y) / PxPerM;
+    static double CenterM(Car a, Car b) => Math.Hypot(a.X - b.X, a.Y - b.Y);
 
     // ------------------------------------------------------------------
     // Scenario 1: stationary lead car - v1 corridor cap alone suffices.
@@ -164,8 +163,8 @@ public class CollisionTests
         for (int i = 0; i < 2700; i++)   // 45 s
         {
             engine.Tick(Dt);
-            double distAM = Math.Hypot(a.X - center.X, a.Y - center.Y) / PxPerM;
-            double distBM = Math.Hypot(b.X - center.X, b.Y - center.Y) / PxPerM;
+            double distAM = Math.Hypot(a.X - center.X, a.Y - center.Y);
+            double distBM = Math.Hypot(b.X - center.X, b.Y - center.Y);
             if (distAM < 30.0) minSpeedANearCenter = Math.Min(minSpeedANearCenter, a.Speed);
             if (distBM > 0.5) minSpeedBBeforeCenter = Math.Min(minSpeedBBeforeCenter, b.Speed);
             minPairGapM = Math.Min(minPairGapM, CenterM(a, b));
@@ -186,8 +185,8 @@ public class CollisionTests
 
         // Both eventually clear the junction (A goes first, B resumes once
         // A is clear) - no deadlock.
-        double aPastCenterM = (center.Y - a.Y) / PxPerM;     // south = -Y
-        double bPastCenterM = (center.X - b.X) / PxPerM;     // west = -X
+        double aPastCenterM = center.Y - a.Y;     // south = -Y
+        double bPastCenterM = center.X - b.X;     // west = -X
         Assert.True(aPastCenterM > 20.0,
             $"A should have driven through and well past the crossing: {aPastCenterM:F1} m past centre");
         Assert.True(bPastCenterM > 5.0,

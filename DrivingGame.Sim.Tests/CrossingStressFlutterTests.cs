@@ -108,7 +108,7 @@ public class CrossingStressTests
         for (int i = 0; i < net.Segments.Count; i++)
             if (net.Segments[i].StartNode.StartsWith("xing_")) loop.Add(i);
         Assert.Equal(48, loop.Count);
-        double perimeterM = loop.Sum(i => net.Segments[i].Length) / Config.PIXELS_PER_METER;
+        double perimeterM = loop.Sum(i => net.Segments[i].Length);
 
         // Spawn: same as the e2e - evenly spaced arc positions, alternating
         // direction (even = forward, odd = reverse), 50 km/h rolling start.
@@ -121,7 +121,7 @@ public class CrossingStressTests
             double bestErr = double.PositiveInfinity, mid = 0.0;
             foreach (int si in loop)
             {
-                double segLenM = net.Segments[si].Length / Config.PIXELS_PER_METER;
+                double segLenM = net.Segments[si].Length;
                 double err = Math.Abs(mid + segLenM / 2.0 - targetM);
                 if (err < bestErr) { best = si; bestErr = err; }
                 mid += segLenM;
@@ -199,8 +199,8 @@ public class CrossingStressTests
         double offsetM = Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
                                                 seg.ParkingLaneWidth, seg.Oneway);
         double rad = Math.Radians(h);
-        x += Math.Cos(rad) * offsetM * Config.PIXELS_PER_METER;
-        y -= Math.Sin(rad) * offsetM * Config.PIXELS_PER_METER;
+        x += Math.Cos(rad) * offsetM;
+        y -= Math.Sin(rad) * offsetM;
         var car = new Car(x, y, h, segIdx, new BicycleDriver());
         car.Progress = progress;
         car.Forward = !reverse;

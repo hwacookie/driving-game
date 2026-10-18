@@ -110,12 +110,12 @@ public sealed class LaneGuard
         // sitting correctly in its lane (and would miss real ones).
         var geom = CentrelineGeom(network);
         if (geom is not null)
-            return geom.Distance(new Point(cx, cy)) / Config.PIXELS_PER_METER;
+            return geom.Distance(new Point(cx, cy));
 
         double t = Math.Clamp(((cx - seg.X1) * dx + (cy - seg.Y1) * dy) / lengthSq, 0.0, 1.0);
         double projX = seg.X1 + t * dx;
         double projY = seg.Y1 + t * dy;
-        return Math.Hypot(cx - projX, cy - projY) / Config.PIXELS_PER_METER;
+        return Math.Hypot(cx - projX, cy - projY);
     }
 
     private static MultiLineString? CentrelineGeom(RoadNetwork network) =>

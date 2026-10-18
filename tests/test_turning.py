@@ -24,12 +24,9 @@ SPRITE_WHEELBASE_M = 2.64   # m (FRONT_AXLE_OFFSET_M + REAR_AXLE_OFFSET_M)
 
 API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")  # explicit IPv4: 'localhost' may resolve to ::1 (and :5000 is squatted on by macOS AirPlay Receiver anyway)
 
-# The suite speaks METRES end to end: /state and /map answer in metres
-# (docs/REST_API.md). Two endpoints still answer in the sim's internal
-# world pixels (/segment, /start_points); those payloads are converted
-# ONCE where they are read (get_segment_geometry, get_start_points), so
-# no comparison in this file mixes units.
-PX_PER_M = 2.0   # config.PIXELS_PER_METER
+# The suite speaks METRES end to end, and now so does the whole API:
+# /state, /map, /segment and /start_points all answer in metres
+# (docs/UNITS.md). Nothing here converts any more.
 
 # Results are persisted next to this script, keyed by "start_point|direction",
 # so the next run can report whether each scenario passed the last time it ran
@@ -599,17 +596,12 @@ class TurnTester:
     def get_segment_geometry(self, idx: int) -> dict | None:
         """One road segment's geometry, in METRES (0-based).
 
-        /segment still answers in the sim's internal world pixels, so the
-        coordinates are converted here - the one place they enter. length
-        and width already come in metres.
+        length and width were always metres; the coordinates now are too.
         """
         try:
             r = requests.get(f"{API_URL}/segment/{idx}", timeout=2)
             if r.ok:
-                seg = r.json()
-                for k in ('x1', 'y1', 'x2', 'y2'):
-                    seg[k] /= PX_PER_M
-                return seg
+                return r.json()
         except requests.exceptions.RequestException:
             pass
         return None
@@ -1411,18 +1403,9 @@ class TurnTester:
         return gaps
 
     def get_start_points(self) -> dict:
-        """Deterministic start points of the loaded map, in METRES.
-
-        /start_points answers in the sim's internal world pixels, so the
-        position is converted here - the one place it is read.
-        """
+        """Deterministic start points of the loaded map, in METRES."""
         response = requests.get(f"{API_URL}/start_points")
-        pts = response.json()
-        for sp in pts.values():
-            for k in ('x', 'y'):
-                if k in sp:
-                    sp[k] /= PX_PER_M
-        return pts
+        return response.json()
     
     def _drive_to_segment_end_and_stop(self, target_segment: int, start_time: float,
                                         max_extra_time: float = 25.0,

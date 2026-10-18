@@ -51,14 +51,13 @@ public static class SmoothGeometry
 
     /// <summary>
     /// A centripetal Catmull-Rom spline through 2D control points (world
-    /// PIXELS), arc-length parameterized in METRES. Interpolating and
+    /// metres), arc-length parameterized in metres. Interpolating and
     /// C1-continuous. heading: degrees, 0 = north (+y... world Y is DOWN —
     /// matches the codebase convention forward = (sin h, cos h)), positive =
     /// clockwise. curvature: 1/m signed, positive = right turn.
     /// </summary>
     public sealed class SmoothCurve
     {
-        public double PxPerM { get; }
         public List<(double X, double Y)> Pts { get; }
         public double Total { get; private set; }
 
@@ -68,9 +67,8 @@ public static class SmoothGeometry
         internal readonly List<double> Hdg = new();
 
         public SmoothCurve(IEnumerable<(double X, double Y)> pts,
-            double pxPerM = Config.PIXELS_PER_METER, double sampleM = 0.5)
+            double sampleM = 0.5)
         {
-            PxPerM = pxPerM;
             Pts = pts.Select(p => (p.X, p.Y)).ToList();
             int n = Pts.Count;
             if (n < 2)
@@ -110,7 +108,7 @@ public static class SmoothGeometry
                 else { p0 = p1; t0 = t1 - (t2 - t1); } // virtual p0 behind p1
                 if (i + 2 < n) { p3 = Pts[i + 2]; t3 = t[i + 2]; }
                 else { p3 = p2; t3 = t2 + (t2 - t1); } // virtual p3 ahead of p2
-                double chord = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y) / pxPerM;
+                double chord = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y);
                 int steps = Math.Max(8, (int)(chord / sampleM) + 1);
                 for (int k = 0; k < steps; k++)
                 {
@@ -124,7 +122,7 @@ public static class SmoothGeometry
                     }
                     else
                     {
-                        cum += Math.Hypot(x - prev.Value.X, y - prev.Value.Y) / pxPerM;
+                        cum += Math.Hypot(x - prev.Value.X, y - prev.Value.Y);
                         Hdg.Add(Math.Atan2(x - prev.Value.X, y - prev.Value.Y));
                     }
                     S.Add(cum); Xs.Add(x); Ys.Add(y);
@@ -135,7 +133,7 @@ public static class SmoothGeometry
             // prev is set: the sampling loop above ran at least once (n >= 2).
             {
                 var (x, y) = CrPoint(p0, p1, p2, p3, t0, t1, t2, t3, t2);
-                cum += Math.Hypot(x - prev!.Value.X, y - prev!.Value.Y) / pxPerM;
+                cum += Math.Hypot(x - prev!.Value.X, y - prev!.Value.Y);
                 Hdg.Add(Math.Atan2(x - prev!.Value.X, y - prev!.Value.Y));
                 S.Add(cum); Xs.Add(x); Ys.Add(y);
             }
@@ -217,7 +215,7 @@ public static class SmoothGeometry
         return dh;
     }
 
-    /// <summary>Dense polyline (world pixels) of the curve, resampled every
+    /// <summary>Dense polyline (world metres) of the curve, resampled every
     /// stepM of arc length. A render/eval cache — defines no new geometry.</summary>
     public static List<(double X, double Y)> ResampleCurve(SmoothCurve curve, double stepM = 0.5)
     {
@@ -233,7 +231,7 @@ public static class SmoothGeometry
         (double X, double Y) T1, (double X, double Y) T2,
         List<(double X, double Y)> Arc, double ActualRadius, double TangentDist);
 
-    /// <summary>Circular fillet of `radius` (pixels) tangent to both edges of
+    /// <summary>Circular fillet of `radius` (metres) tangent to both edges of
     /// the corner at `vertex` — the exact math _round_polyline_corners uses
     /// (the single shared implementation). Returns null if there is no real
     /// corner (straight-through, doubled-back, or degenerate edges).</summary>
@@ -326,7 +324,7 @@ public static class SmoothGeometry
         string Node, int SegA, int SegB,
         (double X, double Y) Corner,
         List<(double X, double Y)> Arc,
-        double RadiusPx);
+        double Radius);
 
     /// <summary>The §10 smoothed geometry of one RoadNetwork, built once and
     /// cached. See the Python source for the full rationale.</summary>
@@ -336,7 +334,6 @@ public static class SmoothGeometry
         public const double MaxGapDeg = 155.0;
 
         public RoadNetwork Network { get; }
-        public double PxPerM { get; }
         public List<SmoothedLine> Lines { get; } = new();
         public Dictionary<(int SegIdx, bool Forward), SegmentCurveRef> SegmentCurve { get; }
             = new();
@@ -345,14 +342,13 @@ public static class SmoothGeometry
         public SmoothedNetwork(RoadNetwork network, double resampleM = 0.5)
         {
             Network = network;
-            PxPerM = Config.PIXELS_PER_METER;
 
             // ---- per merged line: spline + resampled polyline ----
             var groups = RoadNetworkGeometry.MergeAndRoundLines(network);
             foreach (var ((highway, width), coordsList) in groups)
                 foreach (var coords in coordsList)
                 {
-                    var curve = new SmoothCurve(coords, pxPerM: PxPerM);
+                    var curve = new SmoothCurve(coords);
                     Lines.Add(new SmoothedLine(highway, width, coords, curve,
                         ResampleCurve(curve, resampleM)));
                 }
@@ -371,8 +367,8 @@ public static class SmoothGeometry
             // rounded line at a sharp corner θ (the fillet swings away from
             // the node), so two tolerances: the normal case (~2 fillet radii)
             // and a wide fallback for acute corners on long edges.
-            double matchTolPx = Math.Max(16.0, 2 * Config.ROAD_CORNER_RADIUS_M * PxPerM);
-            double wideTolPx = 64.0;
+            double matchTol = Math.Max(16.0, 2 * Config.ROAD_CORNER_RADIUS_M);
+            double wideTol = 64.0;
             const double cell = 16.0;
             var grid = new Dictionary<(int Cx, int Cy), List<(int Line, double X, double Y)>>();
             for (int li = 0; li < Lines.Count; li++)
@@ -422,11 +418,11 @@ public static class SmoothGeometry
                     var pa = network.Nodes.TryGetValue(a, out var na) ? na : ea;
                     var pb = network.Nodes.TryGetValue(b, out var nb) ? nb : eb;
 
-                    double chordPx = Math.Hypot(pb.X - pa.X, pb.Y - pa.Y);
+                    double chord = Math.Hypot(pb.X - pa.X, pb.Y - pa.Y);
                     SegmentCurveRef? hit = null;
-                    if (chordPx > 1e-6)
+                    if (chord > 1e-6)
                     {
-                        foreach (double tol in new[] { matchTolPx, wideTolPx })
+                        foreach (double tol in new[] { matchTol, wideTol })
                         {
                             CollectCandidates(pa, tol, candA);
                             CollectCandidates(pb, tol, candB);
@@ -446,7 +442,7 @@ public static class SmoothGeometry
                                 // arc between the two node projections covers
                                 // most of the chord (rejects other roads that
                                 // merely pass near one or both endpoints).
-                                if (Math.Abs(sb - sa) < 0.4 * chordPx / PxPerM) continue;
+                                if (Math.Abs(sb - sa) < 0.4 * chord) continue;
                                 double score = da + db;
                                 if (score < bestScore)
                                 {
@@ -459,7 +455,7 @@ public static class SmoothGeometry
                         }
                     }
                     if (hit is null)
-                        hit = new SegmentCurveRef { Line = null, Curve = new SmoothCurve(new[] { pa, pb }, pxPerM: PxPerM), S0 = 0.0, S1 = 0.0 };
+                        hit = new SegmentCurveRef { Line = null, Curve = new SmoothCurve(new[] { pa, pb }), S0 = 0.0, S1 = 0.0 };
                     SegmentCurve[(idx, forward)] = hit;
                 }
             }
@@ -509,33 +505,33 @@ public static class SmoothGeometry
                     double crossZ = ax * by - ay * bx; // != 0: gap filter keeps spokes off-parallel
                     double sa = crossZ > 0 ? 1.0 : -1.0;
                     double sb = -sa;
-                    double waPx = (segA.Width / 2.0) * PxPerM;
-                    double wbPx = (segB.Width / 2.0) * PxPerM;
-                    double pax = sa * waPx * (-ay), pay = sa * waPx * ax;   // on a's edge
-                    double pbx = sb * wbPx * (-by), pby = sb * wbPx * bx;   // on b's edge
+                    double wa = segA.Width / 2.0;
+                    double wb = segB.Width / 2.0;
+                    double pax = sa * wa * (-ay), pay = sa * wa * ax;   // on a's edge
+                    double pbx = sb * wb * (-by), pby = sb * wb * bx;   // on b's edge
                     double t = ((pbx - pax) * by - (pby - pay) * bx) / crossZ;
                     double cx = nodeX + pax + t * ax, cy = nodeY + pay + t * ay;
 
                     // Cap the radius so the tangent points stay on the paved edge.
                     double cornerOff = Math.Hypot(cx - nodeX, cy - nodeY);
-                    double availA = Math.Max(0.0, segA.Length * PxPerM - cornerOff);
-                    double availB = Math.Max(0.0, segB.Length * PxPerM - cornerOff);
-                    double tangentDist = (Config.JUNCTION_CORNER_RADIUS_M * PxPerM) / Math.Tan(gap / 2.0);
-                    double rPx = Config.JUNCTION_CORNER_RADIUS_M * PxPerM;
+                    double availA = Math.Max(0.0, segA.Length - cornerOff);
+                    double availB = Math.Max(0.0, segB.Length - cornerOff);
+                    double tangentDist = Config.JUNCTION_CORNER_RADIUS_M / Math.Tan(gap / 2.0);
+                    double r = Config.JUNCTION_CORNER_RADIUS_M;
                     if (tangentDist > Math.Min(availA, availB))
-                        rPx = Math.Min(availA, availB) * Math.Tan(gap / 2.0);
-                    if (rPx < PxPerM) continue; // < 1 m: no rounding
+                        r = Math.Min(availA, availB) * Math.Tan(gap / 2.0);
+                    if (r < 1.0) continue; // < 1 m: no rounding
 
                     // Compass centre O: r further out, off both edge lines.
-                    double paxO = pax + sa * rPx * (-ay), payO = pay + sa * rPx * ax;
-                    double pbxO = pbx + sb * rPx * (-by), pbyO = pby + sb * rPx * bx;
+                    double paxO = pax + sa * r * (-ay), payO = pay + sa * r * ax;
+                    double pbxO = pbx + sb * r * (-by), pbyO = pby + sb * r * bx;
                     t = ((pbxO - paxO) * by - (pbyO - payO) * bx) / crossZ;
                     double ox = nodeX + paxO + t * ax, oy = nodeY + payO + t * ay;
 
                     // Tangent points on the edges, then the arc between them
                     // (the sweep that passes through the corner direction).
-                    double tax = ox - sa * rPx * (-ay), tay = oy - sa * rPx * ax;
-                    double tbx = ox - sb * rPx * (-by), tby = oy - sb * rPx * bx;
+                    double tax = ox - sa * r * (-ay), tay = oy - sa * r * ax;
+                    double tbx = ox - sb * r * (-by), tby = oy - sb * r * bx;
                     double angA = Math.Atan2(tay - oy, tax - ox);
                     double angB = Math.Atan2(tby - oy, tbx - ox);
                     double angC = Math.Atan2(cy - oy, cx - ox);
@@ -550,11 +546,11 @@ public static class SmoothGeometry
                     for (int s = 0; s <= steps; s++)
                     {
                         double a = angA + direction * sweep * (s / (double)steps);
-                        arc.Add((ox + rPx * Math.Cos(a), oy + rPx * Math.Sin(a)));
+                        arc.Add((ox + r * Math.Cos(a), oy + r * Math.Sin(a)));
                     }
 
                     JunctionFillets.Add(new JunctionFillet(nodeId, segAId, segBId,
-                        (cx, cy), arc, rPx));
+                        (cx, cy), arc, r));
                 }
             }
         }

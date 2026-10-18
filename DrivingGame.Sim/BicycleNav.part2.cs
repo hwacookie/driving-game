@@ -160,7 +160,7 @@ public sealed partial class BicycleNav
         // paved from (a Catmull-Rom through the shape points, resampled every
         // 0.5 m) - its curvature is read over a 1 m window, so the chain must
         // be sampled finer than that, which it is.
-        var rounded = RoadNetworkGeometry.SmoothChain(raw, RefLineMath.pxPerM);
+        var rounded = RoadNetworkGeometry.SmoothChain(raw);
         if (_dest is not null)
         {
             // Cut BEFORE solve_line: the pull-over drift blend in
@@ -330,7 +330,7 @@ public sealed partial class BicycleNav
         if (route.Count < 2 || route.SequenceEqual(saved)) return;
         _route = route;
         var raw = route.Select(n => _network.Nodes[n]).ToList();
-        var rounded = RoadNetworkGeometry.SmoothChain(raw, RefLineMath.pxPerM);
+        var rounded = RoadNetworkGeometry.SmoothChain(raw);
         if (_dest is not null)
         {
             // Cut before solve_line - see MaybeRebuild.
@@ -464,9 +464,10 @@ public sealed partial class BicycleNav
                     if (d2 < bestD2) { bestD2 = d2; bestI = i; }
                 }
                 double s_ = cum[bestI];
-                // P is in pixels, offsets are in metres - convert.
+                // P and the car are both in the world frame now, and the
+                // offsets are metres: one unit, no conversion.
                 double o_ = ((_car.X - P[bestI].X) * N[bestI].X +
-                             (_car.Y - P[bestI].Y) * N[bestI].Y) / RefLineMath.pxPerM;
+                             (_car.Y - P[bestI].Y) * N[bestI].Y);
                 _pullOverAnchor = (_car.X, _car.Y, o_);
                 return (s_, o_);
             }
@@ -484,7 +485,7 @@ public sealed partial class BicycleNav
                 }
                 // Usable only if the anchor point is still ON this line and
                 // still far enough from the end to blend over.
-                if (bestD2 <= (5.0 * RefLineMath.pxPerM) * (5.0 * RefLineMath.pxPerM) &&
+                if (bestD2 <= 5.0 * 5.0 &&
                     cum[bestI] <= sEnd - PARK_BLEND_END_M - 1.0)
                 {
                     sCar = cum[bestI]; oCar = oA;

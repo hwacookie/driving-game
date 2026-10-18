@@ -20,7 +20,7 @@ public sealed class PlacementError : Exception
 
 /// <summary>A world object with position (x, y), heading, type and color.
 ///
-/// (x, y) is the CENTER of the footprint in world pixels; heading in
+/// (x, y) is the CENTER of the footprint in world metres; heading in
 /// degrees (0 = north), auto-aligned at placement from the road geometry.
 /// The id is stable for the life of the obstacle - required for removal
 /// via the REST API and unambiguous in saved layouts.</summary>
@@ -49,7 +49,7 @@ public sealed record Obstacle(int Id, double X, double Y, double Heading,
     }
 }
 
-/// <summary>Geometry helpers (world pixels, north-up frame) + the palette
+/// <summary>Geometry helpers (world metres, north-up frame) + the palette
 /// colors. The concrete RGB values are a rendering detail
 /// (docs/OBSTACLES.md): they must stay clearly distinguishable from the
 /// player's red #B41E1E and from each other.</summary>
@@ -70,18 +70,17 @@ public static class ObstacleGeometry
                                                         double headingDeg,
                                                         double lengthM, double widthM)
     {
-        double pxPerM = Config.PIXELS_PER_METER;
         double h = Math.Radians(headingDeg);
         double fx = Math.Sin(h), fy = Math.Cos(h);      // forward
         double rx = Math.Cos(h), ry = -Math.Sin(h);     // right
-        double halfLenPx = lengthM * pxPerM / 2.0;
-        double halfWidPx = widthM * pxPerM / 2.0;
+        double halfLen = lengthM / 2.0;
+        double halfWid = widthM / 2.0;
         return new List<(double X, double Y)>
         {
-            (cx + fx * halfLenPx + rx * halfWidPx, cy + fy * halfLenPx + ry * halfWidPx),   // front-right
-            (cx + fx * halfLenPx - rx * halfWidPx, cy + fy * halfLenPx - ry * halfWidPx),   // front-left
-            (cx - fx * halfLenPx - rx * halfWidPx, cy - fy * halfLenPx - ry * halfWidPx),   // rear-left
-            (cx - fx * halfLenPx + rx * halfWidPx, cy - fy * halfLenPx + ry * halfWidPx),   // rear-right
+            (cx + fx * halfLen + rx * halfWid, cy + fy * halfLen + ry * halfWid),   // front-right
+            (cx + fx * halfLen - rx * halfWid, cy + fy * halfLen - ry * halfWid),   // front-left
+            (cx - fx * halfLen - rx * halfWid, cy - fy * halfLen - ry * halfWid),   // rear-left
+            (cx - fx * halfLen + rx * halfWid, cy - fy * halfLen + ry * halfWid),   // rear-right
         };
     }
 
@@ -415,8 +414,8 @@ public sealed class ObstacleManager
     {
         if (!network.IsOnRoad(x, y))
             throw new PlacementError(
-                $"({x / Config.PIXELS_PER_METER:F1} m, " +
-                $"{y / Config.PIXELS_PER_METER:F1} m) is off the paved road area");
+                $"({x:F1} m, " +
+                $"{y:F1} m) is off the paved road area");
     }
 
     /// <summary>Place a new obstacle; returns it (id + computed heading).</summary>
@@ -531,14 +530,13 @@ public sealed class ObstacleManager
         var obs = Snapshot();
         if (obs.Count == 0) return false;
 
-        double pxPerM = Config.PIXELS_PER_METER;
         double h = car.Heading;
         double rad = Math.Radians(h);
-        double offXPx = Math.Sin(rad) * Config.REAR_AXLE_OFFSET_M * pxPerM;
-        double offYPx = Math.Cos(rad) * Config.REAR_AXLE_OFFSET_M * pxPerM;
+        double offX = Math.Sin(rad) * Config.REAR_AXLE_OFFSET_M;
+        double offY = Math.Cos(rad) * Config.REAR_AXLE_OFFSET_M;
 
         List<(double X, double Y)> BodyAt(double x, double y) =>
-            ObstacleGeometry.BoxCorners(x + offXPx, y + offYPx, h,
+            ObstacleGeometry.BoxCorners(x + offX, y + offY, h,
                                         Config.CAR_LENGTH_M, Config.CAR_WIDTH_M);
 
         // 3D contact: the car's box sits at its segment's level, obstacles

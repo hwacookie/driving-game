@@ -570,12 +570,12 @@ public sealed partial class BicycleNav
             double d2 = (x0 + t * vx - x) * (x0 + t * vx - x) + (y0 + t * vy - y) * (y0 + t * vy - y);
             if (d2 < bestD2) { bestI = i; bestT = t; bestD2 = d2; }
         }
-        if (bestD2 > (10.0 * RefLineMath.pxPerM) * (10.0 * RefLineMath.pxPerM)) return null;
+        if (bestD2 > 10.0 * 10.0) return null;
         double s = 0.0;
         for (int i = 0; i < bestI; i++)
             s += Math.Hypot(pts[i + 1].X - pts[i].X, pts[i + 1].Y - pts[i].Y);
         double ex = pts[bestI + 1].X - pts[bestI].X, ey = pts[bestI + 1].Y - pts[bestI].Y;
-        return (s + bestT * Math.Hypot(ex, ey)) / RefLineMath.pxPerM;
+        return s + bestT * Math.Hypot(ex, ey);
     }
 
     // ====================================================================
@@ -758,7 +758,7 @@ public sealed partial class BicycleNav
     private List<(double X, double Y)> CutPolylineAt(
         List<(double X, double Y)> pts, double x, double y, double extendM = 0.0)
     {
-        double guard2 = (10.0 * RefLineMath.pxPerM) * (10.0 * RefLineMath.pxPerM);
+        double guard2 = 10.0 * 10.0;
         int bestI = 0; double bestT = 0.0, bestD2 = double.PositiveInfinity;
         for (int i = 0; i < pts.Count - 1; i++)
         {
@@ -777,20 +777,20 @@ public sealed partial class BicycleNav
         if (bestD2 > guard2 || pts.Count < 2)
         {
             if (RefLineMath.PARK_DEBUG)
-                Console.WriteLine($"[CUTDBG] NO CUT: closest={Math.Sqrt(bestD2) / RefLineMath.pxPerM:F1} m " +
+                Console.WriteLine($"[CUTDBG] NO CUT: closest={Math.Sqrt(bestD2):F1} m " +
                                   $"(guard 10 m), n_pts={pts.Count}");
             return pts;
         }
         if (RefLineMath.PARK_DEBUG)
             Console.WriteLine($"[CUTDBG] cut: {pts.Count} -> {bestI + 2} pts, " +
-                              $"closest={Math.Sqrt(bestD2) / RefLineMath.pxPerM:F2} m");
+                              $"closest={Math.Sqrt(bestD2):F2} m");
         double cx = pts[bestI].X + bestT * (pts[bestI + 1].X - pts[bestI].X);
         double cy = pts[bestI].Y + bestT * (pts[bestI + 1].Y - pts[bestI].Y);
         var outPts = new List<(double X, double Y)>(pts.Take(bestI + 1)) { (cx, cy) };
         if (extendM > 0.0)
         {
             // Walk on along the original polyline from the cut point.
-            double left = extendM * RefLineMath.pxPerM;
+            double left = extendM;
             double px = cx, py = cy;
             int j = bestI + 1;
             while (left > 1e-6 && j < pts.Count)

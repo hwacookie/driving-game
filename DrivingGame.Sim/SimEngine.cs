@@ -194,8 +194,8 @@ public sealed class SimEngine
         // outermost DRIVING lane - see Config.LaneBaseOffsetM.
         double offsetM = Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
                                                 seg.ParkingLaneWidth, seg.Oneway) + latOff;
-        rx += Math.Cos(rad) * offsetM * Config.PIXELS_PER_METER;
-        ry -= Math.Sin(rad) * offsetM * Config.PIXELS_PER_METER;
+        rx += Math.Cos(rad) * offsetM;
+        ry -= Math.Sin(rad) * offsetM;
 
         // Advance a fraction of the way in, so short segments work too.
         double progress0 = progress ?? Config.SPAWN_PROGRESS;
@@ -210,13 +210,13 @@ public sealed class SimEngine
         {
             rx = rounded.Value.X; ry = rounded.Value.Y; rh = rounded.Value.HeadingDeg;
             rad = Math.Radians(rh);   // local tangent, not the chord heading
-            rx += Math.Cos(rad) * offsetM * Config.PIXELS_PER_METER;
-            ry -= Math.Sin(rad) * offsetM * Config.PIXELS_PER_METER;
+            rx += Math.Cos(rad) * offsetM;
+            ry -= Math.Sin(rad) * offsetM;
         }
         else
         {
-            rx += Math.Sin(rad) * advanceM * Config.PIXELS_PER_METER;
-            ry += Math.Cos(rad) * advanceM * Config.PIXELS_PER_METER;
+            rx += Math.Sin(rad) * advanceM;
+            ry += Math.Cos(rad) * advanceM;
         }
         return (rx, ry, rh, segIdx, fwd, offsetM);
     }
@@ -294,8 +294,8 @@ public sealed class SimEngine
         double offsetM = Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
                                                 seg.ParkingLaneWidth, seg.Oneway);
         double rad = Math.Radians(h);
-        x += Math.Cos(rad) * offsetM * Config.PIXELS_PER_METER;
-        y -= Math.Sin(rad) * offsetM * Config.PIXELS_PER_METER;
+        x += Math.Cos(rad) * offsetM;
+        y -= Math.Sin(rad) * offsetM;
         var car = new Car(x, y, h, segIdx, new BicycleDriver());
         car.Progress = progress;
         car.Forward = !reverse;
@@ -932,24 +932,10 @@ public sealed class SimEngine
         return null;
     }
 
-    /// <summary>World pixels -> metres. The sim still keeps its internal
-    /// coordinates in world pixels; the PAYLOAD speaks metres, like /map
-    /// (see docs/REST_API.md). Every coordinate that leaves the sim goes
-    /// through here, so the API has exactly one unit dialect.</summary>
-    private static double Meters(double px) => px / Config.PIXELS_PER_METER;
-
-    /// <summary>A flag's [x, y, heading_deg] in world pixels -> the payload
-    /// form in metres (the heading is unit-free and stays as it is).</summary>
-    private static double[]? FlagMeters(double[]? f)
-    {
-        if (f is null || f.Length < 3) return f;
-        return new[] { Meters(f[0]), Meters(f[1]), f[2] };
-    }
-
     private static Dictionary<string, object?> FlagsPayload(TestFlags? tf) => new()
     {
-        ["green"] = FlagMeters(tf?.FlagGreen),
-        ["red"] = FlagMeters(tf?.FlagRed),
+        ["green"] = tf?.FlagGreen,
+        ["red"] = tf?.FlagRed,
     };
 
     // Python's lane_guard.stats() returns a dict - keep the same key names.
@@ -973,8 +959,8 @@ public sealed class SimEngine
             carsPayload.Add(new Dictionary<string, object?>
             {
                 ["car_uid"] = c.Uid,
-                ["x"] = Meters(c.X),
-                ["y"] = Meters(c.Y),
+                ["x"] = c.X,
+                ["y"] = c.Y,
                 ["heading"] = c.Heading,
                 ["speed_kmh"] = c.Speed * 3.6,
                 ["level"] = Network.Segments[c.SegIdx].Level,
@@ -993,7 +979,7 @@ public sealed class SimEngine
                 // rear-left, rear-right. The client uses it as the car's
                 // click/hit area.
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(c)
-                    .Select(p => new[] { Meters(p.X), Meters(p.Y) }).ToList(),
+                    .Select(p => new[] { p.X, p.Y }).ToList(),
                 ["blinker_left"] = c.Driver is BicycleDriver bl ? bl.BlinkerLeft : false,
                 ["blinker_right"] = c.Driver is BicycleDriver br ? br.BlinkerRight : false,
                 ["hazard"] = hazard,
@@ -1016,8 +1002,8 @@ public sealed class SimEngine
             state = new Dictionary<string, object?>
             {
                 // The unit every coordinate in this payload uses - the same
-                // declaration /map carries. The API speaks metres; world
-                // pixels stay inside the sim.
+                // declaration /map carries. The sim and the API are one dialect
+                // now: metres.
                 ["units"] = "meters",
                 ["frame"] = Frame,
                 ["time"] = _simStepsTotal * DtFixed,
@@ -1050,8 +1036,8 @@ public sealed class SimEngine
                 // can't confirm a NEW car - it is already True while the old
                 // one still exists.
                 ["car_uid"] = car.Uid,
-                ["x"] = Meters(car.X),
-                ["y"] = Meters(car.Y),
+                ["x"] = car.X,
+                ["y"] = car.Y,
                 ["heading"] = car.Heading,
                 ["speed"] = car.Speed,
                 ["speed_kmh"] = car.Speed * 3.6,
@@ -1069,7 +1055,7 @@ public sealed class SimEngine
                 ["in_contact"] = car.InContact,
                 ["contact_with"] = car.InContact ? car.ContactWith : (int?)null,
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(car)
-                    .Select(p => new[] { Meters(p.X), Meters(p.Y) }).ToList(),
+                    .Select(p => new[] { p.X, p.Y }).ToList(),
                 // Dashboard lamps for the cockpit controller.
                 ["braking"] = car.IsBraking,
                 ["accelerating"] = car.IsAccelerating,
