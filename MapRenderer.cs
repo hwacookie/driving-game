@@ -155,6 +155,21 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, List<CarSample>> _carBuf = new();
     private readonly Dictionary<long, Node2D> _carNodes = new();
     private long? _followUid;      // camera bound to this car (null = free)
+    /// <summary>Crash camera: the first car that reports a contact this run
+    /// pins the view on it. A 50-car crossing run is unreadable at the map's
+    /// own scale, and the crash is rarely at the crossing centre the --center
+    /// arg aims at (measured: contacts at 1102/1862 m, 1388/1855 m - two
+    /// figure-8 arms away from the junction). The sim freezes on the crash,
+    /// so the view stays on the impact for inspection.</summary>
+    private long _crashFocusUid = 0L;
+    private bool _crashZoomed = false;
+    private const float CrashZoom = 34.0f;   // px/m: ~47 x 26 m over the impact
+    private Dictionary<long, int> _crashCounts = new();
+    /// <summary>--focus <uid>: watch THIS car (the client binds to it and
+    /// zooms in when it appears). The e2e runner passes the uid of the last
+    /// crashed car, so a failed crossing run can be re-watched on the impact
+    /// instead of the map-wide default view.</summary>
+    private long _focusUid = 0L;
     private long? _selectedUid;    // click-selected car (info window under the minimap)
     // Decision log for the selected car (info window): polled from
     // GET /car/{uid}/decisions (sim side: Car.Decisions - one event per
@@ -355,6 +370,12 @@ public partial class MapRenderer : Node2D
                 // snapping to the last car. Manual pan/zoom still works.
                 _autoFollow = false;
                 i += 2;
+            }
+            else if (args[i] == "--focus" && i + 1 < args.Length)
+            {
+                _focusUid = long.Parse(args[i + 1]);
+                // The focus car also decides the scale: the crash, close up.
+                _overrideZoom = CrashZoom;
             }
             else if (args[i] == "--zoom" && i + 1 < args.Length)
                 _overrideZoom = float.Parse(args[i + 1]);
@@ -1477,6 +1498,18 @@ public partial class MapRenderer : Node2D
                            ? hlc.GetString() : null;
                     m.InContact = c.TryGetProperty("in_contact", out var ic)
                                   && ic.GetBoolean();
+                    // Crash camera (see the field): crash_episodes is
+                    // monotonic, in_contact is transient and can clear
+                    // between two client frames - either marks the impact,
+                    // the first car to do so wins.
+                    int crashEps = c.TryGetProperty("crash_episodes", out var ce)
+                                   && ce.ValueKind == JsonValueKind.Number
+                        ? ce.GetInt32() : 0;
+                    int seenEps = _crashCounts.ContainsKey(uid) ? _crashCounts[uid] : 0;
+                    if (_crashFocusUid == 0L &&
+                        (crashEps > seenEps || m.InContact))
+                        _crashFocusUid = uid;
+                    _crashCounts[uid] = Math.Max(seenEps, crashEps);
                     // Collision footprint from the four body_corners (METRES,
                     // like every other /state coordinate): length = front->rear
                     // edge, width = left->right.
@@ -1496,8 +1529,9 @@ public partial class MapRenderer : Node2D
                 // Multi-car auto-follow: a freshly spawned car takes over
                 // the camera binding - mirrors the sim, which follows the
                 // LAST teleported car. Skipped after F (follow released) or
-                // while no new car arrived (TAB stays in effect).
-                if (_autoFollow && anyNewCar && newestUid > 0)
+                // while no new car arrived (TAB stays in effect), and once
+                // the crash camera has latched - the impact outranks a spawn.
+                if (_autoFollow && anyNewCar && newestUid > 0 && _crashFocusUid == 0L)
                     _followUid = newestUid;
             }
             else if (root.TryGetProperty("has_car", out var hc) && hc.GetBoolean())
@@ -2042,6 +2076,25 @@ public partial class MapRenderer : Node2D
     /// wherever the user panned it.</summary>
     void FollowCamera()
     {
+        // --focus <uid>: the view belongs to the requested car (the runner
+        // passes the last crashed uid), so it outranks the auto-crash latch.
+        if (_focusUid != 0L && _carNodes.ContainsKey(_focusUid))
+            _followUid = _focusUid;
+        // Crash camera: once a car has crashed, the view belongs to the
+        // impact, not to the run's --center or the newest spawn.
+        if ((_crashFocusUid != 0L && _carNodes.ContainsKey(_crashFocusUid)) ||
+            (_focusUid != 0L && _carNodes.ContainsKey(_focusUid)))
+        {
+            long bind = _focusUid != 0L && _carNodes.ContainsKey(_focusUid)
+                ? _focusUid : _crashFocusUid;
+            _followUid = bind;
+            if (!_crashZoomed)
+            {
+                _crashZoomed = true;
+                _cam.Zoom = new Vector2(CrashZoom, CrashZoom);
+                GD.Print($"Crash camera: pinned on car {bind} @ {CrashZoom:F0} px/m");
+            }
+        }
         if (_followUid == null && _autoFollow && _carNodes.Count > 0)
             _followUid = _carNodes.Keys.Min();
         if (_followUid == null) return;   // unfollowed: manual view only

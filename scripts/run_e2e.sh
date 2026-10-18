@@ -53,6 +53,7 @@ TEST_SELECTOR=""
 EXTRA_ARGS=()
 HOST_ARGS=()   # --fast / --warp N go to the C# host, not to the suite
 PACING=""      # empty = the default below (--warp 4)
+FOCUS_UID=""   # --focus-car <uid>: the client binds to that car
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-godot) RUN_GODOT=0; shift ;;
@@ -60,6 +61,7 @@ while [ $# -gt 0 ]; do
     --fast) HOST_ARGS+=(--fast); PACING=1; shift ;;
     --warp) HOST_ARGS+=(--warp "$2"); PACING=1; shift 2 ;;
     --realtime) PACING=1; shift ;;   # explicit: real time, no warp
+    --focus-car) FOCUS_UID="$2"; shift 2 ;;   # watch that car (the last crashed uid)
     *) EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
@@ -254,9 +256,13 @@ if n:
 EOF
 ) || CAM=""
   if [ -n "$CAM" ]; then
-    GODOT_CAM_ARGS=(--center $CAM --zoom 14)
-    echo "==> Crossing scenario: camera centred on the crossing ($CAM) @ zoom 14"
+    GODOT_CAM_ARGS=(--center $CAM --zoom 26)
+    echo "==> Crossing scenario: camera PINNED on the crossing ($CAM) @ zoom 26 - no car follow, the crash is in the box"
   fi
+fi
+if [ -n "$FOCUS_UID" ] && [ "$RUN_GODOT" -eq 1 ]; then
+  GODOT_CAM_ARGS+=(--focus "$FOCUS_UID")
+  echo "==> Camera: bound to car $FOCUS_UID @ 34 px/m - that car is what you watch"
 fi
 
 if [ "$RUN_GODOT" -eq 1 ]; then
