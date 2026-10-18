@@ -92,7 +92,7 @@ public static class Config
     /// <summary>Reverse top speed m/s (30 km/h — a fast parking-lot crawl).</summary>
     public const double REVERSE_MAX_SPEED_M = 30.0 / 3.6; // ~8.33 m/s
 
-    public const double CAR_LENGTH = 4.4;    public const double CAR_WIDTH = 1.8;
+    public const double CAR_LENGTH_M = 4.4;    public const double CAR_WIDTH_M = 1.8;
     /// <summary>Car sprite palette: names the vehicle model each car renders
     /// (the seven vehicles extracted by tools/make_car_sprites.py; the old
     /// classic red sprite was dropped - style mismatch, user decision).
@@ -162,7 +162,7 @@ public static class Config
 
     /// <summary>Footprint for a color; unknown colors fall back to the sedan box.</summary>
     public static (double WidthM, double LengthM) SizeForColor(string? color) =>
-        VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH, CAR_LENGTH));
+        VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH_M, CAR_LENGTH_M));
 
     // --- Axle geometry ---
     // The kinematic bicycle model integrates the REAR AXLE: Car.x / Car.y ARE
@@ -171,15 +171,15 @@ public static class Config
     // turn — drawing wheels symmetric about (x,y) would track wrong).
     // Proportions from assets/car_sprite.svg: front axle 62/200 of body length
     // ahead of centre, rear axle 58/200 behind, tyre centres 36/100 of width.
-    public static readonly double FRONT_AXLE_OFFSET_M = CAR_LENGTH * 62 / 200;   // 1.364 m
-    public static readonly double REAR_AXLE_OFFSET_M = CAR_LENGTH * 58 / 200;    // 1.276 m
+    public static readonly double FRONT_AXLE_OFFSET_M = CAR_LENGTH_M * 62 / 200;   // 1.364 m
+    public static readonly double REAR_AXLE_OFFSET_M = CAR_LENGTH_M * 58 / 200;    // 1.276 m
     public static readonly double SPRITE_WHEELBASE_M = FRONT_AXLE_OFFSET_M + REAR_AXLE_OFFSET_M; // 2.64 m
-    public static readonly double TIRE_OUTBOARD_M = CAR_WIDTH * 36 / 100;        // 0.648 m
+    public static readonly double TIRE_OUTBOARD_M = CAR_WIDTH_M * 36 / 100;        // 0.648 m
 
     // --- Spawning / kerb ---
     /// <summary>Lateral gap (m) between the car's flank and the pavement edge
     /// at the kerb. Small on purpose: the car should be AT the kerb. Must match
-    /// the inset the raceline corridor uses (CAR_WIDTH/2 + ROAD_EDGE_TOLERANCE_M),
+    /// the inset the raceline corridor uses (CAR_WIDTH_M/2 + ROAD_EDGE_TOLERANCE_M),
     /// otherwise the car spawns nearer the kerb than its own driving line is
     /// ever allowed to go.</summary>
     public const double KERB_CLEARANCE_M = ROAD_EDGE_TOLERANCE_M;
@@ -243,12 +243,12 @@ public static class Config
     /// <summary>Lateral offset (m) from a road's centreline to the position where
     /// the car sits flush against the right kerb, with KERB_CLEARANCE_M to spare.</summary>
     public static double KerbOffsetM(double roadWidthM) =>
-        Math.Max(0.0, roadWidthM / 2.0 - CAR_WIDTH / 2.0 - KERB_CLEARANCE_M);
+        Math.Max(0.0, roadWidthM / 2.0 - CAR_WIDTH_M / 2.0 - KERB_CLEARANCE_M);
 
     /// <summary>Lateral offset (m) of a PARKED car's centre from the centreline:
     /// flush against the kerb with only PARK_KERB_CLEARANCE_M to spare.</summary>
     public static double ParkOffsetM(double roadWidthM) =>
-        Math.Max(0.0, roadWidthM / 2.0 - CAR_WIDTH / 2.0 - PARK_KERB_CLEARANCE_M);
+        Math.Max(0.0, roadWidthM / 2.0 - CAR_WIDTH_M / 2.0 - PARK_KERB_CLEARANCE_M);
 
     /// <summary>Nominal driving position (m right of the centreline) for a road.
     /// Multi-lane two-way carriageways pin to the CENTRE OF THE OUTERMOST DRIVING

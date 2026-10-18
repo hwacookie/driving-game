@@ -18,7 +18,7 @@ public sealed class RefLine
         Pts = pts;
         for (int i = 0; i < pts.Count - 1; i++)
         {
-            double d = Math.Hypot(pts[i + 1].X - pts[i].X, pts[i + 1].Y - pts[i].Y) / RefLineMath.PPPM;
+            double d = Math.Hypot(pts[i + 1].X - pts[i].X, pts[i + 1].Y - pts[i].Y) / RefLineMath.pxPerM;
             SegLen.Add(d);
             Cum.Add(Cum[^1] + d);
         }
@@ -92,12 +92,12 @@ public sealed class RefLine
 
 public static class RefLineMath
 {
-    public const double PPPM = Config.PIXELS_PER_METER;
+    public const double pxPerM = Config.PIXELS_PER_METER;
 
     /// <summary>How much closer an off-route segment must be before it
     /// displaces the route we are actually following (see
     /// BicycleNav.SyncSegment).</summary>
-    public const double ROUTE_STICKINESS_PX = 3.0 * PPPM;
+    public const double ROUTE_STICKINESS_PX = 3.0 * pxPerM;
 
     /// <summary>Per-frame parking / route-cut tracing. Off by default: these
     /// fire on EVERY frame of a pull-over and drowned the console (and any
@@ -136,7 +136,7 @@ public static class RefLineMath
             }
             double length = Math.Hypot(dx, dy); if (length == 0) length = 1.0;
             double rx = dy / length, ry = -dx / length;   // right vector
-            double offPx = offsetsM[i] * PPPM;
+            double offPx = offsetsM[i] * pxPerM;
             outPts.Add((pts[i].X + rx * offPx, pts[i].Y + ry * offPx));
         }
         return outPts;
@@ -154,7 +154,7 @@ public static class RefLineMath
     {
         int n = pts.Count;
         if (n < 2 || offsetM == 0) return new List<(double X, double Y)>(pts);
-        double offPx = offsetM * PPPM;
+        double offPx = offsetM * pxPerM;
         var outPts = new List<(double X, double Y)>(n);
         for (int i = 0; i < n; i++)
         {
@@ -235,7 +235,7 @@ public static class RefLineMath
             double d2 = (px - x) * (px - x) + (py - y) * (py - y);
             if (d2 < bestD2) { bestD2 = d2; bestS = s; }
         }
-        if (globalFallback && Math.Sqrt(bestD2) > 25.0 * PPPM)
+        if (globalFallback && Math.Sqrt(bestD2) > 25.0 * pxPerM)
         {
             for (int k = 0; k < 200; k++)
             {

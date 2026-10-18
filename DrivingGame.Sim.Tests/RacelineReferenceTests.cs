@@ -458,7 +458,7 @@ public class RacelineReferenceTests
         var outDoc = new JsonObject
         {
             ["map"] = root.GetProperty("map").GetString()!,
-            ["pppm"] = root.GetProperty("pppm").GetDouble(),
+            ["pxPerM"] = root.GetProperty("pxPerM").GetDouble(),
             ["corner_radius_m"] = root.GetProperty("corner_radius_m").GetDouble(),
             ["corner_arc_steps"] = root.GetProperty("corner_arc_steps").GetInt32(),
             ["node_count"] = reference.NodeCount,

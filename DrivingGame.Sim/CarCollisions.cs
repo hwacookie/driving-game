@@ -259,7 +259,7 @@ public static class CarCollisions
             if (reasons.TryGetValue(uid, out var r) && r.Cap <= cap) return;
             reasons[uid] = (cap, key, text);
         }
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
         // Broadphase ring covers the LARGEST per-car look-ahead (top speed);
         // the per-car filter below narrows it to each car's own range.
         int ring = (int)Math.Ceiling(LookAheadMaxM / CellSize) + 1;
@@ -285,7 +285,7 @@ public static class CarCollisions
             string aheadNode = c.Forward ? seg.EndNode : seg.StartNode;
             if (!signedNodes.Contains(aheadNode)) return false;
             if (!net.Nodes.TryGetValue(aheadNode, out var nxy)) return false;
-            double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y) / pppm;
+            double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y) / pxPerM;
             if (dToNodeM > SignActRangeM) return false;
             if (net.Signs.TryGetValue((c.SegIdx, aheadNode), out var s) &&
                 s == SignType.Yield)
@@ -309,9 +309,9 @@ public static class CarCollisions
                 return false;
             if (o.CrossingCommittedNode == ahead) return false;
             if (!n.Nodes.TryGetValue(ahead, out var nxy)) return false;
-            double stopGap = o.LengthM * 0.5 +
+            double stopGapM = o.LengthM * 0.5 +
                              Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
-            return Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pppm > stopGap;
+            return Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pxPerM > stopGapM;
         }
         // Most-immediate crossing conflict per PRIORITY car this tick (uid ->
         // the car it is watching, the TTC, and its own distance to the meet
@@ -331,7 +331,7 @@ public static class CarCollisions
             int _v1By = -1; double _v1Along = 0, _v1Lat = 0, _v1Gap = 0;   // TEMPORARY
             // This car's own range: fast cars see (and must react to) the
             // leader much further out so they can still stop in time.
-            double lookAhead = LookAheadForSpeed(c.Speed);
+            double lookAheadM = LookAheadForSpeed(c.Speed);
             int lvlC = net is null ? 0 : net.Segments[c.SegIdx].Level;
 
             foreach (var o in grid.Near(c.X, c.Y, ring))
@@ -347,13 +347,13 @@ public static class CarCollisions
                 if (c.AlertOtherUid == o.Uid) continue;
                 double dxc = o.X - c.X, dyc = o.Y - c.Y;
                 double alongPx = dxc * fx + dyc * fy;          // ahead?
-                if (alongPx < 0 || alongPx > lookAhead * pppm) continue;
+                if (alongPx < 0 || alongPx > lookAheadM * pxPerM) continue;
                 double latPx = dxc * rx + dyc * ry;
-                if (Math.Abs(latPx) > CorridorHalfWidthM * pppm)
+                if (Math.Abs(latPx) > CorridorHalfWidthM * pxPerM)
                 {
                     if (o.Speed < 6.0 && c.Speed >= 10.0 &&            // TEMPORARY
-                        alongPx / pppm <= 40.0)
-                        Console.WriteLine($"DBGV1X t={simTime:F2} uid{c.Uid} o{o.Uid}({o.Speed:F1}) along={alongPx / pppm:F1} lat={latPx / pppm:F2}");
+                        alongPx / pxPerM <= 40.0)
+                        Console.WriteLine($"DBGV1X t={simTime:F2} uid{c.Uid} o{o.Uid}({o.Speed:F1}) along={alongPx / pxPerM:F1} lat={latPx / pxPerM:F2}");
                     continue;
                 }
 
@@ -371,15 +371,15 @@ public static class CarCollisions
                 // car's corridor ignores ground traffic under the bridge.
                 if (hdiff >= 60.0 &&
                     !ObstacleGeometry.BoxesIntersect(
-                        ForwardCorridorBox(c, pppm, lvlC), Body(o, lvlO)))
+                        ForwardCorridorBox(c, pxPerM, lvlC), Body(o, lvlO)))
                     continue;
 
                 // Bumper gap in metres: centre distance minus HALF of each
                 // car's REAL length (per-class footprints - a truck pair must
                 // register contact at true bumper touch, not sedan-box math;
-                // the old single CAR_LENGTH let mixed-length pairs close to
+                // the old single CAR_LENGTH_M let mixed-length pairs close to
                 // physical overlap before "touching" triggered).
-                double gapM = alongPx / pppm - (c.LengthM + o.LengthM) * 0.5;
+                double gapM = alongPx / pxPerM - (c.LengthM + o.LengthM) * 0.5;
                 if (gapM <= 0.25) { best = 0.0; break; }       // touching -> stop
 
                 // Lead speed projected onto my axis (head-on car -> 0).
@@ -406,7 +406,7 @@ public static class CarCollisions
                              2.0 * Config.CAR_BRAKING *
                              Math.Max(gapEff, 0.0));
                 if (cap < best) { best = cap; _v1By = o.Uid;
-                    _v1Along = alongPx / pppm; _v1Lat = latPx / pppm;
+                    _v1Along = alongPx / pxPerM; _v1Lat = latPx / pxPerM;
                     _v1Gap = gapM; }   // TEMPORARY
                 if (o.Speed < 0.1 && c.Speed >= 5.0 && gapM <= 60.0)   // TEMPORARY
                     Console.WriteLine($"DBGV1 t={simTime:F2} uid{c.Uid} lead{o.Uid} gap={gapM:F1} cap={cap:F2} best={best:F2}");
@@ -438,7 +438,7 @@ public static class CarCollisions
         {
             var arr = new (double, double, double, double)[nSweepSteps];
             for (int i = 0; i < nSweepSteps; i++)
-                arr[i] = PredictPos(c, (i + 1) * TtcSweepStepS, pppm);
+                arr[i] = PredictPos(c, (i + 1) * TtcSweepStepS, pxPerM);
             sweeps[c.Uid] = arr;
         }
 
@@ -455,7 +455,7 @@ public static class CarCollisions
                     net.Segments[c.SegIdx].Level != net.Segments[o.SegIdx].Level)
                     continue;
                 double distPx = Math.Hypot(o.X - c.X, o.Y - c.Y);
-                if (distPx > PairCheckRadiusM * pppm) continue;
+                if (distPx > PairCheckRadiusM * pxPerM) continue;
 
                 // Same-lane following pairs are v1's domain: if one car sits
                 // directly behind the other within the corridor half-width,
@@ -481,12 +481,12 @@ public static class CarCollisions
                 int? rearUid = null;
                 // IsDirectlyBehind(me, other) = "other is behind ME" - so the
                 // rear car is the OTHER one in each case.
-                if (IsDirectlyBehind(c, o, pppm)) rearUid = o.Uid;
-                else if (IsDirectlyBehind(o, c, pppm)) rearUid = c.Uid;
+                if (IsDirectlyBehind(c, o, pxPerM)) rearUid = o.Uid;
+                else if (IsDirectlyBehind(o, c, pxPerM)) rearUid = c.Uid;
                 if (Math.Min(c.Speed, o.Speed) < 6.0 &&               // TEMPORARY
                     Math.Max(c.Speed, o.Speed) >= 10.0 &&
-                    distPx / pppm <= 40.0)
-                    Console.WriteLine($"DBGF t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pppm:F1} rear={rearUid}");
+                    distPx / pxPerM <= 40.0)
+                    Console.WriteLine($"DBGF t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pxPerM:F1} rear={rearUid}");
 
                 // A pair with a stationary member is NOT skipped: a car driving
                 // at full speed towards a body that really blocks its path must
@@ -505,8 +505,8 @@ public static class CarCollisions
                                                 padM: anyStationary ? 0.0 : PredictionPadM);
                 if (Math.Min(c.Speed, o.Speed) < 6.0 &&                 // TEMPORARY
                     Math.Max(c.Speed, o.Speed) >= 10.0 &&
-                    distPx / pppm <= 40.0)
-                    Console.WriteLine($"DBGV2x t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pppm:F1} " +
+                    distPx / pxPerM <= 40.0)
+                    Console.WriteLine($"DBGV2x t={simTime:F2} {c.Uid}({c.Speed:F1})/{o.Uid}({o.Speed:F1}) d={distPx / pxPerM:F1} " +
                         (conflict is null ? "NULL" : $"s={conflict.Value.TimeS:F1}"));
                 if (conflict is null) continue;
                 var (stageS, distC, distO) = conflict.Value;
@@ -775,7 +775,7 @@ public static class CarCollisions
                 {
                     double radC = Math.Radians(c.Heading);
                     double fx2 = Math.Sin(radC), fy2 = Math.Cos(radC);
-                    double alongM = ((oCar.X - c.X) * fx2 + (oCar.Y - c.Y) * fy2) / pppm;
+                    double alongM = ((oCar.X - c.X) * fx2 + (oCar.Y - c.Y) * fy2) / pxPerM;
                     double gapM = Math.Max(alongM - (c.LengthM + oCar.LengthM) * 0.5, 0.0);
                     double orad = Math.Radians(oCar.Heading);
                     double vl = Math.Max(oCar.Speed *
@@ -811,7 +811,7 @@ public static class CarCollisions
                 // c.X/c.Y is the REAR axle, so add the rear-axle offset -
                 // without it the nose stops 1.28 m closer to C than intended.
                 double stopGapM = c.LengthM * 0.5 + Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
-                double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y) / pppm;
+                double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y) / pxPerM;
                 if (dToNodeM > SignActRangeM)
                     continue;   // not approaching yet
                 // COMMITTED ONCE THE NOSE CROSSES THE STOP LINE: a car with
@@ -902,7 +902,7 @@ public static class CarCollisions
                     double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
                     if (hdiff < 40.0 || hdiff > 140.0)
                         continue;   // same road - no conflict
-                    double dO = Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pppm;
+                    double dOM = Math.Hypot(o.X - nxy.X, o.Y - nxy.Y) / pxPerM;
                     // Scan by DISTANCE to the node, not by segment: limiting
                     // the scan to the node's own segments was blind to a fast
                     // car on the segment BEHIND the arm (T_017: car 27
@@ -913,16 +913,16 @@ public static class CarCollisions
                     // out), and car 26 held for car 27 in the box - circular
                     // wait, whole fleet frozen. The hdiff + pointing + eta
                     // filters below exclude non-threats.
-                    if (dO > GapScanRangeM)
+                    if (dOM > GapScanRangeM)
                         continue;
-                    if (dO < PriorityProximityM)
+                    if (dOM < PriorityProximityM)
                     { blocked = true; blockedBy = o.Uid; break; }   // already at the crossing
                     // Approaching from its arm? Forward vector must point at C.
-                    double odx = (nxy.X - o.X) / pppm, ody = (nxy.Y - o.Y) / pppm;
+                    double odxM = (nxy.X - o.X) / pxPerM, odyM = (nxy.Y - o.Y) / pxPerM;
                     double orad2 = Math.Radians(o.Heading);
-                    if (Math.Sin(orad2) * odx + Math.Cos(orad2) * ody < 0.3 * dO)
+                    if (Math.Sin(orad2) * odxM + Math.Cos(orad2) * odyM < 0.3 * dOM)
                         continue;   // exiting / crossing sideways - not a threat
-                    double etaS = dO / Math.Max(o.Speed, 3.0);
+                    double etaS = dOM / Math.Max(o.Speed, 3.0);
                     if (etaS < tClearS + SignGapMarginS)
                     { blocked = true; blockedBy = o.Uid; byFeasibility = true; break; }
                 }
@@ -1031,7 +1031,7 @@ public static class CarCollisions
     /// read as harmless. Returns the predicted pose plus the arc-length the
     /// car will have covered by then (used as its own braking distance if it
     /// turns out to be the one that must yield).</summary>
-    static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t, double pppm)
+    static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t, double pxPerM)
     {
         double v = Math.Max(MinSweepSpeedMps,
                             Math.Max(car.Speed, car.TargetSpeed));
@@ -1046,7 +1046,7 @@ public static class CarCollisions
         }
         double rad = Math.Radians(car.Heading);
         double dM = v * t;
-        return (car.X + Math.Sin(rad) * dM * pppm, car.Y + Math.Cos(rad) * dM * pppm,
+        return (car.X + Math.Sin(rad) * dM * pxPerM, car.Y + Math.Cos(rad) * dM * pxPerM,
                 car.Heading, dM);
     }
 
@@ -1110,16 +1110,16 @@ public static class CarCollisions
     /// look-ahead past my front bumper, at my REAL width - the strip of road
     /// I actually need to be clear to proceed. Used by v1's oblique-pair
     /// gate (see there).</summary>
-    static ObstacleGeometry.BodyBox ForwardCorridorBox(Car c, double pppm, int level)
+    static ObstacleGeometry.BodyBox ForwardCorridorBox(Car c, double pxPerM, int level)
     {
         double rad = Math.Radians(c.Heading);
         double fx = Math.Sin(rad), fy = Math.Cos(rad);
         var (bx, by) = c.BodyCenter();
-        double s1 = c.LengthM * 0.5 + LookAheadForSpeed(c.Speed);  // centre -> front+lookahead
-        double sc = s1 / 2.0;
+        double s1M = c.LengthM * 0.5 + LookAheadForSpeed(c.Speed); // centre -> front+lookahead
+        double scM = s1M / 2.0;
         return new ObstacleGeometry.BodyBox(
-            ObstacleGeometry.BoxCorners(bx + fx * sc * pppm, by + fy * sc * pppm,
-                                        c.Heading, s1, c.WidthM), level);
+            ObstacleGeometry.BoxCorners(bx + fx * scM * pxPerM, by + fy * scM * pxPerM,
+                                        c.Heading, s1M, c.WidthM), level);
     }
 
     /// <summary>True if `other` sits directly BEHIND `me` within the corridor
@@ -1143,7 +1143,7 @@ public static class CarCollisions
         return dx * rvx + dy * rvy > 0;   // closing distance
     }
 
-    static bool IsDirectlyBehind(Car me, Car other, double pppm)
+    static bool IsDirectlyBehind(Car me, Car other, double pxPerM)
     {
         double rad = Math.Radians(me.Heading);
         double fx = Math.Sin(rad), fy = Math.Cos(rad);     // forward
@@ -1151,7 +1151,7 @@ public static class CarCollisions
         double dx = other.X - me.X, dy = other.Y - me.Y;
         if (dx * fx + dy * fy >= 0) return false;          // not behind
         double latPx = Math.Abs(dx * rx + dy * ry);
-        return latPx <= CorridorHalfWidthM * pppm;
+        return latPx <= CorridorHalfWidthM * pxPerM;
     }
 
     /// <summary>Right-before-left (Rechts-vor-Links): true if `other` is

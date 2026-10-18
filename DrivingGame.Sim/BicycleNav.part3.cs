@@ -12,9 +12,9 @@ public sealed partial class BicycleNav
     /// in metres, in the car's own frame.</summary>
     private (double Along, double Right)[] ParkCornerOffsets()
     {
-        double front = WHEELBASE + (Config.CAR_LENGTH / 2.0 - Config.FRONT_AXLE_OFFSET_M);
-        double rear = Config.CAR_LENGTH / 2.0 - Config.REAR_AXLE_OFFSET_M;
-        double half = Config.CAR_WIDTH / 2.0;
+        double front = WHEELBASE_M + (Config.CAR_LENGTH_M / 2.0 - Config.FRONT_AXLE_OFFSET_M);
+        double rear = Config.CAR_LENGTH_M / 2.0 - Config.REAR_AXLE_OFFSET_M;
+        double half = Config.CAR_WIDTH_M / 2.0;
         return new[] { (front, half), (front, -half), (-rear, half), (-rear, -half) };
     }
 
@@ -32,7 +32,7 @@ public sealed partial class BicycleNav
                         double? delta = null)
     {
         if (delta is null) delta = MAX_STEER;
-        double k = Math.Tan(delta.Value) / WHEELBASE;               // 1/R
+        double k = Math.Tan(delta.Value) / WHEELBASE_M;               // 1/R
         double R = 1.0 / k;
         double arg = (Math.Cos(psi0) + 1.0 - dv / R) / 2.0;
         if (arg < -1.0 || arg > 1.0) return (new List<(double, double, double, double)>(), false);
@@ -91,7 +91,7 @@ public sealed partial class BicycleNav
     {
         double driftLen = Math.Max(0.1, PARK_BLEND_START_M - PARK_BLEND_END_M);
         double limitLat = width / 2.0 - PARK_LINE_MARGIN_M - PARK_TRACKING_MARGIN_M;
-        double frontReach = WHEELBASE;
+        double frontReach = WHEELBASE_M;
         double lateralReach = Config.TIRE_OUTBOARD_M;
         double cand = Config.ParkOffsetM(width);
         while (cand > oCar)
@@ -172,7 +172,7 @@ public sealed partial class BicycleNav
         if (Math.Abs(psi0) > Math.Radians(20.0)) return false;
         // Car position in the road frame (origin: the centreline point abeam of
         // the car).
-        double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.PPPM;
+        double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.pxPerM;
         double oPark = Config.ParkOffsetM(seg.Width);
         double dvFull = oPark - v0;
         if (dvFull < PARK_REVERSE_MIN_TUCK_M) return false;
@@ -236,8 +236,8 @@ public sealed partial class BicycleNav
         // To world pixels. The path is anchored at the car's rear axle, so the
         // line starts exactly under the car - no lateral step to absorb.
         double p0x = car.X, p0y = car.Y;
-        var line = pts.Select(p => (p0x + (tx * p.U + rx * (p.V - v0)) * RefLineMath.PPPM,
-                                    p0y + (ty * p.U + ry * (p.V - v0)) * RefLineMath.PPPM))
+        var line = pts.Select(p => (p0x + (tx * p.U + rx * (p.V - v0)) * RefLineMath.pxPerM,
+                                    p0y + (ty * p.U + ry * (p.V - v0)) * RefLineMath.pxPerM))
                       .ToList();
         var refLine = new RefLine(line);
         _ref = refLine;
@@ -281,7 +281,7 @@ public sealed partial class BicycleNav
         // --- state ---
         double psiCar = Math.Radians(Math.WrapDeg(car.Heading - st.RoadH));
         var seg = _network.Segments[st.Seg];
-        double vCar = ((car.X - seg.X1) * st.Rx + (car.Y - seg.Y1) * st.Ry) / RefLineMath.PPPM;
+        double vCar = ((car.X - seg.X1) * st.Rx + (car.Y - seg.Y1) * st.Ry) / RefLineMath.pxPerM;
         double eOff = vCar - st.OPark;
         bool converged = Math.Abs(eOff) < 0.06 && Math.Abs(psiCar) < Math.Radians(1.5);
 
@@ -321,7 +321,7 @@ public sealed partial class BicycleNav
             var corners = ParkCornerOffsets();
             bool Inside(double d)
             {
-                double rate = (car.Speed / WHEELBASE) * Math.Tan(d);
+                double rate = (car.Speed / WHEELBASE_M) * Math.Tan(d);
                 double psiN = psiCar + rate * dt;
                 double vN = vCar + Math.Sin(psiCar) * car.Speed * dt;
                 foreach (var (lf, lr) in corners)
@@ -344,12 +344,12 @@ public sealed partial class BicycleNav
         // standstill it does not rotate at all - there is no in-place turn to
         // guard against.
         double maxRate = A_LAT_MAX / Math.Max(Math.Abs(car.Speed), 0.1);
-        double desiredRate = (car.Speed / WHEELBASE) * Math.Tan(delta);
+        double desiredRate = (car.Speed / WHEELBASE_M) * Math.Tan(delta);
         double rate = Math.Max(-maxRate, Math.Min(maxRate, desiredRate));
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.PPPM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.PPPM;
+        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
         SyncSegment();
 
         ParkPhase = "reverse";
@@ -421,8 +421,8 @@ public sealed partial class BicycleNav
         // Local origin: the point on the CENTERLINE closest to the car, so that
         // pt(lat, along)'s lat is measured from the centerline (the car itself
         // sits at lat = lat0, which is NOT zero). Work in metres, convert at end.
-        double p0x = car.X / RefLineMath.PPPM, p0y = car.Y / RefLineMath.PPPM;
-        double lat0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.PPPM;
+        double p0x = car.X / RefLineMath.pxPerM, p0y = car.Y / RefLineMath.pxPerM;
+        double lat0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry) / RefLineMath.pxPerM;
         p0x -= rx * lat0;
         p0y -= ry * lat0;
 
@@ -431,9 +431,9 @@ public sealed partial class BicycleNav
 
         // Body corners relative to the rear axle (metres) - same geometry as the
         // sprite / on-road box (config axle offsets).
-        double frontBumper = WHEELBASE + (Config.CAR_LENGTH / 2.0 - Config.FRONT_AXLE_OFFSET_M);
-        double rearBumper = Config.CAR_LENGTH / 2.0 - Config.REAR_AXLE_OFFSET_M;
-        double halfWid = Config.CAR_WIDTH / 2.0;
+        double frontBumper = WHEELBASE_M + (Config.CAR_LENGTH_M / 2.0 - Config.FRONT_AXLE_OFFSET_M);
+        double rearBumper = Config.CAR_LENGTH_M / 2.0 - Config.REAR_AXLE_OFFSET_M;
+        double halfWid = Config.CAR_WIDTH_M / 2.0;
 
         bool CornersOk(double x, double y, double h)
         {
@@ -446,15 +446,15 @@ public sealed partial class BicycleNav
                     double cy_ = y + fy * lf + ryn * lr;
                     // Lateral distance from the segment CENTERLINE (not from P0,
                     // which itself sits off-center on the kerb side).
-                    double lat = ((cx_ * RefLineMath.PPPM - seg.X1) * rx +
-                                  (cy_ * RefLineMath.PPPM - seg.Y1) * ry) / RefLineMath.PPPM;
+                    double lat = ((cx_ * RefLineMath.pxPerM - seg.X1) * rx +
+                                  (cy_ * RefLineMath.pxPerM - seg.Y1) * ry) / RefLineMath.pxPerM;
                     if (Math.Abs(lat) > width / 2.0 - UTURN_LINE_MARGIN_M) return false;
                 }
             return true;
         }
 
         bool single = width >= UTURN_SINGLE_SWING_MIN_WIDTH_M;
-        double k = Math.Tan(MAX_STEER) / WHEELBASE;    // rad per metre
+        double k = Math.Tan(MAX_STEER) / WHEELBASE_M;    // rad per metre
         const double arcDs = 0.025;
 
         double WorstCornerLat(List<(double X, double Y, double H)> linePts)
@@ -469,8 +469,8 @@ public sealed partial class BicycleNav
                     {
                         double cx_ = px_ + fx * lf + rxn * lr;
                         double cy_ = py_ + fy * lf + ryn * lr;
-                        double lat = ((cx_ * RefLineMath.PPPM - seg.X1) * rx +
-                                      (cy_ * RefLineMath.PPPM - seg.Y1) * ry) / RefLineMath.PPPM;
+                        double lat = ((cx_ * RefLineMath.pxPerM - seg.X1) * rx +
+                                      (cy_ * RefLineMath.pxPerM - seg.Y1) * ry) / RefLineMath.pxPerM;
                         worst = Math.Max(worst, Math.Abs(lat));
                     }
             }
@@ -726,7 +726,7 @@ public sealed partial class BicycleNav
         if (!single)
             for (int i_ = sA2 + 1; i_ <= sA3; i_++) hdgPts[i_] += Math.PI;
 
-        var ptsPx = pts.Select(p => (p.X * RefLineMath.PPPM, p.Y * RefLineMath.PPPM)).ToList();
+        var ptsPx = pts.Select(p => (p.X * RefLineMath.pxPerM, p.Y * RefLineMath.pxPerM)).ToList();
         var refLine = new RefLine(ptsPx);
         // Map the stop point indices to arc lengths (metres).
         var stopsS = stopIdx.Select(i => refLine.Cum[i]).ToList();
@@ -858,7 +858,7 @@ public sealed partial class BicycleNav
         if (ns is not null && _uturnState == "drive" && _uturnReleaseForce == 0.0)
         {
             var (spx, spy) = refLine.PointAt(ns.Value);
-            double dStop = Math.Hypot(car.X - spx, car.Y - spy) / RefLineMath.PPPM;
+            double dStop = Math.Hypot(car.X - spx, car.Y - spy) / RefLineMath.pxPerM;
             // 1 m margin: the car may sit up to ~0.5-0.8 m OFF the line laterally,
             // and d_stop is measured to a point - with A_BRAKE = 10 m/s^2 the bare
             // v^2/2a + 0.3 threshold (0.69 m at 2.8 m/s) would never trigger
@@ -951,7 +951,7 @@ public sealed partial class BicycleNav
         double delta;
         if (Math.Abs(kappa) > 0.05)
         {
-            delta = Math.Atan(WHEELBASE * kappa);
+            delta = Math.Atan(WHEELBASE_M * kappa);
             if (_uturnMode == "rev") delta = -delta;
         }
         else
@@ -968,8 +968,8 @@ public sealed partial class BicycleNav
                 if (st_ > S) { lookahead = Math.Min(lookahead, Math.Max(0.1, st_ - S)); break; }
             }
             var (tx, ty) = refLine.PointAt(S + lookahead);
-            double dx = (tx - car.X) / RefLineMath.PPPM;
-            double dy = (ty - car.Y) / RefLineMath.PPPM;
+            double dx = (tx - car.X) / RefLineMath.pxPerM;
+            double dy = (ty - car.Y) / RefLineMath.pxPerM;
             double h = Math.Radians(car.Heading);
             double deltaPp;
             if (_uturnMode == "fwd")
@@ -1028,12 +1028,12 @@ public sealed partial class BicycleNav
 
         // --- bicycle kinematics (signed speed: reverse falls out for free) ---
         double maxRate = Math.Abs(car.Speed) > 0.3 ? A_LAT_MAX / Math.Abs(car.Speed) : 0.0;
-        double desiredRate = (car.Speed / WHEELBASE) * Math.Tan(delta);
+        double desiredRate = (car.Speed / WHEELBASE_M) * Math.Tan(delta);
         double rate = Math.Max(-maxRate, Math.Min(maxRate, desiredRate));
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.PPPM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.PPPM;
+        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
 
         SyncSegment();
 
@@ -1205,8 +1205,8 @@ public sealed partial class BicycleNav
         if (pullingOut) lookahead = Math.Min(lookahead, 1.5);
 
         var (tx, ty) = refLine.PointAt(S + lookahead);
-        double dx = (tx - car.X) / RefLineMath.PPPM;
-        double dy = (ty - car.Y) / RefLineMath.PPPM;
+        double dx = (tx - car.X) / RefLineMath.pxPerM;
+        double dy = (ty - car.Y) / RefLineMath.pxPerM;
         double h = Math.Radians(car.Heading);
         double localRight = dx * Math.Cos(h) - dy * Math.Sin(h);
         double localForward = dx * Math.Sin(h) + dy * Math.Cos(h);
@@ -1249,7 +1249,7 @@ public sealed partial class BicycleNav
             // Right-hand normal of the line, in screen coordinates
             // (x = sin(h), y = cos(h) is "forward").
             double rnx = Math.Cos(lh), rny = -Math.Sin(lh);
-            double eRight = ((car.X - refX) * rnx + (car.Y - refY) * rny) / RefLineMath.PPPM;
+            double eRight = ((car.X - refX) * rnx + (car.Y - refY) * rny) / RefLineMath.pxPerM;
             double headingErr = Math.Radians(Math.WrapDeg(lineHeading - car.Heading));
             double cross = Math.Atan2(PARK_ALIGN_GAIN * eRight, Math.Max(car.Speed, 1.0));
             // Fade the cross term out over the last metre (see constant): only the
@@ -1433,13 +1433,13 @@ public sealed partial class BicycleNav
         // --- bicycle kinematics ---
         // Lateral-accel cap (understeer): limit the heading rate.
         double maxRate = car.Speed > 0.3 ? A_LAT_MAX / car.Speed : 0.0;
-        double desiredRate = (car.Speed / WHEELBASE) * Math.Tan(delta);
+        double desiredRate = (car.Speed / WHEELBASE_M) * Math.Tan(delta);
         double rate = Math.Max(-maxRate, Math.Min(maxRate, desiredRate));
         car.Heading = Math.PosDeg(car.Heading + Math.Degrees(rate) * dt);
 
         double rad = Math.Radians(car.Heading);
-        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.PPPM;
-        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.PPPM;
+        car.X += Math.Sin(rad) * car.Speed * dt * RefLineMath.pxPerM;
+        car.Y += Math.Cos(rad) * car.Speed * dt * RefLineMath.pxPerM;
 
         DbgSpeedAtEnd = car.Speed;   // TEMPORARY debug
 

@@ -22,7 +22,7 @@ namespace DrivingGame.Sim;
 /// Build() shifts everything so the world starts at (0, 0).</summary>
 public sealed class MapBuilder
 {
-    private readonly double Pppm = Config.PIXELS_PER_METER;
+    private readonly double PxPerM = Config.PIXELS_PER_METER;
     private readonly Dictionary<string, (double X, double Y)> _nodesM = new();
     private readonly List<RoadSegment> _segments = new();
     private readonly List<(int SegIdx, string NodeId, SignType Type)> _signs = new();
@@ -60,8 +60,8 @@ public sealed class MapBuilder
         _segments.Add(new RoadSegment
         {
             Id = _nextSegId++,
-            X1 = x1M * Pppm, Y1 = y1M * Pppm,
-            X2 = x2M * Pppm, Y2 = y2M * Pppm,
+            X1 = x1M * PxPerM, Y1 = y1M * PxPerM,
+            X2 = x2M * PxPerM, Y2 = y2M * PxPerM,
             Highway = highway,
             Oneway = oneway,
             Width = width.Value,
@@ -124,7 +124,7 @@ public sealed class MapBuilder
             foreach (var kv in shifted) _nodesM[kv.Key] = kv.Value;
             // Shift segment endpoints (stored in px). Same direction as the
             // node shift above: new = old - min.
-            double sdx = minX * Pppm, sdy = minY * Pppm;
+            double sdx = minX * PxPerM, sdy = minY * PxPerM;
             foreach (var seg in _segments)
             {
                 seg.X1 -= sdx; seg.Y1 -= sdy;
@@ -134,7 +134,7 @@ public sealed class MapBuilder
 
         var nodes = new Dictionary<string, (double X, double Y)>();
         foreach (var kv in _nodesM)
-            nodes[kv.Key] = (kv.Value.X * Pppm, kv.Value.Y * Pppm);
+            nodes[kv.Key] = (kv.Value.X * PxPerM, kv.Value.Y * PxPerM);
 
         // node_connections + node_degree
         var nodeConnections = new Dictionary<string, List<int>>();
@@ -154,7 +154,7 @@ public sealed class MapBuilder
         var nodeInfo = new Dictionary<string, (double HalfWidthPx, string Highway)>();
         foreach (var seg in _segments)
         {
-            double half = (seg.Width / 2.0) * Pppm;
+            double half = (seg.Width / 2.0) * PxPerM;
             foreach (string nid in new[] { seg.StartNode, seg.EndNode })
             {
                 if (!nodeInfo.TryGetValue(nid, out var cur) || half > cur.HalfWidthPx)
@@ -173,8 +173,8 @@ public sealed class MapBuilder
             {
                 mx = Math.Max(mx, x); my = Math.Max(my, y);
             }
-            maxX = (mx + marginM) * Pppm;
-            maxY = (my + marginM) * Pppm;
+            maxX = (mx + marginM) * PxPerM;
+            maxY = (my + marginM) * PxPerM;
         }
 
         // Resolve named start points: (x, y, heading, seg_idx, forward, lateral_offset_m).

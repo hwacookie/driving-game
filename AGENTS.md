@@ -63,6 +63,17 @@ heading) instead of weakening or bypassing the checks that catch it.
 
 This rule may ONLY be violated if the user explicitly asks for it.
 
+
+## Units: names declare their unit
+
+The sim and the API speak different length units (see `docs/UNITS.md`).
+Any identifier that holds a length must say which one it holds: `…M`
+for metres, `…Px` for a value that just crossed from metres into the
+sim's own frame, no suffix for plain sim-frame values, and the scale
+factor is always `pxPerM`/`PxPerM` - never `pppm`, `PPPM` or `scale`.
+Every coordinate payload declares `"units": "meters"`. Before touching
+units, grep `pxPerM` - that list IS the set of frame crossings.
+
 ## No pygame compatibility target — Godot idioms win
 
 The pygame frontend is retired and the transition to Godot is complete. **

@@ -126,12 +126,12 @@ public class RoadNetwork
     /// <summary>Build a RoadNetwork from parsed OSM data.</summary>
     public static RoadNetwork FromOsmData(OsmData data, double north, double south, double west, double east)
     {
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
 
         // Project all nodes.
         var nodes = new Dictionary<string, (double X, double Y)>();
         foreach (var (nid, n) in data.Nodes)
-            nodes[nid] = RoadNetworkGeometry.LatLonToWorld(n.Lat, n.Lon, south, west, pppm);
+            nodes[nid] = RoadNetworkGeometry.LatLonToWorld(n.Lat, n.Lon, south, west, pxPerM);
 
         // Build segments with node references.
         var segments = new List<RoadSegment>();
@@ -150,7 +150,7 @@ public class RoadNetwork
                 else
                     width = 3.5;
 
-                double segLength = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y) / pppm;
+                double segLength = Math.Hypot(p2.X - p1.X, p2.Y - p1.Y) / pxPerM;
 
                 segments.Add(new RoadSegment
                 {
@@ -168,7 +168,7 @@ public class RoadNetwork
         }
 
         // Snap dangling endpoints onto nearby roads.
-        int snapped = RoadNetworkGeometry.SnapEndpoints(segments, pppm);
+        int snapped = RoadNetworkGeometry.SnapEndpoints(segments, pxPerM);
         if (snapped > 0)
             Console.WriteLine($"  Snapped {snapped} dangling endpoints");
 
@@ -208,32 +208,32 @@ public class RoadNetwork
         var nodeInfo = new Dictionary<string, (double HalfWidthPx, string Highway)>();
         foreach (var seg in segments)
         {
-            double half = (seg.Width / 2) * pppm;
+            double halfPx = (seg.Width / 2) * pxPerM;
             foreach (string nid in new[] { seg.StartNode, seg.EndNode })
             {
-                if (!nodeInfo.TryGetValue(nid, out var cur) || half > cur.HalfWidthPx)
-                    nodeInfo[nid] = (half, seg.Highway);
+                if (!nodeInfo.TryGetValue(nid, out var cur) || halfPx > cur.HalfWidthPx)
+                    nodeInfo[nid] = (halfPx, seg.Highway);
             }
         }
         nodeInfo = nodeInfo.Where(kv => nodeDegree.GetValueOrDefault(kv.Key, 0) != 2).ToDictionary(kv => kv.Key, kv => kv.Value);
 
-        double worldWidth = RoadNetworkGeometry.LatLonToWorld(south, east, south, west, pppm).X;
-        double worldHeight = RoadNetworkGeometry.LatLonToWorld(north, west, south, west, pppm).Y;
+        double worldWidthPx = RoadNetworkGeometry.LatLonToWorld(south, east, south, west, pxPerM).X;
+        double worldHeightPx = RoadNetworkGeometry.LatLonToWorld(north, west, south, west, pxPerM).Y;
 
         return CreateFromParts(nodes, segments, south, west,
-            worldWidth, worldHeight, nodeConnections, nodeDegree, nodeInfo);
+            worldWidthPx, worldHeightPx, nodeConnections, nodeDegree, nodeInfo);
     }
 
     internal static RoadNetwork CreateFromParts(
         Dictionary<string, (double X, double Y)> nodes, List<RoadSegment> segments,
-        double originLat, double originLon, double worldWidth, double worldHeight,
+        double originLat, double originLon, double worldWidthPx, double worldHeightPx,
         Dictionary<string, List<int>> nodeConnections, Dictionary<string, int> nodeDegree,
         Dictionary<string, (double HalfWidthPx, string Highway)> nodeMaxWidth)
     {
         var net = new RoadNetwork
         {
             OriginLat = originLat, OriginLon = originLon,
-            WorldWidth = worldWidth, WorldHeight = worldHeight,
+            WorldWidth = worldWidthPx, WorldHeight = worldHeightPx,
         };
         net.Nodes = nodes;
         net.Segments = segments;
@@ -365,15 +365,15 @@ public class RoadNetwork
         double h = headingDeg * Math.PI / 180.0;
         double fx = Math.Sin(h), fy = Math.Cos(h);   // forward
         double rx = Math.Cos(h), ry = -Math.Sin(h);  // right
-        double pppm = Config.PIXELS_PER_METER;
-        double halfL = (lengthM / 2.0) * pppm;
-        double halfW = (widthM / 2.0) * pppm;
+        double pxPerM = Config.PIXELS_PER_METER;
+        double halfLPx = (lengthM / 2.0) * pxPerM;
+        double halfWPx = (widthM / 2.0) * pxPerM;
         var poly = GetPavedPolygon();
         foreach (double sfx in new[] { 1.0, -1.0 })
             foreach (double srx in new[] { 1.0, -1.0 })
             {
-                double cx = wx + (sfx * fx * halfL + srx * rx * halfW);
-                double cy = wy + (sfx * fy * halfL + srx * ry * halfW);
+                double cx = wx + (sfx * fx * halfLPx + srx * rx * halfWPx);
+                double cy = wy + (sfx * fy * halfLPx + srx * ry * halfWPx);
                 if (poly.Distance(new Point(cx, cy)) > tolerancePx)
                     return false;
             }
@@ -496,21 +496,21 @@ public class RoadNetwork
                             break;
                         }
             }
-            double pppm = Config.PIXELS_PER_METER;
-            var curve = new SmoothGeometry.SmoothCurve(ext, pppm: pppm);
-            double s0 = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[0]);
-            double s1 = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[^1]);
-            if (s0 > s1) (s0, s1) = (s1, s0);
-            double halfWPx = (width / 2.0) * pppm;
-            int n = Math.Max(2, (int)((s1 - s0) / (0.5 * pppm)) + 1);
+            double pxPerM = Config.PIXELS_PER_METER;
+            var curve = new SmoothGeometry.SmoothCurve(ext, pxPerM: pxPerM);
+            double s0Px = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[0]);
+            double s1Px = SmoothGeometry.SmoothedNetwork.NodeS(curve, chainNodes[^1]);
+            if (s0Px > s1Px) (s0Px, s1Px) = (s1Px, s0Px);
+            double halfWPx = (width / 2.0) * pxPerM;
+            int n = Math.Max(2, (int)((s1Px - s0Px) / (0.5 * pxPerM)) + 1);
             var pts = new List<(double X, double Y)>(n);
             for (int i = 0; i < n; i++)
-                pts.Add(curve.PointAt(s0 + (s1 - s0) * i / (n - 1)));
+                pts.Add(curve.PointAt(s0Px + (s1Px - s0Px) * i / (n - 1)));
 
             var line = ToLineString(pts);
             // Two surfaces from the same spline: full deck (carriageway +
             // BRIDGE_SIDEWALK_M per side, concrete) and the carriageway itself.
-            deckParts.Add(line.Buffer(halfWPx + Config.BRIDGE_SIDEWALK_M * pppm,
+            deckParts.Add(line.Buffer(halfWPx + Config.BRIDGE_SIDEWALK_M * pxPerM,
                 new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0)));
             roadParts.Add(line.Buffer(halfWPx,
                 new BufferParameters(8, EndCapStyle.Flat, JoinStyle.Round, 5.0)));
@@ -518,7 +518,7 @@ public class RoadNetwork
 
             // Open white edge lines: centreline offset by (width/2 - inset),
             // one polyline per side, OPEN at the ends.
-            double off = (width / 2.0 - Config.EDGE_LINE_INSET_M) * pppm;
+            double offPx = (width / 2.0 - Config.EDGE_LINE_INSET_M) * pxPerM;
             var left = new List<(double X, double Y)>(n);
             var right = new List<(double X, double Y)>(n);
             for (int i = 0; i < n; i++)
@@ -528,8 +528,8 @@ public class RoadNetwork
                 double tx = x1 - x0, ty = y1 - y0;
                 double tl = Math.Hypot(tx, ty); if (tl == 0) tl = 1.0;
                 double nx = -ty / tl, ny = tx / tl;
-                left.Add((pts[i].X + nx * off, pts[i].Y + ny * off));
-                right.Add((pts[i].X - nx * off, pts[i].Y - ny * off));
+                left.Add((pts[i].X + nx * offPx, pts[i].Y + ny * offPx));
+                right.Add((pts[i].X - nx * offPx, pts[i].Y - ny * offPx));
             }
             edgeLines.Add(left); edgeLines.Add(right);
         }
@@ -811,12 +811,12 @@ public class RoadNetwork
         if (_stopLineCache is not null) return _stopLineCache;
         var mouths = GetCrossingMouths();
         var out_ = new List<(double X1, double Y1, double X2, double Y2)>();
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
         foreach (var ((segIdx, nodeId), type) in Signs)
         {
             if (type != SignType.Yield) continue;
             if (!mouths.TryGetValue((nodeId, segIdx), out var pts) || pts.Count < 2)
-                continue;   // nothing to span the road between
+                continue;   // nothing to spanPx the road between
             if (!Nodes.TryGetValue(nodeId, out var nxy)) continue;
             var seg = Segments[segIdx];
 
@@ -827,9 +827,9 @@ public class RoadNetwork
             bool atStart = seg.StartNode == nodeId;
             double awayX = (atStart ? seg.X2 - seg.X1 : seg.X1 - seg.X2);
             double awayY = (atStart ? seg.Y2 - seg.Y1 : seg.Y1 - seg.Y2);
-            double len = Math.Hypot(awayX, awayY);
-            if (len < 1e-9) continue;
-            awayX /= len; awayY /= len;
+            double lenPx = Math.Hypot(awayX, awayY);
+            if (lenPx < 1e-9) continue;
+            awayX /= lenPx; awayY /= lenPx;
             double rightX = -awayY, rightY = awayX;
 
             // Where the mouth is along the arm: the two corner roundings
@@ -837,25 +837,25 @@ public class RoadNetwork
             // two tangent points sit at different distances. The farther one
             // is the mouth - the nearer one would put paint inside the
             // crossing, where there is none.
-            double d0 = (pts[0].X - nxy.X) * awayX + (pts[0].Y - nxy.Y) * awayY;
-            double d1 = (pts[1].X - nxy.X) * awayX + (pts[1].Y - nxy.Y) * awayY;
-            double d = Math.Max(d0, d1);
-            if (d <= 0.0) continue;      // no mouth ahead of the node
+            double d0Px = (pts[0].X - nxy.X) * awayX + (pts[0].Y - nxy.Y) * awayY;
+            double d1Px = (pts[1].X - nxy.X) * awayX + (pts[1].Y - nxy.Y) * awayY;
+            double dPx = Math.Max(d0Px, d1Px);
+            if (dPx <= 0.0) continue;      // no mouth ahead of the node
 
             // The band is drawn CENTRED on the point below, so left as it
             // is its near half would hang into the crossing beyond the
             // mouth - and the centreline ends AT the mouth line. Push the
             // band out by half its own width: its near edge then IS the
             // mouth, so the centreline ends exactly where the white begins.
-            d += Config.STOP_LINE_WIDTH_M / 2.0 * pppm;
+            dPx += Config.STOP_LINE_WIDTH_M / 2.0 * pxPerM;
 
             // The lane: centreline to right kerb, keeping the kerb clear.
-            double halfW = seg.Width / 2.0 * pppm;
-            double span = halfW - Config.STOP_LINE_EDGE_GAP_M * pppm;
-            if (span <= 0.0) continue;   // narrower than one lane: no paint
+            double halfWPx = seg.Width / 2.0 * pxPerM;
+            double spanPx = halfWPx - Config.STOP_LINE_EDGE_GAP_M * pxPerM;
+            if (spanPx <= 0.0) continue;   // narrower than one lane: no paint
 
-            double bx = nxy.X + awayX * d, by = nxy.Y + awayY * d;
-            out_.Add((bx, by, bx + rightX * span, by + rightY * span));
+            double bx = nxy.X + awayX * dPx, by = nxy.Y + awayY * dPx;
+            out_.Add((bx, by, bx + rightX * spanPx, by + rightY * spanPx));
         }
         return _stopLineCache = out_;
     }
@@ -868,14 +868,14 @@ public class RoadNetwork
     public List<(double X, double Y, double R)> GetCrossingMarkers()
     {
         if (_crossingMarkerCache is not null) return _crossingMarkerCache;
-        double pppm = Config.PIXELS_PER_METER;
-        double r = Config.CROSSING_MARKER_DIAMETER_M / 2.0 * pppm;
+        double pxPerM = Config.PIXELS_PER_METER;
+        double rPx = Config.CROSSING_MARKER_DIAMETER_M / 2.0 * pxPerM;
         var out_ = new List<(double X, double Y, double R)>();
         foreach (var (nid, deg) in NodeDegree)
         {
             if (deg < 4) continue;
             if (!Nodes.TryGetValue(nid, out var nxy)) continue;
-            out_.Add((nxy.X, nxy.Y, r));
+            out_.Add((nxy.X, nxy.Y, rPx));
         }
         return _crossingMarkerCache = out_;
     }

@@ -109,8 +109,8 @@ public class SafetySystemsTests
 
         var (mx, my) = StraightMidpoint(net, car);
         var (rx, ry) = StraightRight(net, car);
-        double pppm = Config.PIXELS_PER_METER;
-        var ob = mgr.Place(net, "car", "blue", mx + rx * 1.5 * pppm, my + ry * 1.5 * pppm);
+        double pxPerM = Config.PIXELS_PER_METER;
+        var ob = mgr.Place(net, "car", "blue", mx + rx * 1.5 * pxPerM, my + ry * 1.5 * pxPerM);
 
         var seg = net.Segments[car.SegIdx];
         double expected = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
@@ -127,8 +127,8 @@ public class SafetySystemsTests
 
         var (mx, my) = StraightMidpoint(net, car);
         var (rx, ry) = StraightRight(net, car);
-        double pppm = Config.PIXELS_PER_METER;
-        var ob = mgr.Place(net, "car", "blue", mx - rx * 1.5 * pppm, my - ry * 1.5 * pppm);
+        double pxPerM = Config.PIXELS_PER_METER;
+        var ob = mgr.Place(net, "car", "blue", mx - rx * 1.5 * pxPerM, my - ry * 1.5 * pxPerM);
 
         var seg = net.Segments[car.SegIdx];
         double alongFlow = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
@@ -168,10 +168,10 @@ public class SafetySystemsTests
         var mgr = new ObstacleManager("basic", TempDir());
         var (bx, by) = car.BodyCenter();
         double rad = Math.Radians(car.Heading);
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
         // Parked car 12 m ahead in the same lane.
         var ob = mgr.Place(net, "car", "blue",
-            bx + Math.Sin(rad) * 12.0 * pppm, by + Math.Cos(rad) * 12.0 * pppm);
+            bx + Math.Sin(rad) * 12.0 * pxPerM, by + Math.Cos(rad) * 12.0 * pxPerM);
 
         var driver = new KeyboardDriver();
         var keys = new Dictionary<string, bool> { [Config.KEY_W] = true };
@@ -190,17 +190,17 @@ public class SafetySystemsTests
         // No interpenetration: body box may touch, but not sink in.
         double pen = PenetrationPx(ObstacleGeometry.PlayerBodyCorners(car),
                                    ObstacleGeometry.ObstacleFootprint(ob));
-        Assert.True(pen < 1.0 / pppm, $"body penetrates obstacle by {pen / pppm:F3} m");
+        Assert.True(pen < 1.0 / pxPerM, $"body penetrates obstacle by {pen / pxPerM:F3} m");
 
         // The car stopped in front of (or at) the obstacle, not through it.
         // The obstacle is auto-aligned to the same flow direction as the car,
         // so both faces project onto the travel axis:
         var (cbx, cby) = car.BodyCenter();
         double alongX = Math.Sin(rad), alongY = Math.Cos(rad);
-        double carFront = cbx * alongX + cby * alongY + Config.CAR_LENGTH * pppm / 2.0;
-        double obRear = ob.X * alongX + ob.Y * alongY - Config.CAR_LENGTH * pppm / 2.0;
+        double carFront = cbx * alongX + cby * alongY + Config.CAR_LENGTH_M * pxPerM / 2.0;
+        double obRear = ob.X * alongX + ob.Y * alongY - Config.CAR_LENGTH_M * pxPerM / 2.0;
         Assert.True(carFront <= obRear + 0.05,
-            $"car front passed the obstacle's rear face by {((carFront - obRear) / pppm):F3} m");
+            $"car front passed the obstacle's rear face by {((carFront - obRear) / pxPerM):F3} m");
     }
 
     // --- layout save / load ----------------------------------------------------
@@ -216,9 +216,9 @@ public class SafetySystemsTests
             var mgr = new ObstacleManager("basic", dir);
             var (mx, my) = StraightMidpoint(net, car);
             var (rx, ry) = StraightRight(net, car);
-            double pppm = Config.PIXELS_PER_METER;
+            double pxPerM = Config.PIXELS_PER_METER;
             for (double off = -1.5; off <= 1.5; off += 1.5)
-                mgr.Place(net, "car", "blue", mx + rx * off * pppm, my + ry * off * pppm);
+                mgr.Place(net, "car", "blue", mx + rx * off * pxPerM, my + ry * off * pxPerM);
 
             string path = mgr.Save("a/b:c");   // sanitizes to a_b_c
             Assert.EndsWith(Path.Combine("obstacles", "basic", "a_b_c.json"), path);

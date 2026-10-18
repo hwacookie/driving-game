@@ -13,7 +13,7 @@ namespace DrivingGame.Sim.Tests;
 public class CollisionTests
 {
     const double Dt = SimEngine.DtFixed;
-    const double Pppm = Config.PIXELS_PER_METER;
+    const double PxPerM = Config.PIXELS_PER_METER;
 
     static (SimEngine Engine, RoadNetwork Net) NewEngine()
     {
@@ -43,7 +43,7 @@ public class CollisionTests
     static void HoldAccelerate(SimEngine engine, Car car) =>
         engine.SetControl(car.Uid, new Dictionary<string, object?> { ["accelerate"] = true });
 
-    static double CenterM(Car a, Car b) => Math.Hypot(a.X - b.X, a.Y - b.Y) / Pppm;
+    static double CenterM(Car a, Car b) => Math.Hypot(a.X - b.X, a.Y - b.Y) / PxPerM;
 
     // ------------------------------------------------------------------
     // Scenario 1: stationary lead car - v1 corridor cap alone suffices.
@@ -65,12 +65,12 @@ public class CollisionTests
         for (int i = 0; i < 1800; i++)   // 30 s
         {
             engine.Tick(Dt);
-            minGapM = Math.Min(minGapM, CenterM(a, b) - Config.CAR_LENGTH);
+            minGapM = Math.Min(minGapM, CenterM(a, b) - Config.CAR_LENGTH_M);
         }
 
         Assert.Equal(0.0, a.Speed);
         Assert.True(b.Speed < 0.3, $"follower should have braked to a stop, speed={b.Speed:F2} m/s");
-        double finalGapM = CenterM(a, b) - Config.CAR_LENGTH;
+        double finalGapM = CenterM(a, b) - Config.CAR_LENGTH_M;
         // ~3 m standstill gap. Upper bound widened 5.5 -> 6.0 after the
         // collision-hardening round (commit bcd1f22, "stop-margin caps")
         // deliberately increased the standstill margin: the follower now
@@ -164,8 +164,8 @@ public class CollisionTests
         for (int i = 0; i < 2700; i++)   // 45 s
         {
             engine.Tick(Dt);
-            double distAM = Math.Hypot(a.X - center.X, a.Y - center.Y) / Pppm;
-            double distBM = Math.Hypot(b.X - center.X, b.Y - center.Y) / Pppm;
+            double distAM = Math.Hypot(a.X - center.X, a.Y - center.Y) / PxPerM;
+            double distBM = Math.Hypot(b.X - center.X, b.Y - center.Y) / PxPerM;
             if (distAM < 30.0) minSpeedANearCenter = Math.Min(minSpeedANearCenter, a.Speed);
             if (distBM > 0.5) minSpeedBBeforeCenter = Math.Min(minSpeedBBeforeCenter, b.Speed);
             minPairGapM = Math.Min(minPairGapM, CenterM(a, b));
@@ -186,8 +186,8 @@ public class CollisionTests
 
         // Both eventually clear the junction (A goes first, B resumes once
         // A is clear) - no deadlock.
-        double aPastCenterM = (center.Y - a.Y) / Pppm;     // south = -Y
-        double bPastCenterM = (center.X - b.X) / Pppm;     // west = -X
+        double aPastCenterM = (center.Y - a.Y) / PxPerM;     // south = -Y
+        double bPastCenterM = (center.X - b.X) / PxPerM;     // west = -X
         Assert.True(aPastCenterM > 20.0,
             $"A should have driven through and well past the crossing: {aPastCenterM:F1} m past centre");
         Assert.True(bPastCenterM > 5.0,

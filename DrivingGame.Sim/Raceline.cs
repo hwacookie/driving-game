@@ -34,7 +34,7 @@ namespace DrivingGame.Sim;
 /// </summary>
 public static class Raceline
 {
-    private const double PPPM = Config.PIXELS_PER_METER;
+    private const double pxPerM = Config.PIXELS_PER_METER;
 
     /// <summary>Half-bandwidth of the biharmonic normal equations.</summary>
     public const int BW = 2;
@@ -272,7 +272,7 @@ public static class Raceline
         var cum = new List<double> { 0.0 };
         for (int i = 0; i < pts.Count - 1; i++)
             cum.Add(cum[^1] + Math.Hypot(pts[i + 1].X - pts[i].X,
-                                         pts[i + 1].Y - pts[i].Y) / PPPM);
+                                         pts[i + 1].Y - pts[i].Y) / pxPerM);
         double total = cum[^1];
         if (total < 1e-6)
             return (new List<(double X, double Y)> { pts[0] }, new List<double> { 0.0 }, 0.0);
@@ -364,7 +364,7 @@ public static class Raceline
     public static List<(double X, double Y)?> JunctionNodePerStation(
         RoadNetwork network, List<(double X, double Y)> P, double radiusM = 14.0)
     {
-        double r2 = (radiusM * PPPM) * (radiusM * PPPM);
+        double r2 = (radiusM * pxPerM) * (radiusM * pxPerM);
         var nodes = new List<(double X, double Y)>();
         foreach (var (nid, xy) in network.Nodes)
             if (network.NodeDegree.TryGetValue(nid, out int deg) && deg >= 3)
@@ -432,7 +432,7 @@ public static class Raceline
         }
         else
         {
-            double inset = (Config.CAR_WIDTH / 2.0 + Config.ROAD_EDGE_TOLERANCE_M) * PPPM;
+            double inset = (Config.CAR_WIDTH_M / 2.0 + Config.ROAD_EDGE_TOLERANCE_M) * pxPerM;
             // Buffer parameters match shapely 2.x defaults (quad_segs=16,
             // round cap/join) so the eroded set agrees with the Python
             // reference within buffer discretisation.
@@ -446,7 +446,7 @@ public static class Raceline
         // off-road check enforces — four corners within tolerance of the
         // RAW pavement.
         Geometry rawPav = network.GetPavedPolygon();
-        double tolPx = Config.ROAD_EDGE_TOLERANCE_M * PPPM;
+        double tolPx = Config.ROAD_EDGE_TOLERANCE_M * pxPerM;
 
         double? Reach(double px, double py, double nx, double ny, double sign)
         {
@@ -466,7 +466,7 @@ public static class Raceline
             for (int it = 0; it < 9; it++)        // ~0.015 m precision
             {
                 double mid = 0.5 * (good + bad);
-                var q = new Point(px + nx * sign * mid * PPPM, py + ny * sign * mid * PPPM);
+                var q = new Point(px + nx * sign * mid * pxPerM, py + ny * sign * mid * pxPerM);
                 if (safePrep.Contains(q)) good = mid;
                 else bad = mid;
             }
@@ -494,13 +494,13 @@ public static class Raceline
             double h = Math.Atan2(-ny, nx);       // forward = (sin h, cos h) = tangent
             double fx = Math.Sin(h), fy = Math.Cos(h);
             double rx = Math.Cos(h), ry = -Math.Sin(h);
-            double hl = 4.5 / 2.0 * PPPM;         // IsCarOnRoad's body defaults
-            double hw = Config.CAR_WIDTH / 2.0 * PPPM;
+            double hl = 4.5 / 2.0 * pxPerM;         // IsCarOnRoad's body defaults
+            double hw = Config.CAR_WIDTH_M / 2.0 * pxPerM;
 
             bool Fits(double o)
             {
-                double cx = px + nx * sign * o * PPPM;
-                double cy = py + ny * sign * o * PPPM;
+                double cx = px + nx * sign * o * pxPerM;
+                double cy = py + ny * sign * o * pxPerM;
                 foreach (double sfx in new[] { 1.0, -1.0 })
                 {
                     foreach (double srx in new[] { 1.0, -1.0 })
@@ -525,7 +525,7 @@ public static class Raceline
             return good;
         }
 
-        double centreLimit = Config.CAR_WIDTH / 2.0 + Config.LANE_CENTRE_MARGIN_M;
+        double centreLimit = Config.CAR_WIDTH_M / 2.0 + Config.LANE_CENTRE_MARGIN_M;
 
         // Probe the pavement only every `stride` stations and interpolate
         // between: road width changes slowly, but each probe costs a
@@ -645,7 +645,7 @@ public static class Raceline
             if (atJuncTwoWay)
             {
                 var (qx, qy) = jn!.Value;   // non-null: atJuncTwoWay implies it
-                tJunc = ((qx - P[i].X) * N[i].X + (qy - P[i].Y) * N[i].Y) / PPPM;
+                tJunc = ((qx - P[i].X) * N[i].X + (qy - P[i].Y) * N[i].Y) / pxPerM;
                 if (!nodeIdxCache.TryGetValue((qx, qy), out int kq))
                 {
                     kq = NodeRouteIndex((qx, qy), P);
@@ -1071,8 +1071,8 @@ public static class Raceline
     {
         var outP = new List<(double X, double Y)>(P.Count);
         for (int i = 0; i < P.Count; i++)
-            outP.Add((P[i].X + N[i].X * offsets[i] * PPPM,
-                      P[i].Y + N[i].Y * offsets[i] * PPPM));
+            outP.Add((P[i].X + N[i].X * offsets[i] * pxPerM,
+                      P[i].Y + N[i].Y * offsets[i] * pxPerM));
         return outP;
     }
 

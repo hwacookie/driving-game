@@ -73,7 +73,8 @@ of a car, and the `flags` positions - is in **metres**, the same dialect
 internal frame in world pixels; the conversion happens once where the
 payload is built, so the API has exactly one dialect for positions. The
 two endpoints that still answer in world pixels (`GET /segment/{idx}` and
-`GET /start_points`) say so in the sections below.
+`GET /start_points`) say so in the sections below. The project-wide rule
+for units and their naming is `docs/UNITS.md`.
 
 `parking` reflects the nav's parking state (fields are null when no
 parking plan is active): `style` is `"forward"` or `"reverse"`, `phase`

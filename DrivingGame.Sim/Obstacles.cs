@@ -70,24 +70,24 @@ public static class ObstacleGeometry
                                                         double headingDeg,
                                                         double lengthM, double widthM)
     {
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
         double h = Math.Radians(headingDeg);
         double fx = Math.Sin(h), fy = Math.Cos(h);      // forward
         double rx = Math.Cos(h), ry = -Math.Sin(h);     // right
-        double hl = lengthM * pppm / 2.0;
-        double hw = widthM * pppm / 2.0;
+        double halfLenPx = lengthM * pxPerM / 2.0;
+        double halfWidPx = widthM * pxPerM / 2.0;
         return new List<(double X, double Y)>
         {
-            (cx + fx * hl + rx * hw, cy + fy * hl + ry * hw),   // front-right
-            (cx + fx * hl - rx * hw, cy + fy * hl - ry * hw),   // front-left
-            (cx - fx * hl - rx * hw, cy - fy * hl - ry * hw),   // rear-left
-            (cx - fx * hl + rx * hw, cy - fy * hl + ry * hw),   // rear-right
+            (cx + fx * halfLenPx + rx * halfWidPx, cy + fy * halfLenPx + ry * halfWidPx),   // front-right
+            (cx + fx * halfLenPx - rx * halfWidPx, cy + fy * halfLenPx - ry * halfWidPx),   // front-left
+            (cx - fx * halfLenPx - rx * halfWidPx, cy - fy * halfLenPx - ry * halfWidPx),   // rear-left
+            (cx - fx * halfLenPx + rx * halfWidPx, cy - fy * halfLenPx + ry * halfWidPx),   // rear-right
         };
     }
 
     /// <summary>The parked car's footprint: same size as the player car.</summary>
     public static List<(double X, double Y)> ObstacleFootprint(Obstacle ob) =>
-        BoxCorners(ob.X, ob.Y, ob.Heading, Config.CAR_LENGTH, Config.CAR_WIDTH);
+        BoxCorners(ob.X, ob.Y, ob.Heading, Config.CAR_LENGTH_M, Config.CAR_WIDTH_M);
 
     /// <summary>The player car's body box - the same four-corner geometry the
     /// on-road check uses (centered on the body centre, not the rear axle).
@@ -531,15 +531,15 @@ public sealed class ObstacleManager
         var obs = Snapshot();
         if (obs.Count == 0) return false;
 
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
         double h = car.Heading;
         double rad = Math.Radians(h);
-        double offX = Math.Sin(rad) * Config.REAR_AXLE_OFFSET_M * pppm;
-        double offY = Math.Cos(rad) * Config.REAR_AXLE_OFFSET_M * pppm;
+        double offXPx = Math.Sin(rad) * Config.REAR_AXLE_OFFSET_M * pxPerM;
+        double offYPx = Math.Cos(rad) * Config.REAR_AXLE_OFFSET_M * pxPerM;
 
         List<(double X, double Y)> BodyAt(double x, double y) =>
-            ObstacleGeometry.BoxCorners(x + offX, y + offY, h,
-                                        Config.CAR_LENGTH, Config.CAR_WIDTH);
+            ObstacleGeometry.BoxCorners(x + offXPx, y + offYPx, h,
+                                        Config.CAR_LENGTH_M, Config.CAR_WIDTH_M);
 
         // 3D contact: the car's box sits at its segment's level, obstacles
         // are ground objects (level 0) - a deck car passes over them.

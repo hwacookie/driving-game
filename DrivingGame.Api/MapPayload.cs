@@ -15,10 +15,10 @@ public static class MapPayload
 {
     public static Dictionary<string, object?> Build(RoadNetwork net)
     {
-        double pppm = Config.PIXELS_PER_METER;
+        double pxPerM = Config.PIXELS_PER_METER;
 
         List<List<double>> M(IEnumerable<(double X, double Y)> pts) =>
-            pts.Select(p => new List<double> { Math.Round(p.X / pppm, 2), Math.Round(p.Y / pppm, 2) })
+            pts.Select(p => new List<double> { Math.Round(p.X / pxPerM, 2), Math.Round(p.Y / pxPerM, 2) })
                .ToList();
 
         // Road PAINT, not the paved area: one ribbon per road (the two
@@ -46,7 +46,7 @@ public static class MapPayload
         // offset INWARD by EDGE_LINE_INSET_M so a 15 cm tarmac shoulder
         // stays outside the white line (ALL roads).
         var pavedBuf = net.GetPavedPolygon().Buffer(
-            -Config.EDGE_LINE_INSET_M * pppm,
+            -Config.EDGE_LINE_INSET_M * pxPerM,
             new BufferParameters(16, EndCapStyle.Round, JoinStyle.Round, 5.0));
         var pavedPolys = pavedBuf is MultiPolygon mp
             ? mp.Geometries.Cast<Polygon>().ToList()
@@ -70,10 +70,10 @@ public static class MapPayload
             if (!net.Nodes.TryGetValue(nodeId, out var nxy)) continue;
             var s = net.Segments[segIdx];
             // Direction of travel toward the signed node.
-            double dx = (nodeId == s.EndNode ? s.X2 - s.X1 : s.X1 - s.X2) / pppm;
-            double dy = (nodeId == s.EndNode ? s.Y2 - s.Y1 : s.Y1 - s.Y2) / pppm;
-            double len = Math.Max(Math.Sqrt(dx * dx + dy * dy), 1e-6);
-            double fx = dx / len, fy = dy / len;          // forward (toward node)
+            double dxM = (nodeId == s.EndNode ? s.X2 - s.X1 : s.X1 - s.X2) / pxPerM;
+            double dyM = (nodeId == s.EndNode ? s.Y2 - s.Y1 : s.Y1 - s.Y2) / pxPerM;
+            double lenM = Math.Max(Math.Sqrt(dxM * dxM + dyM * dyM), 1e-6);
+            double fx = dxM / lenM, fy = dyM / lenM;          // forward (toward node)
             double rx = fy, ry = -fx;                     // right of travel
             // CurbGapM keeps the (oversized, ~2.5 m wide) sign fully OFF the
             // pavement: half road width + gap - signHalfWidth > 0.
@@ -81,21 +81,21 @@ public static class MapPayload
             // Right of the curb: half the road width plus a small gap onto
             // the shoulder, so the sign sits beside the lane, not in it.
             double sideOffsetM = s.Width / 2.0 + CurbGapM;
-            double x = nxy.X / pppm - fx * BeforeNodeM + rx * sideOffsetM;
-            double y = nxy.Y / pppm - fy * BeforeNodeM + ry * sideOffsetM;
+            double xM = nxy.X / pxPerM - fx * BeforeNodeM + rx * sideOffsetM;
+            double yM = nxy.Y / pxPerM - fy * BeforeNodeM + ry * sideOffsetM;
             signs.Add(new Dictionary<string, object?>
             {
-                ["x"] = Math.Round(x, 2), ["y"] = Math.Round(y, 2),
+                ["x"] = Math.Round(xM, 2), ["y"] = Math.Round(yM, 2),
                 ["heading_deg"] = Math.Round(Math.Atan2(fx, fy) * 180.0 / Math.PI, 1),
                 ["type"] = type == SignType.Yield ? "yield" : "priority",
             });
         }
 
         var startPoints = new Dictionary<string, object?>();
-        foreach (var (name, (x, y, hdg, seg, fwd, lat)) in net.StartPoints)
+        foreach (var (name, (xM, yM, hdg, seg, fwd, lat)) in net.StartPoints)
             startPoints[name] = new Dictionary<string, object?>
             {
-                ["x"] = Math.Round(x / pppm, 2), ["y"] = Math.Round(y / pppm, 2),
+                ["x"] = Math.Round(xM / pxPerM, 2), ["y"] = Math.Round(yM / pxPerM, 2),
                 ["heading_deg"] = hdg, ["seg"] = seg,
                 ["forward"] = fwd, ["lateral_offset_m"] = lat,
             };
@@ -103,21 +103,21 @@ public static class MapPayload
         // Halt lines: a band of white across the yielding LANE at the mouth
         // of every yielding approach (see RoadNetwork.GetStopLines).
         var stopLines = new List<List<double>>();
-        foreach (var (x1, y1, x2, y2) in net.GetStopLines())
+        foreach (var (x1M, y1M, x2M, y2M) in net.GetStopLines())
             stopLines.Add(new List<double>
             {
-                Math.Round(x1 / pppm, 2), Math.Round(y1 / pppm, 2),
-                Math.Round(x2 / pppm, 2), Math.Round(y2 / pppm, 2),
+                Math.Round(x1M / pxPerM, 2), Math.Round(y1M / pxPerM, 2),
+                Math.Round(x2M / pxPerM, 2), Math.Round(y2M / pxPerM, 2),
             });
 
         // The small white disc in the middle of a real crossing (see
         // RoadNetwork.GetCrossingMarkers) - [x, y, radius] in metres.
         var crossingMarkers = new List<List<double>>();
-        foreach (var (x, y, r) in net.GetCrossingMarkers())
+        foreach (var (xM, yM, rM) in net.GetCrossingMarkers())
             crossingMarkers.Add(new List<double>
             {
-                Math.Round(x / pppm, 2), Math.Round(y / pppm, 2),
-                Math.Round(r / pppm, 3),
+                Math.Round(xM / pxPerM, 2), Math.Round(yM / pxPerM, 2),
+                Math.Round(rM / pxPerM, 3),
             });
 
         // Painted centrelines: cut at every junction the line passes (no
@@ -140,8 +140,8 @@ public static class MapPayload
             ["bounds"] = new List<double>
             {
                 0.0, 0.0,
-                Math.Round(net.WorldWidth / pppm, 2),
-                Math.Round(net.WorldHeight / pppm, 2),
+                Math.Round(net.WorldWidth / pxPerM, 2),
+                Math.Round(net.WorldHeight / pxPerM, 2),
             },
             ["road_color"] = new List<int> { rcR, rcG, rcB },
             ["bg_color"] = new List<int> { bgR, bgG, bgB },
@@ -151,8 +151,8 @@ public static class MapPayload
             // the minimap. level: 0 = ground, 1 = bridge over the ground.
             ["segments"] = net.Segments.Select(s => new List<object?>
             {
-                Math.Round(s.X1 / pppm, 2), Math.Round(s.Y1 / pppm, 2),
-                Math.Round(s.X2 / pppm, 2), Math.Round(s.Y2 / pppm, 2),
+                Math.Round(s.X1 / pxPerM, 2), Math.Round(s.Y1 / pxPerM, 2),
+                Math.Round(s.X2 / pxPerM, 2), Math.Round(s.Y2 / pxPerM, 2),
                 s.Width, s.Level,
             }).ToList(),
             // Bridge decks: buffered smoothed surface of all level>=1
