@@ -791,6 +791,77 @@ public static class CarCollisions
             // else: within grace, not too late - keep watching, no brake.
         }
 
+        // --- R14: blocked box / no entry into an occupied exit ------------
+        // docs/DRIVING_MANEUVERS.md §8 R14, from StVO §1 Absatz 2 (docs/StVO.pdf
+        // §1(2)): "Wer am Verkehr teilnimmt hat sich so zu verhalten, dass
+        // kein Anderer geschädigt, gefährdet oder mehr, als nach den
+        // Umständen unvermeidbar, behindert oder belästigt wird." Driving
+        // INTO a crossing one cannot clear parks a body in the box and
+        // impedes every user of the other arms, so ENTRY is gated on the
+        // EXIT being free: neither the box itself nor my own exit lane may
+        // hold a body that is not driving away. Independent of right of
+        // way - a Vorfahrt car holds too, priority never buys an entry into
+        // an occupied crossing (that is what the "even with right-of-way"
+        // clause of R14 means). Only the ENTRY decision: once committed the
+        // user rule still applies (R3: a car already in the crossing keeps
+        // going, else it deadlocks the cars it blocks).
+        //
+        // The exit test is LANE-true, not arm-true: a car on the OTHER arm
+        // driving towards the node sits in the opposite lane of my exit arm,
+        // ~3.5 m to my left, and is not on my exit - counting it held the
+        // two diagonals against each other and froze an empty box.
+        const double R14ExitScanM = 15.0;    // box half-width + a car + a gap
+        const double R14ExitLateralM = 2.5;  // my exit lane's half-width band
+        // uid -> the car blocking my exit (the blocker is also the cap's
+        // reason, so the commit block below can name it).
+        var r14Blocked = new Dictionary<int, int>();
+        if (net is not null)
+            foreach (var c in carList)
+            {
+                var seg = net.Segments[c.SegIdx];
+                string aheadNode = c.Forward ? seg.EndNode : seg.StartNode;
+                // A real crossing: two roads CROSS (degree >= 4) - the same
+                // test as the centre marker; a T where one road merely joins
+                // has no box to keep clear.
+                if (net.NodeDegree.GetValueOrDefault(aheadNode, 0) < 4) continue;
+                if (!net.Nodes.TryGetValue(aheadNode, out var nxy)) continue;
+                double rad14 = Math.Radians(c.Heading);
+                double fx14 = Math.Sin(rad14), fy14 = Math.Cos(rad14);   // forward
+                double rx14 = Math.Cos(rad14), ry14 = -Math.Sin(rad14);  // right
+                // c.X/c.Y is the REAR axle - the nose sits REAR_AXLE_OFFSET_M
+                // + half a body ahead, so "before the box" is measured from
+                // the nose, same as the yield stop line.
+                double stopGapM = c.LengthM * 0.5 + Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
+                double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y);
+                if (dToNodeM > SignActRangeM) continue;            // not approaching yet
+                if (dToNodeM <= stopGapM) continue;                // already in - R3 owns it
+                if (c.CrossingCommittedNode == aheadNode) continue; // committed - keep going
+                // Must actually drive AT the node, else this crossing is
+                // beside me and not ahead of me.
+                double odxM = nxy.X - c.X, odyM = nxy.Y - c.Y;
+                if (fx14 * odxM + fy14 * odyM < 0.5 * dToNodeM) continue;
+                foreach (var o in carList)
+                {
+                    if (o.Uid == c.Uid) continue;
+                    if (net.Segments[o.SegIdx].Level != net.Segments[c.SegIdx].Level) continue;
+                    double ox = o.X - nxy.X, oy = o.Y - nxy.Y;
+                    double dOM = Math.Hypot(ox, oy);
+                    bool inBox = dOM <= SignCrossClearM;
+                    double along = ox * fx14 + oy * fy14, lat = ox * rx14 + oy * ry14;
+                    bool onExit = !inBox && along > 0.0 && along <= R14ExitScanM &&
+                                  Math.Abs(lat) <= R14ExitLateralM;
+                    if (!inBox && !onExit) continue;
+                    // A body that drives away is clearing the crossing - only
+                    // a standing/crawling one blocks it (same threshold the
+                    // stop caps use for "effectively stationary").
+                    if (o.Speed > StationaryCapMps) continue;
+                    r14Blocked[c.Uid] = o.Uid;
+                    OfferCap(c.Uid, 0.0, $"r14#{aheadNode}#{o.Uid}",
+                             $"[R14] exit blocked by car {o.Uid} - holding before the crossing");
+                    break;
+                }
+            }
+
         // --- v3: road signs -------------------------------------------------
         // A car approaching a node on a YIELD-signed approach must be able to
         // stop before it while any PRIORITY-road car is near that node. The
@@ -834,6 +905,12 @@ public static class CarCollisions
                 // uid 26 braked for it; whole loop frozen from t~30 s).
                 if (dToNodeM <= stopGapM)
                 {
+                    // (b') R14: my exit lane or the box holds a body that is
+                    // not clearing - the legal move is to hold before the
+                    // line, so the crossing never gets committed into.
+                    if (c.CrossingCommittedNode != aheadNode &&
+                        r14Blocked.TryGetValue(c.Uid, out var r14By))
+                        continue;   // the R14 cap above already holds the car
                     // (b) Do not commit into a BLOCKED box: a stationary
                     // body in my path means the crossing is occupied - the
                     // legal move is to hold at the stop line. The old

@@ -562,11 +562,25 @@ then commitment.
   when the **rear** (not just the nose) has left the box; the next waiting
   car may re-evaluate R4 only after that.
 - **R14 Blocked-box / no entry into an occupied exit** *(crossing)*
-  *[proposed]* — never enter if the crossing's exit is visibly occupied
-  (e.g. a queue on the far side), **even with right-of-way** (do not block
-  the intersection — derived from StVO §1(2) / §9(5)). Independent of R5;
-  distinct from R4 (the *temporal* gap case) — this is the *exit blocked by
-  a foreign queue* case.
+  *[implemented on `fix/fig8-xing-car-contact`]* — never enter if the crossing's
+  exit is visibly occupied (e.g. a queue on the far side), **even with right-of-way**
+  (do not block the intersection — the duty is StVO §1(2): *"Wer am Verkehr
+  teilnimmt hat sich so zu verhalten, dass kein Anderer geschädigt, gefährdet
+  oder mehr, als nach den Umständen unvermeidbar, behindert oder belästigt
+  wird."*; the §9(5) citation this rule used to carry is the *Wenden /
+  Rückwärtsfahren* passage and says nothing about crossing entry — corrected
+  here). Independent of R5; distinct from R4 (the *temporal* gap case) — this
+  is the *exit blocked by a foreign queue* case. Implemented in `CarCollisions`
+  as an **entry gate only**: a car whose nose is still before the crossing line
+  caps to 0 and does not commit when its own exit LANE (a ~2.5 m band on the
+  through axis — the opposite lane of the exit arm is not my exit, which is
+  what froze two diagonals against each other when ignored) or the box holds a
+  body at `StationaryCapMps` or below; priority (Vorfahrt) cars are gated
+  identically, their right of way never buying an entry into an occupied
+  crossing. **Does not** cover a car that is already committed and then stops
+  inside the box — that is the R3/R2 interaction, still open (measured: `fig8_xing`
+  still crashes at t≈3.0 s when a committed yield car parks in the crossing and
+  a priority car brakes too late for it).
 - **R15 Deterministic tie-break** *(crossing)* *[proposed]* — when two cars
   cross the stop line / enter in the same frame (exact simultaneous
   conflict), resolve deterministically by arrival timestamp, then car UID —
