@@ -156,12 +156,11 @@ public sealed partial class BicycleNav
         }
         _route = route;
         var raw = route.Select(n => _network.Nodes[n]).ToList();
-        // Round corners far more finely than the renderer does. The line is
-        // resampled every 0.5 m and its curvature read over a 1 m window, so
-        // the arc's own vertices must be much closer than that.
-        var rounded = RoadNetworkGeometry.RoundPolylineCorners(
-            raw, CORNER_RADIUS_M * RefLineMath.PPPM,
-            arcSteps: CORNER_ARC_STEPS, fitEdges: true);
+        // The route line follows the SAME smooth chain the roads are drawn and
+        // paved from (a Catmull-Rom through the shape points, resampled every
+        // 0.5 m) - its curvature is read over a 1 m window, so the chain must
+        // be sampled finer than that, which it is.
+        var rounded = RoadNetworkGeometry.SmoothChain(raw, RefLineMath.PPPM);
         if (_dest is not null)
         {
             // Cut BEFORE solve_line: the pull-over drift blend in
@@ -331,9 +330,7 @@ public sealed partial class BicycleNav
         if (route.Count < 2 || route.SequenceEqual(saved)) return;
         _route = route;
         var raw = route.Select(n => _network.Nodes[n]).ToList();
-        var rounded = RoadNetworkGeometry.RoundPolylineCorners(
-            raw, CORNER_RADIUS_M * RefLineMath.PPPM,
-            arcSteps: CORNER_ARC_STEPS, fitEdges: true);
+        var rounded = RoadNetworkGeometry.SmoothChain(raw, RefLineMath.PPPM);
         if (_dest is not null)
         {
             // Cut before solve_line - see MaybeRebuild.

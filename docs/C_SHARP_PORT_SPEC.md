@@ -334,6 +334,9 @@ post-port feature; its full write-up and work items moved to
       `Math.WrapDeg` / `Math.PosDeg` helpers (`MathAndNtsCompat.cs`) at all
       10 wrap sites + 5 heading-update sites; no other `%`-based wraps left.
 - [x] Capacity sweep → **G4 PASSED** (2026-09-05): `tools/capacity_sweep.py`
+      (since retired - the measure moved into the host as `DrivingGame.Server
+      --bench`, see docs/TESTING.md; the numbers below are the historical
+      over-HTTP run)
       spawns N cars on the fig8 loop and measures pace = sim-time/wall-time
       over a ≥25 s sim window (pace ≥ 0.97 = real time). Single-threaded
       (Parallel.For is Phase 8):

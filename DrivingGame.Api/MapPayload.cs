@@ -21,13 +21,23 @@ public static class MapPayload
             pts.Select(p => new List<double> { Math.Round(p.X / pppm, 2), Math.Round(p.Y / pppm, 2) })
                .ToList();
 
-        var roads = new List<Dictionary<string, object?>>();
-        foreach (var group in net.GetRoadPolygonsByColor())
+        // Road PAINT, not the paved area: one ribbon per road (the two
+        // boundary polylines) plus the fills that are not ribbons. The
+        // renderer fills these directly, so the tarmac needs no holes and no
+        // background punch (see RoadNetworkGeometry.BuildRoadPaint).
+        var roadStrips = new List<Dictionary<string, object?>>();
+        foreach (var s in net.GetRoadStrips())
+            roadStrips.Add(new Dictionary<string, object?>
+            {
+                ["left"] = M(s.Left),
+                ["right"] = M(s.Right),
+            });
+        var roadPolys = new List<Dictionary<string, object?>>();
+        foreach (var group in net.GetRoadFillPolygons())
             foreach (var ring in group.Rings)
-                roads.Add(new Dictionary<string, object?>
+                roadPolys.Add(new Dictionary<string, object?>
                 {
                     ["exterior"] = M(ring.Exterior),
-                    ["holes"] = ring.Holes.Select(h => M(h)).ToList(),
                 });
 
         // Paved-edge rings: the UNIONED paved polygon (unary_union), so
@@ -47,18 +57,6 @@ public static class MapPayload
             pavedEdgeRings.Add(M(p.ExteriorRing.Coordinates.Select(c => (c.X, c.Y))));
             foreach (var hole in p.InteriorRings)
                 pavedEdgeRings.Add(M(hole.Coordinates.Select(c => (c.X, c.Y))));
-        }
-
-        var junctions = new List<Dictionary<string, object?>>();
-        foreach (var (nid, deg) in net.NodeDegree)
-        {
-            if (deg < 3 || !net.Nodes.TryGetValue(nid, out var xy)) continue;
-            junctions.Add(new Dictionary<string, object?>
-            {
-                ["id"] = nid,
-                ["x"] = Math.Round(xy.X / pppm, 2),
-                ["y"] = Math.Round(xy.Y / pppm, 2),
-            });
         }
 
         // Road signs: precomputed screen position (metres) + approach
@@ -102,6 +100,38 @@ public static class MapPayload
                 ["forward"] = fwd, ["lateral_offset_m"] = lat,
             };
 
+        // Halt lines: a band of white across the yielding LANE at the mouth
+        // of every yielding approach (see RoadNetwork.GetStopLines).
+        var stopLines = new List<List<double>>();
+        foreach (var (x1, y1, x2, y2) in net.GetStopLines())
+            stopLines.Add(new List<double>
+            {
+                Math.Round(x1 / pppm, 2), Math.Round(y1 / pppm, 2),
+                Math.Round(x2 / pppm, 2), Math.Round(y2 / pppm, 2),
+            });
+
+        // The small white disc in the middle of a real crossing (see
+        // RoadNetwork.GetCrossingMarkers) - [x, y, radius] in metres.
+        var crossingMarkers = new List<List<double>>();
+        foreach (var (x, y, r) in net.GetCrossingMarkers())
+            crossingMarkers.Add(new List<double>
+            {
+                Math.Round(x / pppm, 2), Math.Round(y / pppm, 2),
+                Math.Round(r / pppm, 3),
+            });
+
+        // Painted centrelines: cut at every junction the line passes (no
+        // paint across a crossing), solid in front of a mouth, dashed beyond
+        // - the style says which, so the renderer paints what the network
+        // decided.
+        var centerlines = new List<Dictionary<string, object?>>();
+        foreach (var (style, coords) in net.GetMarkingCenterlines())
+            centerlines.Add(new Dictionary<string, object?>
+            {
+                ["style"] = style,
+                ["pts"] = M(coords),
+            });
+
         var (rcR, rcG, rcB) = Config.ROAD_COLOR;
         var (bgR, bgG, bgB) = Config.BG_COLOR;
         return new Dictionary<string, object?>
@@ -115,7 +145,8 @@ public static class MapPayload
             },
             ["road_color"] = new List<int> { rcR, rcG, rcB },
             ["bg_color"] = new List<int> { bgR, bgG, bgB },
-            ["roads"] = roads,
+            ["road_strips"] = roadStrips,
+            ["road_polygons"] = roadPolys,
             // Raw segment list (metres) for screen-space consumers like
             // the minimap. level: 0 = ground, 1 = bridge over the ground.
             ["segments"] = net.Segments.Select(s => new List<object?>
@@ -140,7 +171,7 @@ public static class MapPayload
             // Deck centrelines (metres): draw as dashes ABOVE the deck.
             ["elevated_centerlines"] = net.GetElevatedCenterlines().Select(M).ToList(),
             ["paved_edge_rings"] = pavedEdgeRings,
-            ["centerlines"] = net.GetMarkingCenterlines().Select(M).ToList(),
+            ["centerlines"] = centerlines,
             ["lane_markings"] = net.GetLaneMarkings().Select(lm => new Dictionary<string, object?>
             {
                 ["style"] = lm.Style,
@@ -149,9 +180,9 @@ public static class MapPayload
             }).ToList(),
             ["oneway_arrows"] = net.GetOnewayArrows().Select(M).ToList(),
             ["parking_marks"] = net.GetParkingMarks().Select(M).ToList(),
-            ["junctions"] = junctions,
             ["signs"] = signs,
-            ["junction_dot_radius_m"] = Config.JUNCTION_DOT_RADIUS_M,
+            ["stop_lines"] = stopLines,
+            ["crossing_markers"] = crossingMarkers,
             ["marking_style"] = new Dictionary<string, object?>
             {
                 ["center_dash_m"] = Config.CENTER_DASH_M,
@@ -160,6 +191,7 @@ public static class MapPayload
                 ["lane_gap_m"] = Config.LANE_GAP_M,
                 ["park_dash_m"] = Config.PARK_DASH_M,
                 ["park_gap_m"] = Config.PARK_GAP_M,
+                ["stop_line_width_m"] = Config.STOP_LINE_WIDTH_M,
             },
             ["start_points"] = startPoints,
         };

@@ -50,13 +50,23 @@ GODOT_BIN="/Applications/Godot_mono.app/Contents/MacOS/Godot"
 RUN_GODOT=1
 TEST_SELECTOR=""
 EXTRA_ARGS=()
+HOST_ARGS=()   # --fast / --warp N go to the C# host, not to the suite
+PACING=""      # empty = the default below (--warp 4)
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-godot) RUN_GODOT=0; shift ;;
     --tests) TEST_SELECTOR="$2"; shift 2 ;;
+    --fast) HOST_ARGS+=(--fast); PACING=1; shift ;;
+    --warp) HOST_ARGS+=(--warp "$2"); PACING=1; shift 2 ;;
+    --realtime) PACING=1; shift ;;   # explicit: real time, no warp
     *) EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
+# Default pacing: --warp 4. The suite's guardrails are in SIM time and its
+# poll resolution scales with the announced warp, so a 4x run gives the same
+# verdicts ~3x faster on the wall clock. --realtime opts out (and is what
+# the capacity probe needs).
+if [ -z "$PACING" ]; then HOST_ARGS+=(--warp 4); PACING="default --warp 4"; fi
 
 GAME_PID=""
 GODOT_PID=""
@@ -146,7 +156,11 @@ if [ ! -x "$BIN" ]; then
 fi
 
 echo "==> Starting C# console host (map=basic, API :5001) -> $GAME_LOG"
-nohup "$BIN" --map basic > "$GAME_LOG" 2>&1 &
+if [ ${#HOST_ARGS[@]} -gt 0 ]; then
+  echo "    pacing: ${HOST_ARGS[*]} (the suite paces on SIM time, so the"
+  echo "    run goes as fast as the CPU; the capacity probe is skipped)"
+fi
+nohup "$BIN" --map basic ${HOST_ARGS[@]+"${HOST_ARGS[@]}"} > "$GAME_LOG" 2>&1 &
 GAME_PID=$!
 
 echo "==> Waiting for API at $API/health ..."
@@ -195,9 +209,15 @@ else
   TEST_NUMBER=""   # empty -> full suite (no --tests arg)
 fi
 
-# For a crossing scenario (#23/#24) aim the camera at the crossing itself
-# (centroid of the loop nodes) at zoom 14, instead of following a spawned car.
+# Camera for the visible window. Default: FOLLOW the car at a driving zoom,
+# so every maneuver is actually visible (user decision 2026-10-18: "start
+# zoomed on the car, in follow mode"). Crossing scenarios (50 cars) keep the
+# pinned view of the junction instead - following one car among 50 shows less.
 GODOT_CAM_ARGS=()
+if [ "$RUN_GODOT" -eq 1 ]; then
+  GODOT_CAM_ARGS=(--zoom 14)
+  echo "==> Camera: follow mode at zoom 14 (px/m) - the window tracks the car"
+fi
 if [ -n "$TEST_NUMBER" ]; then
   # Camera aiming is cosmetic - a failure here must never abort the run.
   CAM=$(${PYTHON:-python3} - "$TEST_NUMBER" "$API" <<'EOF'

@@ -4,3 +4,18 @@ Haben wir eigentlich in unserer Dokumentation oder in der Spezifikation noch meh
 
 
 noch mehr:
+
+
+
+
+Außerdem würde ich gerne noch einen anderen Fehler fixen, nämlich wenn du mal nach ganz unten rechts auf der Minimap schaust, da haben wir einmal den Track, der so aussieht wie
+ein Wunder wird geschnitten von einem anderen Track nämlich dem, der eine immer breitere Straße erzeugt. Schau doch mal nach, ob du weißt, was ich meine. Ich weiß nicht, ob der
+Dragonen Namen hat, wie gesagt, da liegen zwei Tracks übereinander. Interessanterweise. Werden sie richtig gezeichnet. Das heißt. Die Straßen sind dann tatsächlich miteinander
+verbunden. Obwohl sie logisch gar keine Kreuzung bilden, das heißt ein Auto könnte dort. Gar nicht abbiegen. Also ich finde es richtig, dass wir das so. Machen und jetzt nicht
+durchgehende weiße Randbegrenzung da einfach übereinanderpinseln. Ich finde es nur bemerkenswert, dass wir das richtig. Zeichnen, obwohl es dort keine logische Verbindung
+gibt.Also der Fix wurde erstmal darin bestehen, die beiden äh Tracks voneinander zu trennen, sodass die sich nicht, dass sie nicht übereinander liegen. Allerdings hätte ich
+nochmal eine Frage äh dazu, wie ist denn das, wenn ein Auto kann ein Auto eine asphaltierte Fläche mitbenutzen, die nicht zum eigenen Track gehört. Also weil rein physikalisch
+sind wir eher nicht off road, wir sind halt auf einer anderen Straße, aber wir fahren nicht durchs Gras. Ich könnte mir aber vorstellen, dass die Logik das nicht erkennt, oder
+wie ist das vielleicht wäre das sogar nochmal einen eigenen Test wert - Also indem wir zwei Straßen, die logisch nicht zusammengehören, also wo sich die Knoten nicht also die
+keine gemeinsamen Knoten haben, die aber räumlich sehr dicht näher nebeneinander sitzen und zwar so, dass sie sich auch berühren. Da wäre es dann interessant, ob ein Auto, was
+dann die Straße der Fremden. Also des Fremden Tracks benutzt, ob das dann als Offroad gemarkert wird oder nicht.

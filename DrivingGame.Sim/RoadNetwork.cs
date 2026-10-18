@@ -93,13 +93,18 @@ public class RoadNetwork
     /// Mirrors raceline.py's _raceline_safe_prep.</summary>
     public IPreparedGeometry? RacelineSafePrep { get; set; }
     private List<RoadPolygonGroup>? _roadPolygonsCache;
+    private List<RoadNetworkGeometry.RoadStroke>? _roadStripCache;
+    private List<RoadPolygonGroup>? _roadFillCache;
     private (Geometry? Deck, Geometry? Roadway)? _elevatedGeomCache;
     private List<List<(double X, double Y)>>? _elevatedCenterlinesCache;
     private List<List<(double X, double Y)>>? _elevatedEdgeLinesCache;
     private Geometry? _pavedPolygonCache;
     private List<List<(double X, double Y)>>? _centerlinesCache;
-    private List<List<(double X, double Y)>>? _markingCenterlinesCache;
+    private List<(string, List<(double X, double Y)>)>? _markingCenterlinesCache;
     private List<(string Style, List<(double X, double Y)> Coords, double WidthM)>? _laneMarkingsCache;
+    private Dictionary<(string, int), List<(double X, double Y)>>? _crossingMouthsCache;
+    private List<(double X1, double Y1, double X2, double Y2)>? _stopLineCache;
+    private List<(double X, double Y, double R)>? _crossingMarkerCache;
     private List<List<(double X, double Y)>>? _onewayArrowsCache;
     private List<List<(double X, double Y)>>? _parkingMarksCache;
 
@@ -382,6 +387,31 @@ public class RoadNetwork
     public List<RoadPolygonGroup> GetRoadPolygonsByColor() =>
         _roadPolygonsCache ??= RoadNetworkGeometry.BuildRoadPolygons(this);
 
+    /// <summary>Road PAINT for the renderer: every constant-width road as one
+    /// ribbon (its two boundary polylines), plus the fills that are not
+    /// ribbons (width-varying chains, junction corner roundings). This is
+    /// deliberately NOT the paved AREA - that stays the unioned polygon in
+    /// GetPavedPolygon, which is what a kerb line follows and what the
+    /// on-road physics test uses. Cached.</summary>
+    public List<RoadNetworkGeometry.RoadStroke> GetRoadStrips()
+    {
+        if (_roadStripCache is null) BuildRoadPaintCache();
+        return _roadStripCache;
+    }
+
+    public List<RoadPolygonGroup> GetRoadFillPolygons()
+    {
+        if (_roadFillCache is null) BuildRoadPaintCache();
+        return _roadFillCache;
+    }
+
+    private void BuildRoadPaintCache()
+    {
+        var (strips, fills) = RoadNetworkGeometry.BuildRoadPaint(this);
+        _roadStripCache = strips;
+        _roadFillCache = fills;
+    }
+
     private (Geometry? Deck, Geometry? Roadway) ElevatedGeometry()
     {
         if (_elevatedGeomCache is not null) return _elevatedGeomCache.Value;
@@ -656,9 +686,13 @@ public class RoadNetwork
     public List<List<(double X, double Y)>> GetCenterlines() =>
         _centerlinesCache ??= RoadNetworkGeometry.BuildCenterlines(this);
 
-    /// <summary>Centerlines that actually GET a dashed white line drawn: only
-    /// roads at least CENTERLINE_MIN_WIDTH_M wide. Cached.</summary>
-    public List<List<(double X, double Y)>> GetMarkingCenterlines()
+    /// <summary>Centerlines that actually GET a line drawn: only roads at
+    /// least CENTERLINE_MIN_WIDTH_M wide. Each one is cut at every junction
+    /// it passes (no paint across a crossing, the paint ends at the arm's
+    /// mouth where its halt line sits) and the stretch in front of a mouth
+    /// is solid, the rest dashed. Returns (style, coords) - the style is
+    /// what the renderer paints. Cached.</summary>
+    public List<(string Style, List<(double X, double Y)> Coords)> GetMarkingCenterlines()
     {
         if (_markingCenterlinesCache is not null) return _markingCenterlinesCache;
         // Width-varying roads: draw ONE dashed centreline from the same chain
@@ -667,27 +701,108 @@ public class RoadNetwork
         var (covered, chainCls) = RoadNetworkGeometry.WidthVaryingCenterlines(this);
         var groups = RoadNetworkGeometry.MergeAndRoundLines(this, onlyTwoWay: true,
             skipMultiLane: true, stopAtJunctions: true, excludeSegs: covered);
-        var out_ = new List<List<(double X, double Y)>>();
+        var out_ = new List<(string, List<(double X, double Y)>)>();
+        void Emit(List<(double X, double Y)> coords)
+        {
+            foreach (var (piece, solidStart, solidEnd) in
+                         RoadNetworkGeometry.SplitCentrelineAtJunctions(this, coords))
+                foreach (var styled in RoadNetworkGeometry.StyleCentrelinePiece(
+                             piece, solidStart, solidEnd))
+                    out_.Add(styled);
+        }
         foreach (var ((_, w), lines) in groups)
         {
             if (w < Config.CENTERLINE_MIN_WIDTH_M) continue;
-            foreach (var coords in lines)
-            {
-                // No paint on the crossing itself: stop the dashes just short
-                // of the fillet corner at 3+-way junctions.
-                var (t0, t1) = RoadNetworkGeometry.JunctionMarkingTrimPx(this, coords);
-                var trimmed = RoadNetworkGeometry.TrimEnds(coords.ToList(), t0, t1);
-                if (trimmed.Count > 0) out_.Add(trimmed);
-            }
+            foreach (var coords in lines) Emit(coords);
         }
         foreach (var (coords, maxW) in chainCls)
         {
             if (maxW < Config.CENTERLINE_MIN_WIDTH_M) continue;
-            var (t0, t1) = RoadNetworkGeometry.JunctionMarkingTrimPx(this, coords);
-            var trimmed = RoadNetworkGeometry.TrimEnds(coords.ToList(), t0, t1);
-            if (trimmed.Count > 0) out_.Add(trimmed);
+            Emit(coords);
         }
         return _markingCenterlinesCache = out_;
+    }
+
+    /// <summary>Fillet tangent points per junction approach: (node, segment
+    /// leading into it) -> the points where that approach's two road edges
+    /// are touched by the corner roundings. Where those points are is the
+    /// mouth of the approach - the place a stop line belongs to. Cached.</summary>
+    public Dictionary<(string, int), List<(double X, double Y)>> GetCrossingMouths() =>
+        _crossingMouthsCache ??= RoadNetworkGeometry.BuildCrossingMouths(this);
+
+    /// <summary>The painted halt lines (Ze. 294): a band of white across the
+    /// YIELDING LANE only at the mouth of every yielding approach - square
+    /// across the road (perpendicular to its centreline), from the centreline
+    /// up to just before the right kerb. The sign says which segment leads
+    /// into which node (RoadNetwork.Signs is keyed by exactly that), and the
+    /// mouth comes from the corner roundings - so a stop line only appears
+    /// where a yield rule and real paved corners agree. Returns (x1, y1, x2,
+    /// y2) in world px, with x1/y1 on the centreline. Cached.</summary>
+    public List<(double X1, double Y1, double X2, double Y2)> GetStopLines()
+    {
+        if (_stopLineCache is not null) return _stopLineCache;
+        var mouths = GetCrossingMouths();
+        var out_ = new List<(double X1, double Y1, double X2, double Y2)>();
+        double pppm = Config.PIXELS_PER_METER;
+        foreach (var ((segIdx, nodeId), type) in Signs)
+        {
+            if (type != SignType.Yield) continue;
+            if (!mouths.TryGetValue((nodeId, segIdx), out var pts) || pts.Count < 2)
+                continue;   // nothing to span the road between
+            if (!Nodes.TryGetValue(nodeId, out var nxy)) continue;
+            var seg = Segments[segIdx];
+
+            // Unit vector along the arm, pointing AWAY from the junction. Its
+            // negative is the direction of travel, so (awayY, -awayX) rotated
+            // the other way round - (-awayY, awayX) - is that driver's right
+            // hand, the side the yielding lane is on (x east, y north).
+            bool atStart = seg.StartNode == nodeId;
+            double awayX = (atStart ? seg.X2 - seg.X1 : seg.X1 - seg.X2);
+            double awayY = (atStart ? seg.Y2 - seg.Y1 : seg.Y1 - seg.Y2);
+            double len = Math.Hypot(awayX, awayY);
+            if (len < 1e-9) continue;
+            awayX /= len; awayY /= len;
+            double rightX = -awayY, rightY = awayX;
+
+            // Where the mouth is along the arm: the two corner roundings
+            // touch the arm's two edges, and on an asymmetric junction those
+            // two tangent points sit at different distances. The farther one
+            // is the mouth - the nearer one would put paint inside the
+            // crossing, where there is none.
+            double d0 = (pts[0].X - nxy.X) * awayX + (pts[0].Y - nxy.Y) * awayY;
+            double d1 = (pts[1].X - nxy.X) * awayX + (pts[1].Y - nxy.Y) * awayY;
+            double d = Math.Max(d0, d1);
+            if (d <= 0.0) continue;      // no mouth ahead of the node
+
+            // The lane: centreline to right kerb, keeping the kerb clear.
+            double halfW = seg.Width / 2.0 * pppm;
+            double span = halfW - Config.STOP_LINE_EDGE_GAP_M * pppm;
+            if (span <= 0.0) continue;   // narrower than one lane: no paint
+
+            double bx = nxy.X + awayX * d, by = nxy.Y + awayY * d;
+            out_.Add((bx, by, bx + rightX * span, by + rightY * span));
+        }
+        return _stopLineCache = out_;
+    }
+
+    /// <summary>The small white disc in the middle of a real CROSSING: a
+    /// node where two roads CROSS (degree >= 4 - a T, where one road merely
+    /// joins, has no middle). Not a German rule, just the marker the user
+    /// asked for, so the crossing's centre is visible even where no other
+    /// paint is. Returns (x, y, radius) in world px. Cached.</summary>
+    public List<(double X, double Y, double R)> GetCrossingMarkers()
+    {
+        if (_crossingMarkerCache is not null) return _crossingMarkerCache;
+        double pppm = Config.PIXELS_PER_METER;
+        double r = Config.CROSSING_MARKER_DIAMETER_M / 2.0 * pppm;
+        var out_ = new List<(double X, double Y, double R)>();
+        foreach (var (nid, deg) in NodeDegree)
+        {
+            if (deg < 4) continue;
+            if (!Nodes.TryGetValue(nid, out var nxy)) continue;
+            out_.Add((nxy.X, nxy.Y, r));
+        }
+        return _crossingMarkerCache = out_;
     }
 
     /// <summary>Lane markings for multi-lane carriageways (lanes &gt; 0), per

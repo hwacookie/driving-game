@@ -73,11 +73,17 @@ public sealed class SimEngine
 {
     public const double DtFixed = 1.0 / 60.0;
 
+    /// <summary>How much SIM time the host advances per wall second (1.0 =
+    /// real time, 4.0 = four times faster). Purely pacing: the physics step
+    /// stays DtFixed, the host just runs more of them per wall second. It is
+    /// published in /state so the client and the e2e suite can pace on SIM
+    /// time at any warp.</summary>
+    public double TimeWarp { get; set; } = 1.0;
+
     public RoadNetwork Network { get; }
     public ObstacleManager Obstacles { get; }
     public PhysicsValidator Validator { get; }
     public LaneGuard LaneGuard { get; }
-    public Camera Camera { get; }
 
     /// <summary>External key state fed to drivers each frame (headless
     /// default: nothing pressed — REST control drives the car via
@@ -112,7 +118,6 @@ public sealed class SimEngine
     private int _avoidCapsCalls, _resolveCalls;
     private const long CostReportEverySteps = 300;
     private double _physicsAccum;
-    private readonly Dictionary<int, (double X, double Y, double Heading)> _prevRender = new();
 
     // Per-car frame outputs (wrong side etc.) for /state.
     private readonly Dictionary<int, (bool OnWrongSide, bool FreeOffRoad)> _perCarState = new();
@@ -160,7 +165,6 @@ public sealed class SimEngine
         Obstacles = obstacles;
         Validator = new PhysicsValidator(enabled: true);
         LaneGuard = new LaneGuard(enabled: true);
-        Camera = new Camera(Config.WINDOW_WIDTH, Config.WINDOW_HEIGHT);
 
         foreach (var (name, (x, y, h, seg, fwd, off)) in network.StartPoints)
             StartPoints[name] = new Dictionary<string, object?>
@@ -364,7 +368,6 @@ public sealed class SimEngine
                     _unaddressedFlags = null;
                 }
                 _followUid = newCar.Uid;
-                Camera.SnapTo(newCar.X, newCar.Y, Network.WorldWidth, Network.WorldHeight);
                 Console.WriteLine(
                     $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +
                     $"{newCar.SegIdx}, heading {newCar.Heading:F1}°" +
@@ -649,7 +652,6 @@ public sealed class SimEngine
                         _cars.Count);
                     foreach (var c in _cars.Values)
                     {
-                        _prevRender[c.Uid] = (c.X, c.Y, c.Heading);
                         prevPose[c.Uid] = (c.X, c.Y, c.Heading);
                     }
                     long tAvoid0 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -772,7 +774,6 @@ public sealed class SimEngine
                     // Legacy single pass (collisions disabled or one car).
                     foreach (var c in _cars.Values)
                     {
-                        _prevRender[c.Uid] = (c.X, c.Y, c.Heading);
                         double preX = c.X, preY = c.Y, preH = c.Heading;
                         c.Update(DtFixed, Network, carControl.GetValueOrDefault(c.Uid, ControlInput.Empty));
 
@@ -819,32 +820,9 @@ public sealed class SimEngine
             }
         }
 
-        // --- Camera follow position (fix-your-timestep interpolation) ----
+        // The PRIMARY car: commands that omit an explicit uid apply to it.
+        // (The view is a client feature - see MapRenderer's Camera2D.)
         var followed = _followUid is not null ? _cars.GetValueOrDefault(_followUid.Value) : null;
-        double rx, ry;
-        if (_frozen || followed is null)
-        {
-            rx = Camera.X; ry = Camera.Y;   // no car / paused: hold the view
-        }
-        else if (_prevRender.TryGetValue(followed.Uid, out var prev))
-        {
-            double px = prev.X, py = prev.Y;
-            double cx = followed.X, cy = followed.Y;
-            if ((cx - px) * (cx - px) + (cy - py) * (cy - py) > 100.0)
-            {
-                rx = cx; ry = cy;           // Teleport / snap: no lerping across the jump.
-            }
-            else
-            {
-                double alpha = _physicsAccum / DtFixed;
-                rx = px + (cx - px) * alpha;
-                ry = py + (cy - py) * alpha;
-            }
-        }
-        else
-        {
-            rx = followed.X; ry = followed.Y;
-        }
 
         // Resolve each car's pending RED end flag once ITS route covers that
         // segment (it may lie beyond the initial route horizon).
@@ -881,18 +859,6 @@ public sealed class SimEngine
                 fh,
             };
             tf.FlagRedPending = null;
-        }
-
-        // Camera follow (only when moving and not frozen) - follows the
-        // INTERPOLATED position. Advance the follow-lag per PHYSICS STEP, not
-        // per frame: alpha = 1-(1-f)**steps keeps the camera's sim-time rate
-        // uniform when a frame contains two substeps.
-        if (!_frozen)
-        {
-            double camAlpha = 1.0 - Math.Pow(1.0 - Camera.LerpFactor, stepsThisFrame);
-            Camera.Update(rx, ry, Network.WorldWidth, Network.WorldHeight,
-                          follow: followed is not null && Math.Abs(followed.Speed) > 0.1,
-                          alpha: camAlpha);
         }
 
         UpdateState(followed, stepsThisFrame);
@@ -1016,20 +982,21 @@ public sealed class SimEngine
         if (followed is null)
         {
             // No car on the map yet (test maps don't auto-spawn): report
-            // that, keep camera info current.
+            // that; the fleet payload stays empty.
             state = new Dictionary<string, object?>
             {
                 ["frame"] = Frame,
                 ["time"] = _simStepsTotal * DtFixed,
+                // How much sim time runs per wall second (the host's pacing
+                // switch, --warp / --fast). The e2e suite and the client
+                // pace on SIM time, so they need to know it: 1.0 = real time.
+                ["time_warp"] = TimeWarp,
                 ["has_car"] = false,
                 ["frozen"] = _frozen,
                 ["validator_enabled"] = Validator.Enabled,
                 ["validator_violations"] = 0,
                 ["flags"] = FlagsPayload(null),
                 ["hud_label"] = null,
-                ["camera_x"] = Camera.X,
-                ["camera_y"] = Camera.Y,
-                ["camera_zoom"] = Camera.Zoom,
                 ["cars"] = carsPayload,
             };
         }
@@ -1042,6 +1009,7 @@ public sealed class SimEngine
             {
                 ["frame"] = Frame,
                 ["time"] = _simStepsTotal * DtFixed,
+                ["time_warp"] = TimeWarp,
                 ["has_car"] = true,
                 // Monotonic per-car identity: the teleport ack. has_car alone
                 // can't confirm a NEW car - it is already True while the old
@@ -1100,9 +1068,6 @@ public sealed class SimEngine
                 // x/y/heading samples.)
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(car.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(car.Uid, out var tf2) ? tf2.HudLabel : null,
-                ["camera_x"] = Camera.X,
-                ["camera_y"] = Camera.Y,
-                ["camera_zoom"] = Camera.Zoom,
             };
         }
 

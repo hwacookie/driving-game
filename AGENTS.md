@@ -63,6 +63,24 @@ heading) instead of weakening or bypassing the checks that catch it.
 
 This rule may ONLY be violated if the user explicitly asks for it.
 
+## No pygame compatibility target — Godot idioms win
+
+The pygame frontend is retired and the transition to Godot is complete. **
+Nothing has to stay compatible with, equal to, or parity-checked against
+pygame.** Historical mentions (the `diary/`, the phase log in
+`docs/GODOT_FRONTEND.md`, old `// … (pygame parity) …` comments) may stay
+as history, but they are **not requirements** and must not steer new work.
+
+For future development, follow Godot's own design: use the features and
+idioms Godot suggests — its scene tree, nodes, layers and draw primitives,
+its geometry and asset pipeline — instead of re-implementing a workaround
+that only exists because pygame lacked the primitive. Ask "what does Godot
+do for this?" before copying an old renderer's habit. Example: a road
+ribbon is not a solid polygon whose interior is re-painted in the
+background colour because the old renderer could not fill holes — that
+workaround and its layering side effects are dropped, and roads are drawn
+as their own geometry.
+
 ## Decisions: explicit user decisions are binding
 
 When the user makes an explicit decision or instruction (e.g. "this value
@@ -72,6 +90,47 @@ the decision with your own judgment ("actually, simpler: keep it fixed").
 If you believe the decision has a problem, state the conflict explicitly
 and ask before deviating. Acknowledging a correction and then implementing
 the old way anyway is a violation of this rule.
+
+## Screenshots: how to look at the map
+
+Visual verification of a rendering change (a crossing, a marking, a car) goes
+through the Godot client itself: `MapRenderer` takes `--screenshot <path>`,
+builds the map, shoots the viewport a moment later and **quits itself** - a
+one-shot run, nothing to kill from outside (see the never-signal rule below).
+
+```bash
+rm -f /tmp/shot.png /tmp/godot_shot.log
+nohup "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
+      --source embedded --map basic --port 5007 \
+      --center 1250 1750 --zoom 18 --screenshot /tmp/shot.png --delay 2 \
+      > /tmp/godot_shot.log 2>&1 &
+until [ -s /tmp/shot.png ] || grep -q "SavePng failed\|ERROR" /tmp/godot_shot.log; do sleep 1; done
+```
+
+Then `read /tmp/shot.png` (the image comes back to me) and check the log's
+`Map ready: bounds …, zoom …` line for the view that was actually taken.
+
+Three traps, all of them silent failures:
+
+- **Never `--headless` for a screenshot.** Headless uses Godot's dummy
+  renderer (`servers/rendering/dummy/…`), `GetViewport().GetTexture()` is
+  null, `SaveShot` throws before it reaches `GetTree().Quit()` - no PNG and
+  a process that hangs until killed. The windowed one-shot run opens a
+  window and closes itself.
+- **Use a free `--port`.** The embedded API will not bind a busy port
+  ("embedded REST API FAILED … Address already in use"), so with a game
+  already on :5001 the map never arrives and the run hangs. `--port 5007`
+  leaves the running game untouched.
+- **Aim the camera at the thing under test.** `--center <x> <y>` is in
+  metres (x east, y north) and pins the view - it also turns off
+  auto-follow, so the shot stays on the crossing instead of snapping to a
+  spawned car. `--zoom <px/m>` sets the scale (`--delay <s>` is the wait
+  between map-ready and the shot).
+
+When a painted length matters (marking widths, clearances), measure the PNG
+rather than eyeball it: a small PIL scan across a row/column of the image
+converts pixels back to metres by dividing by the announced zoom - that is
+the pattern `docs/lights_report.md` uses.
 
 ## E2E tests
 
@@ -87,10 +146,20 @@ launches the suite through `POST /run_test`, and streams the log to the
 console:
 
 ```bash
-scripts/run_e2e.sh                                  # full suite, visible
-scripts/run_e2e.sh --no-godot                       # headless (no window)
-scripts/run_e2e.sh --tests corner_left              # single scenario
+scripts/run_e2e.sh --warp 4                         # the default: visible, ~4x
+scripts/run_e2e.sh                                  # real time (only when asked)
+scripts/run_e2e.sh --no-godot --warp 4              # headless
+scripts/run_e2e.sh --tests corner_left --warp 4     # single scenario
 ```
+
+**Default pacing: `--warp 4`.** Any e2e run I start (full suite, subset, or a
+single scenario) gets `--warp 4` unless the user asks for real time or a
+different factor. Reason: the suite's guardrails are in SIM time and its poll
+resolution scales with the announced warp, so a 4x run is ~3x faster on the
+wall clock with the same verdicts (measured: 4m41s → 1m34s for the full
+suite). Two things stay honest at 4x: the capacity probe (`fig8_stress`) is
+skipped by design, and a warped run is not a bit-identical replay of the
+real-time one (control commands land at different points in the sim).
 
 When the user asks to run the e2e tests:
 

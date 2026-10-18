@@ -20,10 +20,6 @@ public static class Config
     public const string KEY_Q = "q";
     public const string KEY_E = "e";
 
-    // --- Viewport (sim camera; the remote renderer mirrors it) ---
-    public const int WINDOW_WIDTH = 1280;
-    public const int WINDOW_HEIGHT = 720;
-
     // --- Target area: Kleinmachnow (south of Berlin), bounding box ---
     public const double BOUNDING_BOX_NORTH = 52.42382;
     public const double BOUNDING_BOX_WEST = 13.21831;
@@ -63,9 +59,6 @@ public static class Config
     /// <summary>Shared slack (m) between planned-arc validation and live
     /// off-road checks.</summary>
     public const double ROAD_EDGE_TOLERANCE_M = 0.35;
-    // Zoom limits: viewport width = WINDOW_WIDTH / (zoom * PIXELS_PER_METER)
-    // MAX_ZOOM -> ~40 m viewport (zoomed in); MIN_ZOOM -> ~3000 m (out).
-    public const double MAX_ZOOM = 16.0;    public const double MIN_ZOOM = 0.12;    public const double ZOOM_STEP = 1.15;
     // --- Car ---
     /// <summary>Top speed m/s (200 km/h, normal car).</summary>
     public const double CAR_SPEED = 55.6;    /// <summary>m/s² — 0-100 km/h in ~10 s.</summary>
@@ -203,6 +196,24 @@ public static class Config
     /// node centre at a junction (half the widest arm's width plus this margin)
     /// — no paint on the crossing itself.</summary>
     public const double CENTERLINE_JUNCTION_GAP_M = 0.5;
+    /// <summary>Length (m) of UNBROKEN centreline paint in front of a
+    /// junction mouth. A dashed line would read as "change lanes here";
+    /// approaching a crossing the paint is solid for this stretch, then
+    /// resumes its dash pattern further out.</summary>
+    public const double CENTERLINE_SOLID_BEFORE_JUNCTION_M = 6.0;
+    // A halt line is a band of white across the YIELDING LANE at the mouth
+    // of a yielding approach - far thicker than a line marking.
+    public const double STOP_LINE_WIDTH_M = 0.5;
+    /// <summary>Gap (m) the halt line keeps from the road's RIGHT edge: the
+    /// paint belongs to the yielding lane only, so it must not run into the
+    /// kerb. Its other end MAY touch the centreline (the lane's left
+    /// boundary) - that is where the right lane starts.</summary>
+    public const double STOP_LINE_EDGE_GAP_M = 0.5;
+    /// <summary>Diameter (m) of the small white disc painted in the middle of
+    /// a real crossing (two roads crossing, not a T). NOT a German rule - a
+    /// visual marker the user asked for, so the crossing's centre is visible
+    /// even where nothing else is painted.</summary>
+    public const double CROSSING_MARKER_DIAMETER_M = 0.3;
     /// <summary>How far into a segment a car spawns, as a FRACTION of the
     /// segment length. Never 0: a node sits in the middle of the junction
     /// rounding where lane geometry is ambiguous. Fractional (not fixed metres)
@@ -298,9 +309,6 @@ public static class Config
     /// <summary>Every two-way road at least this wide gets a dashed white
     /// centerline. Narrow service lanes (3.5 m) and one-ways don't.</summary>
     public const double CENTERLINE_MIN_WIDTH_M = 7.0;
-    /// <summary>Junction dot (white circle at 3+-way nodes): physical size 30 cm
-    /// in diameter, rendered in world space (1 px floor at low zoom).</summary>
-    public const double JUNCTION_DOT_RADIUS_M = 0.15;
     /// <summary>The white boundary line is drawn this far INWARD from the true
     /// paved edge: a 15 cm tarmac shoulder stays outside the line. The off-road
     /// check keeps using the full paved polygon — the shoulder is still "on road".</summary>

@@ -98,4 +98,4 @@
   - Spec section "Raceline rework — per-vehicle dimensions" updated:
     dynamics done, geometry (wheelbase/corridor/collisions) still open.
 - State: fresh e2e-driven game running; Godot window self-terminates after
-  test runs. Run-Test button issue still open.
+  test runs. Run-Test button issue still open
