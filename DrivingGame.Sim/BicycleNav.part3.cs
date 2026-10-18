@@ -398,7 +398,7 @@ public sealed partial class BicycleNav
     /// <summary>Why the last U-turn request was rejected (diagnostics / HUD).</summary>
     public string UturnRejectReason { get; private set; } = "";
 
-    private (List<(double X, double Y)> PtsPx, List<double> StopsS,
+    private (List<(double X, double Y)> WorldPts, List<double> StopsS,
              (double A, double B)? RevZone, double[] Kappa, double[] Hdg)? GenerateUturn()
     {
         var net = _network;

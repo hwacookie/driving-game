@@ -29,7 +29,7 @@ public static class RoadNetworkGeometry
     private static double Rad(double deg) => deg * Math.PI / 180.0;
 
     /// <summary>(distance, proj_x, proj_y) from point to line segment.</summary>
-    public static (double Dist, double Px, double Py) PointToSegment(
+    public static (double Dist, double ProjX, double ProjY) PointToSegment(
         double px, double py, double x1, double y1, double x2, double y2)
     {
         double dx = x2 - x1, dy = y2 - y1;
@@ -597,7 +597,7 @@ public static class RoadNetworkGeometry
         var zones = new List<(double From, double To)>();
         // The place nearest vertex `idx` where the line crosses the mouth
         // LINE of the arm pointing (dirx,diry) - the line perpendicular to
-        // that arm at distance `gapPx` from the node, where that arm's halt
+        // that arm at distance `gap` (metres) from the node, where that arm's halt
         // line is drawn. Every crossing of that line is a sign change of
         // the projection; the one nearest the pass is the mouth that bounds
         // this paint.
