@@ -258,15 +258,31 @@ public sealed class SimEngine
 
     /// <summary>Create a car at `progress` (0..1) along segment `segIdx`,
     /// driving start_node -> end_node in the normal driving position.
-    /// Chord-based placement: exact on smooth tracks, but do NOT use it for
-    /// sharp-corner segments - see SpawnPosition's note on why chord spawns
-    /// sit off-pavement near hairpins. Used by POST /teleport {"segment": N}.</summary>
+    /// Placement follows the corner-rounded path, NOT the segment's chord:
+    /// the chord is only the LOGICAL connection, and where two chords meet at
+    /// a node their corner point plus a chord-perpendicular lane offset sits
+    /// metres off the pavement and points ~10° off the road's real direction.
+    /// The fig8_stress phase spawns 1 m before a corner node (segment 108,
+    /// progress 0.959); from that chord pose the car left the pavement within
+    /// 0.05 s at 50 km/h and stayed off-road for the rest of the phase, while
+    /// the SAME bend entered two segments earlier kept to 2 m of the centre.
+    /// On straight segments the two placements agree exactly. Used by
+    /// POST /teleport {"segment": N}.</summary>
     public Car CreateCarAtSegment(int segIdx, double progress = 0.5, bool reverse = false)
     {
         var seg = Network.Segments[segIdx];
         double x = seg.X1 + (seg.X2 - seg.X1) * progress;
         double y = seg.Y1 + (seg.Y2 - seg.Y1) * progress;
         double h = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
+        // Same rule as SpawnPosition: when the road actually runs somewhere
+        // else than the chord, place on it and use its local tangent.
+        var rounded = Network.SegmentPathPoint(segIdx, progress * seg.Length);
+        if (rounded is not null)
+        {
+            x = rounded.Value.X;
+            y = rounded.Value.Y;
+            h = rounded.Value.HeadingDeg;
+        }
         // Reverse spawn: face the other way along the same two-way road.
         // The lane offset below is applied relative to the ACTUAL heading,
         // so the car still starts in its own right-hand lane.

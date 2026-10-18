@@ -99,6 +99,7 @@ public class RoadNetwork
     private Geometry? _pavedPolygonCache;
     private List<List<(double X, double Y)>>? _centerlinesCache;
     private List<List<(double X, double Y)>>? _markingCenterlinesCache;
+    private Dictionary<(string, double), List<List<(double X, double Y)>>>? _roundedLinesCache;
     private List<(string Style, List<(double X, double Y)> Coords, double WidthM)>? _laneMarkingsCache;
     private List<List<(double X, double Y)>>? _onewayArrowsCache;
     private List<List<(double X, double Y)>>? _parkingMarksCache;
@@ -607,9 +608,15 @@ public class RoadNetwork
     /// centreline — not the segment's chord (at a sharp U-turn the two diverge
     /// by tens of metres). Returns null if no merged line ends within 30 m of
     /// the node.</summary>
+    /// <summary>Every road's corner-rounded centreline chain, the same
+    /// polylines the paved ribbon is buffered from. Cached - spawn placement
+    /// walks along these and stress tests ask for hundreds of spawns.</summary>
+    public Dictionary<(string, double), List<List<(double X, double Y)>>> GetRoundedLines()
+        => _roundedLinesCache ??= RoadNetworkGeometry.MergeAndRoundLines(this);
+
     public (double X, double Y, double HeadingDeg)? SpawnPathPoint(int segIdx, (double X, double Y) nodeXy, double distanceM)
     {
-        var groups = RoadNetworkGeometry.MergeAndRoundLines(this);
+        var groups = GetRoundedLines();
         double nx = nodeXy.X, ny = nodeXy.Y;
         List<(double X, double Y)>? bestLine = null;
         double bestD2 = double.PositiveInfinity;
@@ -649,6 +656,67 @@ public class RoadNetwork
             remaining -= segLen;
         }
         return (x, y, heading);
+    }
+
+    /// <summary>Point + heading `distanceM` along the corner-rounded path of
+    /// segment segIdx, measured from that segment's START node and walking in
+    /// the segment's own start_node -> end_node direction. SpawnPathPoint finds
+    /// the chain that ENDS at a named degree-1 node; a mid-network spawn sits
+    /// in the MIDDLE of a merged chain, so this one identifies the chain by
+    /// the segment's TWO endpoints instead (and walks with the segment, since
+    /// a merged chain may run either way).</summary>
+    public (double X, double Y, double HeadingDeg)? SegmentPathPoint(int segIdx, double distanceM)
+    {
+        var seg = Segments[segIdx];
+        List<(double X, double Y)>? best = null;
+        double bestD = double.PositiveInfinity;
+        foreach (var lines in GetRoundedLines().Values)
+            foreach (var coords in lines)
+            {
+                if (coords.Count < 2) continue;
+                var d = Math.Max(NearestOnPolyline(coords, seg.X1, seg.Y1).DistPx,
+                                 NearestOnPolyline(coords, seg.X2, seg.Y2).DistPx);
+                if (d < bestD) { bestD = d; best = coords; }
+            }
+        if (best is null || bestD > 30.0 * Config.PIXELS_PER_METER)
+            return null;
+        var (s0, _, tanX, tanY) = NearestOnPolyline(best, seg.X1, seg.Y1);
+        bool withChain = tanX * (seg.X2 - seg.X1) + tanY * (seg.Y2 - seg.Y1) >= 0.0;
+        var chain = new RefLine(best);
+        double s = s0 + (withChain ? distanceM : -distanceM);
+        if (s < 0.0 || s > chain.Total) return null;
+        var (px, py) = chain.PointAt(s);
+        return (px, py, chain.HeadingAt(s) + (withChain ? 0.0 : 180.0));
+    }
+
+    /// <summary>Nearest point on a polyline to (x, y): arc length along it in
+    /// METRES (RefLine's parameterization), distance in world pixels, and the
+    /// chain's unit tangent there.</summary>
+    private static (double S, double DistPx, double TanX, double TanY)
+        NearestOnPolyline(List<(double X, double Y)> coords, double x, double y)
+    {
+        double bestD2 = double.PositiveInfinity, s = 0.0, tx = 1.0, ty = 0.0, acc = 0.0;
+        for (int i = 0; i < coords.Count - 1; i++)
+        {
+            var (x0, y0) = coords[i];
+            var (x1, y1) = coords[i + 1];
+            double dx = x1 - x0, dy = y1 - y0;
+            double len2 = dx * dx + dy * dy;
+            if (len2 <= 1e-9) continue;
+            double len = Math.Sqrt(len2);
+            double t = Math.Max(0.0, Math.Min(1.0, ((x - x0) * dx + (y - y0) * dy) / len2));
+            double px = x0 + t * dx, py = y0 + t * dy;
+            double d2 = (x - px) * (x - px) + (y - py) * (y - py);
+            if (d2 < bestD2)
+            {
+                bestD2 = d2;
+                s = (acc + t * len) / Config.PIXELS_PER_METER;
+                tx = dx / len;
+                ty = dy / len;
+            }
+            acc += len;
+        }
+        return (s, Math.Sqrt(bestD2), tx, ty);
     }
 
     /// <summary>Merged, corner-rounded road CENTERLINES (no buffering), ALL

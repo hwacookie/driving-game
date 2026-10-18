@@ -25,6 +25,7 @@
 #   scripts/run_e2e.sh --no-godot                       # headless (no window)
 #   scripts/run_e2e.sh --tests corner_left              # single scenario
 #   scripts/run_e2e.sh --tests fig8_stress --stress-cars 250
+#   scripts/run_e2e.sh --tests 21-24                        # resume a range
 #
 # Logs:
 #   game process:   /tmp/game.log
@@ -175,6 +176,12 @@ fi
 if [ -n "$TEST_SELECTOR" ]; then
   if [[ "$TEST_SELECTOR" =~ ^[0-9]+$ ]]; then
     TEST_NUMBER="$TEST_SELECTOR"
+  elif [[ "$TEST_SELECTOR" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    # Numeric multi/range spec (e.g. "21-24", "3,7-9"): the /run_test
+    # endpoint only takes ONE number, so hand the spec through to the
+    # suite's own --tests parser instead (original numbering is kept).
+    EXTRA_ARGS+=(--tests "$TEST_SELECTOR")
+    TEST_NUMBER=""
   else
     # ${PYTHON:-python3}: test_turning.py imports requests at module level,
     # so --list-json needs the venv interpreter (PATH python3 may lack it).
