@@ -161,8 +161,10 @@ public partial class MapRenderer : Node2D
     /// arg aims at (measured: contacts at 1102/1862 m, 1388/1855 m - two
     /// figure-8 arms away from the junction). The sim freezes on the crash,
     /// so the view stays on the impact for inspection.</summary>
+    private string _crashShotPath;   // --crash-shot <path>: one PNG at the crash (diagnostic)
     private long _crashFocusUid = 0L;
     private bool _crashZoomed = false;
+
     private const float CrashZoom = 34.0f;   // px/m: ~47 x 26 m over the impact
     private Dictionary<long, int> _crashCounts = new();
     /// <summary>--focus <uid>: watch THIS car (the client binds to it and
@@ -370,6 +372,10 @@ public partial class MapRenderer : Node2D
                 // snapping to the last car. Manual pan/zoom still works.
                 _autoFollow = false;
                 i += 2;
+            }
+            else if (args[i] == "--crash-shot" && i + 1 < args.Length)
+            {
+                _crashShotPath = args[i + 1];
             }
             else if (args[i] == "--focus" && i + 1 < args.Length)
             {
@@ -2093,6 +2099,11 @@ public partial class MapRenderer : Node2D
                 _crashZoomed = true;
                 _cam.Zoom = new Vector2(CrashZoom, CrashZoom);
                 GD.Print($"Crash camera: pinned on car {bind} @ {CrashZoom:F0} px/m");
+                if (_crashShotPath != null && _crashShotPath != "")
+                {
+                    GetTree().CreateTimer(0.5).Timeout += () => SaveShot(_crashShotPath);
+                    GD.Print($"crash shot scheduled -> {_crashShotPath}");
+                }
             }
         }
         if (_followUid == null && _autoFollow && _carNodes.Count > 0)
@@ -2111,6 +2122,7 @@ public partial class MapRenderer : Node2D
             _cam.ResetSmoothing();
         _cam.GlobalPosition = target;
         _lastFollowTarget = target;
+
     }
 
     static float LerpAngleDeg(float a, float b, float f)

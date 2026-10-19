@@ -49,9 +49,10 @@ public static class CarCollisions
     const double LookAheadMinM = 40.0;
     const double ReactionTimeS = 1.0;
     // Broadphase ring radius: must cover the LARGEST per-car look-ahead
-    // (comfort stopping distance at top speed + reaction + gap: 55.6 +
-    // 55.6²/10 + 3 ≈ 368 m at the 5 m/s² demand, was 214 m at the 1 g one).
-    const double LookAheadMaxM = 400.0;
+    // (comfort stopping distance + reaction + gap: ~300 m at the map's legal
+    // top speed of ~130 km/h; the 200 km/h figure would need 368 m but no
+    // road here allows it). 20 m cells -> ring 16 (was 14 at the 1 g figure).
+    const double LookAheadMaxM = 300.0;
 
     // Comfortable standstill gap: the stopping-distance curve is measured
     // from this gap, so a following car rests ~3 m short of the lead car.
@@ -381,42 +382,30 @@ public static class CarCollisions
         var immediateConflict = new Dictionary<int, (int Other, double Ttc, bool OtherStationary)>();
 
         // --- route-true forward corridor (the curved-arm fix) -------------
-        // v1's corridor was a straight RAY along the heading, which is blind
-        // around the figure-8's arms (~15 deg per 25 m segment): measured on
-        // fig8_xing, car 30 behind car 28 ON THE SAME LANE (0.44 m apart
-        // laterally at the crash pose) read lat = -3.6 m at a 40 m ray
-        // distance - outside the 1.8 m band, so NO cap ever fired and the
-        // follower drove around the bend at 96 km/h into a stopped car
-        // (first contact t=6.9 s). A driver looks along the road, not along
-        // a tangent: sample each car's own route ahead ONCE per substep
-        // (same pattern as the v2 sweeps below) and measure the leader
-        // against THAT line. Cars without a route line (no nav / no
-        // destination) keep the old ray test.
-        const double RouteSampleStepM = 2.0;
+        // (see the note above BuildRoadAhead). Cached per car every
+        // RouteRebuildS of sim time - the walk itself is O(look-ahead), not
+        // O(1), so rebuilding it every substep at 50 cars starved the sim.
         var routeAhead = new Dictionary<int, (double S, double X, double Y)[]>();
-        var routeS = new Dictionary<int, double>();
+        var routeOff = new Dictionary<int, double>();   // my own offset from the axis
         if (net is not null)
             foreach (var c in carList)
             {
-                var navC = c.BicycleNav;
-                var refC = navC?.Ref;
-                if (refC is null || refC.Total < 1.0) continue;
-                double s0 = navC.S;
-                if (s0 < 0.0 || s0 > refC.Total) continue;
-                double rangeM = LookAheadForSpeed(c.Speed);
-                var pts = new List<(double, double, double)>();
-                for (double s = s0;
-                     s <= Math.Min(refC.Total, s0 + rangeM + RouteSampleStepM);
-                     s += RouteSampleStepM)
+                double builtAt = _roadPathAt.ContainsKey(c.Uid) ? _roadPathAt[c.Uid] : -1e9;
+                bool fresh = _roadPath.ContainsKey(c.Uid) &&
+                             simTime >= builtAt && simTime - builtAt < RouteRebuildS;
+                if (fresh)
                 {
-                    var (px, py) = refC.PointAt(s);
-                    pts.Add((s, px, py));
+                    routeAhead[c.Uid] = _roadPath[c.Uid];
+                    routeOff[c.Uid] = _roadOff[c.Uid];
+                    continue;
                 }
-                if (pts.Count >= 2)
-                {
-                    routeAhead[c.Uid] = pts.ToArray();
-                    routeS[c.Uid] = s0;
-                }
+                var pts = BuildRoadAhead(c, net, Math.Min(LookAheadForSpeed(c.Speed), RoadPathMaxM));
+                if (pts is null || pts.Length < 2) continue;
+                routeAhead[c.Uid] = pts;
+                _roadPath[c.Uid] = pts;
+                _roadPathAt[c.Uid] = simTime;
+                _roadOff[c.Uid] = RoutePointOff(pts, c.X, c.Y).Off;
+                routeOff[c.Uid] = _roadOff[c.Uid];
             }
 
         foreach (var c in carList)
@@ -445,16 +434,32 @@ public static class CarCollisions
                 double dxc = o.X - c.X, dyc = o.Y - c.Y;
                 double rayAlong = dxc * fx + dyc * fy;      // ahead at all?
                 if (rayAlong < 0.0) continue;               // beside/behind me
-                // Distance AHEAD and the lateral offset: along my ROUTE when
-                // I have one (the road curves), along my heading ray when not.
+                // The route arc ahead of me is never SHORTER than the
+                // projection onto my heading, so a leader whose projection
+                // already exceeds my look-ahead can be dropped before the
+                // (more expensive) road walk - this filter is what kept the
+                // per-pair scan affordable.
+                if (rayAlong > lookAheadM) continue;
+                double rayLat = dxc * rx + dyc * ry;
+                // Cheap path first: on a straight road the heading ray IS the
+                // lane line, so the band test settles without walking the
+                // network. Only a pair the ray puts to the side (a curved
+                // arm, or a leader past the end of a nav line) gets the
+                // road-true measurement - that scan is O(walk samples) per
+                // PAIR and was the whole cost of the 0.09x-realtime sim.
                 double along, lat;
-                if (routeAhead.TryGetValue(c.Uid, out var line))
-                    (along, lat) = RouteAheadOffsets(line, routeS[c.Uid], o.X, o.Y);
-                else
+                if (Math.Abs(rayLat) <= CorridorHalfWidthM && rayAlong <= lookAheadM)
                 {
                     along = rayAlong;
-                    lat = dxc * Math.Cos(rad) + dyc * -Math.Sin(rad);
+                    lat = rayLat;
                 }
+                else if (routeAhead.TryGetValue(c.Uid, out var line))
+                {
+                    var (sLead, offLead) = RoutePointOff(line, o.X, o.Y, rayAlong);
+                    along = sLead;
+                    lat = offLead - routeOff[c.Uid];
+                }
+                else { continue; }
                 if (along < 0 || along > lookAheadM) continue;
                 if (Math.Abs(lat) > CorridorHalfWidthM)
                 {
@@ -1293,24 +1298,140 @@ public static class CarCollisions
     /// reaction distance (v·t_react) + full braking distance (v²/2a) +
     /// standstill gap, floored at LookAheadMinM. See the constant block for
     /// why the range must be at least the car's own stopping distance.</summary>
-    /// <summary>(arc distance ahead of me, perpendicular offset from my
-    /// route line) for a point. Nearest sampled route point, refined
-    /// against the two polyline pieces around it. The offset is UNSIGNED -
-    /// the corridor only asks for the band, and the ray test above already
-    /// decided ahead/behind.</summary>
-    static (double Along, double Lat) RouteAheadOffsets(
-        (double S, double X, double Y)[] line, double sMe, double x, double y)
+    // Sampling step of the road polyline ahead of a car (v1's route-true
+    // corridor): 8 m keeps the per-pair scan cheap (a 200 m walk is 25
+    // points) while a 4.4 m body can never hide between two samples.
+    const double RouteSampleStepM = 8.0;
+    // How far the road walk extends. The comfort demand at the map's legal
+    // top speed (~130 km/h) wants ~300 m of look-ahead; the walk covers 200
+    // m and straight-road pairs are handled by the cheap ray test, which
+    // covers the rest.
+    const double RoadPathMaxM = 200.0;
+    // The walk is rebuilt at most every RouteRebuildS of SIM time per car
+    // (measured: rebuilding it every substep at 50 cars drove the sim to
+    // 0.01x real time - the host needed 2 wall minutes to reach sim t=1 s).
+    // 0.1 s of sim moves a car at 130 km/h by 3.6 m, well inside the 4 m
+    // sample step's error, and the corridor's own demand is a gap, not a
+    // centimetre.
+    const double RouteRebuildS = 0.1;
+    private static readonly Dictionary<int, (double S, double X, double Y)[]> _roadPath = new();
+    private static readonly Dictionary<int, double> _roadPathAt = new();
+    private static readonly Dictionary<int, double> _roadOff = new();
+
+    private static readonly List<int> _noSegs = new();
+
+    /// <summary>The lane path ahead of a car, walked through the road
+    /// network: my position -> the node I am heading for -> the connected
+    /// segment that best continues my travel direction -> ... Sampled every
+    /// RouteSampleStepM, s measured from the car. Deliberately NOT the car's
+    /// nav line: that ends at the car's destination, and a leader beyond the
+    /// end read 2-16 m "to the side" and went invisible to the corridor
+    /// (measured: car 20 vs car 18, no cap offered for 2.8 s = 66 m of blind
+    /// travel at 85 km/h). A continuation is only taken while it stays
+    /// roughly forward (dot > -0.6), so the walk never doubles back.
+    /// Returns null when the walk cannot start.</summary>
+    static (double S, double X, double Y)[] BuildRoadAhead(Car c, RoadNetwork net, double rangeM)
     {
-        int best = 0;
+        var seg = net.Segments[c.SegIdx];
+        bool fwd = c.Forward;
+        // The path starts at MY OWN projection onto the segment axis, so s
+        // measures from here and both cars' offsets from the axis are
+        // comparable (see RoutePointOff): starting the polyline AT the car
+        // instead made the first leg a chord from the lane to the node and
+        // re-introduced the axis offset as a fake lateral gap.
+        double ax1 = seg.X1, ay1 = seg.Y1, ax2 = seg.X2, ay2 = seg.Y2;
+        double adx = ax2 - ax1, ady = ay2 - ay1;
+        double alen = Math.Max(Math.Hypot(adx, ady), 1e-9);
+        double u = Math.Clamp(((c.X - ax1) * adx + (c.Y - ay1) * ady) / (alen * alen), 0.0, 1.0);
+        double projX = ax1 + u * adx, projY = ay1 + u * ady;
+        double toEndM = fwd ? (1.0 - u) * seg.Length : u * seg.Length;
+        string node = fwd ? seg.EndNode : seg.StartNode;
+        if (!net.Nodes.TryGetValue(node, out var nxy)) return null;
+        double curX = nxy.X, curY = nxy.Y;
+        double inX = (fwd ? seg.X2 - seg.X1 : seg.X1 - seg.X2);
+        double inY = (fwd ? seg.Y2 - seg.Y1 : seg.Y1 - seg.Y2);
+        double inL = Math.Max(Math.Hypot(inX, inY), 1e-9);
+        inX /= inL; inY /= inL;                       // travel dir into the node
+        var px = new List<double> { projX, curX };
+        var py = new List<double> { projY, curY };
+        double travelled = Math.Max(toEndM, 0.0);
+        int prev = c.SegIdx;
+        int steps = 0;
+        while (travelled < rangeM && steps++ < 64)   // hard bound: a zero-length
+        {                                            // or looping continuation
+            // must never spin the walk (measured: the host stopped advancing
+            // the sim entirely, /state rate 0.0x)
+            int bestIdx = -1; double bestDot = -0.6, bestX = 0.0, bestY = 0.0;
+            bool bestFwd = false; string bestFar = "";
+            foreach (var ni in net.NodeConnections.GetValueOrDefault(node, _noSegs))
+            {
+                if (ni == prev) continue;
+                var ns = net.Segments[ni];
+                if (ns.Length <= 0.1) continue;      // degenerate - cannot advance
+                bool awayFwd = ns.StartNode == node;
+                string far = awayFwd ? ns.EndNode : ns.StartNode;
+                if (far == node || !net.Nodes.TryGetValue(far, out var fxy)) continue;
+                double dx = fxy.X - curX, dy = fxy.Y - curY;
+                double dl = Math.Max(Math.Hypot(dx, dy), 1e-9);
+                double dot = dx / dl * inX + dy / dl * inY;
+                if (dot > bestDot)
+                {
+                    bestDot = dot; bestIdx = ni; bestFwd = awayFwd;
+                    bestX = fxy.X; bestY = fxy.Y; bestFar = far;
+                }
+            }
+            if (bestIdx < 0) break;                   // dead end
+            px.Add(bestX); py.Add(bestY);
+            travelled += net.Segments[bestIdx].Length;
+            double nx = bestX - curX, ny = bestY - curY;
+            double nl = Math.Max(Math.Hypot(nx, ny), 1e-9);
+            inX = nx / nl; inY = ny / nl;
+            node = bestFar; curX = bestX; curY = bestY; prev = bestIdx;
+        }
+        var out_ = new List<(double, double, double)> { (0.0, px[0], py[0]) };
+        double s = 0.0;
+        for (int i = 0; i + 1 < px.Count; i++)
+        {
+            double ax = px[i], ay = py[i], bx = px[i + 1], by = py[i + 1];
+            double segLen = Math.Max(Math.Hypot(bx - ax, by - ay), 1e-9);
+            for (double t = RouteSampleStepM; t <= segLen + 1e-9; t += RouteSampleStepM)
+            {
+                double f = Math.Min(t / segLen, 1.0);
+                out_.Add((s + t, ax + (bx - ax) * f, ay + (by - ay) * f));
+            }
+            s += segLen;
+        }
+        return out_.ToArray();
+    }
+
+    /// <summary>(arc distance along the path, SIGNED perpendicular offset
+    /// from it - positive to the path's right) of a point: nearest sampled
+    /// path point, refined against the two pieces around it. The corridor
+    /// compares two cars' offsets, not their distance from the road axis -
+    /// both sit ~2.5 m right of the axis in their lane, and measuring from
+    /// the axis hid every same-lane leader (lat read 2.0-2.9 m, outside the
+    /// 1.8 m band, i.e. invisible until contact).</summary>
+    static (double S, double Off) RoutePointOff(
+        (double S, double X, double Y)[] line, double x, double y, double sHint = 0.0)
+    {
+        // Samples are evenly spaced in s, so the leader's arc position is
+        // near its ray projection: scan a +-96 m window around that instead
+        // of the whole walk (the full scan was the whole cost of the sim at
+        // 0.11x realtime with 50 cars on one loop).
+        double step = line.Length > 1 ? line[1].S - line[0].S : RouteSampleStepM;
+        int mid = (int)Math.Round(Math.Clamp(sHint, 0.0, line[line.Length - 1].S) / step);
+        int lo = Math.Max(0, mid - 12), hi = Math.Min(line.Length - 1, mid + 12);
+        int best = lo;
         double bestD2 = double.PositiveInfinity;
-        for (int i = 0; i < line.Length; i++)
+        for (int i = lo; i <= hi; i++)
         {
             double ddx = line[i].X - x, ddy = line[i].Y - y;
             double d2 = ddx * ddx + ddy * ddy;
             if (d2 < bestD2) { bestD2 = d2; best = i; }
         }
-        double bestLat = Math.Sqrt(bestD2);
+        double bestD = Math.Sqrt(bestD2);
         double bestS = line[best].S;
+        double bestOff = 0.0;
         for (int i = Math.Max(0, best - 1); i < Math.Min(line.Length - 1, best + 1); i++)
         {
             double ax = line[i].X, ay = line[i].Y;
@@ -1320,13 +1441,13 @@ public static class CarCollisions
             double t = Math.Clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0.0, 1.0);
             double qx = ax + t * dx, qy = ay + t * dy;
             double d = Math.Hypot(x - qx, y - qy);
-            if (d < bestLat)
-            {
-                bestLat = d;
-                bestS = line[i].S + t * (line[i + 1].S - line[i].S);
-            }
+            if (d >= bestD) continue;
+            bestD = d;
+            bestS = line[i].S + t * (line[i + 1].S - line[i].S);
+            double tl = Math.Sqrt(len2);
+            bestOff = (x - qx) * (dy / tl) + (y - qy) * (-dx / tl);   // right positive
         }
-        return (bestS - sMe, bestLat);
+        return (bestS, bestOff);
     }
 
     static double LookAheadForSpeed(double v)

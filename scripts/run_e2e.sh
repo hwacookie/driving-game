@@ -264,6 +264,10 @@ if [ -n "$FOCUS_UID" ] && [ "$RUN_GODOT" -eq 1 ]; then
   GODOT_CAM_ARGS+=(--focus "$FOCUS_UID")
   echo "==> Camera: bound to car $FOCUS_UID @ 34 px/m - that car is what you watch"
 fi
+if [ -n "$CRASH_SHOT" ] && [ "$RUN_GODOT" -eq 1 ]; then
+  GODOT_CAM_ARGS+=(--crash-shot "$CRASH_SHOT")
+  echo "==> Diagnostic: one PNG 0.5 s after the crash camera latches -> $CRASH_SHOT"
+fi
 
 if [ "$RUN_GODOT" -eq 1 ]; then
   if [ ! -x "$GODOT_BIN" ]; then
