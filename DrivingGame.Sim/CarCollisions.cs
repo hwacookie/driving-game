@@ -25,6 +25,8 @@ namespace DrivingGame.Sim;
 
 public static class CarCollisions
 {
+    // TEMPORARY diagnostic: DG_R32=1 traces why R32 accepts or rejects a
+    // pair, for the park_block staging where the primary never commits.
     // Broadphase grid cell size (m). The per-car look-ahead ring is
     // ceil(LookAheadMaxM / CellSizeM) + 1 = 21 cells wide, the pair
     // check ring ceil(PairCheckRadiusM / CellSizeM) + 1 = 9. 20 m keeps
@@ -33,9 +35,15 @@ public static class CarCollisions
     const double CellSizeM = 20.0;
 
     // Forward corridor for avoidance: a car counts as "ahead of me" while
-    // its centre is laterally within CorridorHalfWidth of my axis (a car in
-    // the adjacent lane sits ~3.5 m away on a 7 m road and must NOT
-    // trigger) and up to LookAheadForSpeed(my speed) ahead - see below.
+    // its centre is laterally within (my width + its width)/2 of my axis -
+    // i.e. only when the two BODIES would actually touch. A car in the
+    // adjacent (opposite) lane of a 7 m road sits ~3.5 m out: two sedans
+    // (1.8 m) clear it at a 1.8 m band, two 3 m trucks clear it at 3.0 m -
+    // they pass with ~0.5 m to spare, which is what a driver does, so the
+    // band must NOT be widened beyond the body sum (measured: a 0.3 m
+    // clearance term made a pickup and a sedan on opposite arms of the same
+    // road hold each other - "[R14] exit blocked by car 29" while both sat
+    // in their own lane with a whole lane width between them).
     const double CorridorHalfWidthM = 1.8;
     // SPEED-DEPENDENT look-ahead (the fast-follower rear-end fix). A
     // follower at speed v is only safe if it first sees a stopped leader at
@@ -57,6 +65,106 @@ public static class CarCollisions
     // Comfortable standstill gap: the stopping-distance curve is measured
     // from this gap, so a following car rests ~3 m short of the lead car.
     const double StandstillGapM = 3.0;
+    // Lateral clearance a pair asks for when it PASSES each other (R8 and
+    // the R26 single-file test). A stretch that cannot give it is single-file
+    // for that pair: they physically cannot drive past one another, so the
+    // pair must negotiate the claim (docs/DRIVING_MANEUVERS.md §8 R26).
+    const double MinPassClearanceM = 0.5;
+    // Lateral clearance asked for BESIDE an obstruction - not a constant, and
+    // not two constants any more. The old shape used 0.5 twice: once as the
+    // DEMAND ("I want half a metre beside it") and once as a VETO ("under half
+    // a metre this pair can never pass at all"). A demand and a veto set to the
+    // same number can only both hold if the delivery is exact - and it was not
+    // (measured: the car passed with 0.46 m and the veto stopped it).
+    // A human's side gap depends on how fast they go past it: centimetres are
+    // fine at walking pace, nobody takes 50 km/h past a parked car with a
+    // hand's width to spare. Road-design guidance (RASt / seitliche Abstand
+    // bei Überholen) puts the comfortable clearance at ~0.3 m at a standstill
+    // and ~1.0-1.25 m at 50 km/h - the line below. The BODY part of the demand
+    // was already per class (touchM from Config.VEHICLE_SIZES), so a mixer pair
+    // asks for more than two sedans without any of this curve.
+    const double SideClearPerMpsM = 0.05;   // m of extra gap per m/s of closing speed
+    public static double SideClearM(double vMps) =>
+        MinPassClearanceM + Math.Max(0.0, vMps) * SideClearPerMpsM;
+    /// <summary>One owner for "am I mid-pass?" - read by the corridor bound,
+    /// by v1's forward corridor and by R33's intent (docs/RIGHT_OF_WAY_NEGOTIATION.md
+    /// §7c: three consumers, one object).
+    /// R36 (binding user decision 2026-10-21): the opposite lane is used for the
+    /// MINIMUM. The commitment is not alive "until I am past the obstruction" -
+    /// it is alive over the shortest stretch on which the pass physically fits:
+    ///   IN  at laneChangeM(v) before the obstruction - the latest point from
+    ///       which the lateral shift can still be completed. The length is the
+    ///       repo's own speed-dependent lane-change figure (v · LANE_CHANGE_TIME_S
+    ///       clamped to MERGE_LEN_MIN_M/MERGE_LEN_MAX_M), the one R17 uses for a
+    ///       merge - not a new constant.
+    ///   OUT once the body has cleared the obstruction: half of both lengths plus
+    ///       the clearance the pair asks for.
+    /// Before IN the car belongs to its own lane (measured before this rule: it
+    /// crossed the centreline 48 m before a parked car 53 m ahead and stayed left
+    /// for 230 m), after OUT the shift decays back (measured: it never returned
+    /// at all). Progress runs along the SEGMENT (X1->X2), so the signed distance
+    /// to the obstruction flips with my direction.</summary>
+    /// <summary>The RECORD behind PassCommitted: "there is an obstruction I
+    /// intend to pass and I have not cleared it yet". Alive at any distance,
+    /// because R32's lateral request exists only while the obstruction is in
+    /// my LINE - a record that dies with the request dies 32 m before the pass
+    /// and leaves the crossing unexplained. The WINDOW (PassCommitted) decides
+    /// over which stretch the borrow happens; the two must stay separate.</summary>
+    /// <summary>The RECORD behind PassCommitted: "there is an obstruction I
+    /// intend to pass and the manoeuvre has not finished". Alive at any distance
+    /// ahead, and past the obstruction for as far as the RETURN needs - the
+    /// intent must cover the whole manoeuvre, out AND back. Ending it where the
+    /// body clears the obstruction released the shift 20 m too early and left
+    /// the return crossing unexplained (measured: [R33] at t=9.08 s, side +1,
+    /// 0.34 m off the line, no intent).</summary>
+    public static bool PassPending(Car c, RoadNetwork net)
+    {
+        if (c.PassUid < 0 || net is null) return false;
+        if (PassAlongM(c, net) > PassOutM(c, net)) return true;
+        // Past the window and still in the OTHER half: the return leg is running.
+        // The shift is released at the window's end, so the car comes back AFTER
+        // it - and the intent must cover that crossing, or R33 calls the return
+        // unexplained (measured at t=12.68 s). The manoeuvre ends when the car
+        // is back in its own lane, which is what this tests.
+        var seg = net.Segments[c.SegIdx];
+        double ax = seg.X2 - seg.X1, ay = seg.Y2 - seg.Y1;
+        double al = Math.Max(Math.Hypot(ax, ay), 1e-9);
+        double sgn = c.Forward ? 1.0 : -1.0;
+        double tx = ax / al * sgn, ty = ay / al * sgn;
+        double offM = (c.X - seg.X1) * ty + (c.Y - seg.Y1) * -tx;   // + = my right half
+        return offM < 0.0;
+    }
+    /// <summary>Signed metres AHEAD of me to the obstruction I am passing,
+    /// projected on my heading axis. A world point, not a (segment, progress)
+    /// pair: the pass may straddle a node (park_block_priority parks its car
+    /// exactly on straight_m), and a segment-keyed distance dies at the hand-off.
+    /// On a straight road the projection IS the along-track distance.</summary>
+    private static double PassAlongM(Car c, RoadNetwork net)
+    {
+        double rad = Math.Radians(c.Heading);
+        return (c.PassX - c.X) * Math.Sin(rad) + (c.PassY - c.Y) * Math.Cos(rad);
+    }
+    /// <summary>Where the borrow ends: the body has cleared the obstruction AND
+    /// the car has come back - the return takes the same speed-dependent lane-change
+    /// length as the way out.</summary>
+    private static double PassOutM(Car c, RoadNetwork net)
+    {
+        double laneM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
+                                  BicycleNav.MERGE_LEN_MIN_M,
+                                  BicycleNav.MERGE_LEN_MAX_M);
+        return -((c.LengthM + c.PassLengthM) * 0.5 + SideClearM(c.Speed)) - laneM;
+    }
+    public static bool PassCommitted(Car c, RoadNetwork net)
+    {
+        if (c.PassUid < 0 || net is null) return false;
+        double alongM = PassAlongM(c, net);
+        // IN: the latest point from which the shift can still be completed.
+        double laneInM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
+                                    BicycleNav.MERGE_LEN_MIN_M,
+                                    BicycleNav.MERGE_LEN_MAX_M);
+        if (alongM > laneInM) return false;      // not yet time to leave my lane
+        return alongM > PassOutM(c, net);        // still inside the borrow
+    }
     // Extra margin demanded when the target is STATIONARY: the plain
     // stop formula sqrt(2a*(G - StandstillGapM)) is the exact RECOVERABLE
     // boundary - a car at that speed stops exactly at the standstill gap,
@@ -114,6 +222,15 @@ public static class CarCollisions
     // its sweep and the whole fleet deadlocks (fig8_xing T_014: 0/50
     // moving for 200 s). Beyond 8 m the graded caps of a moving sweep
     // govern - the car creeps up to the 8 m boundary and stops there.
+    // NOTE: the sweep is deliberately CONSERVATIVE - each car advances at
+    // max(current, plan) speed, so a car that is slow now but about to
+    // cruise still reads as a cruise car. That is what the right-before-left
+    // ENTRY decision needs (a slow car with the right to enter must be
+    // treated as if it enters); predicting the honest acceleration ramp
+    // instead made the un-signed crossing crash (measured 2026-10-19: car
+    // 76 at 61 km/h hit car 83 at 10 km/h at t=31 s, because 83 no longer
+    // read as an incoming car for 76). The wake-up problem of a queue is
+    // fixed where it actually lives instead - see the OpeningGap test.
     const double MinSweepSpeedMps = 1.6;
     // Neighbor search radius for the pair check (current positions) - wider
     // than the corridor's look-ahead because the conflict may still be many
@@ -154,6 +271,128 @@ public static class CarCollisions
         if (rhs <= 0.0) return 0.0;
         return Math.Max(0.0, Math.Sqrt(a * a * tr * tr + 2.0 * a * rhs) - a * tr);
     }
+
+    /// <summary>R26/R27 - the pair meets HEAD-ON on one carriageway (same
+    /// segment, within 30 deg of opposite). Returns that segment, or null
+    /// when the pair is not such a conflict.</summary>
+    private static RoadSegment? HeadOnSameRoad(Car c, Car o, RoadNetwork net)
+    {
+        if (net is null || o.SegIdx != c.SegIdx) return null;
+        var segC = net.Segments[c.SegIdx];
+        double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
+        if (hdiff < 150.0) return null;          // not head-on
+        return segC;
+    }
+
+    /// <summary>R27 - is this standing car NO imminent threat for `c`? True
+    /// when it is at standstill AND is itself held by a reason that does not
+    /// name c (every cap key ends with the other car's uid: avoid#N,
+    /// sign#node#N, r14#node#N, passage#N). A car that cannot move is not
+    /// going to reach the conflict point while c crosses it, so c's yield
+    /// obligation toward it does not exist (docs §8 R27, the user rule of
+    /// 2026-10-19: N may enter when W - the arm on its right - is itself
+    /// blocked). Caps are recomputed every substep, so a chain of blocked
+    /// arms unwinds over substeps - the fixed point by iteration.</summary>
+    private static bool NoImminentThreat(Car o, Car c)
+    {
+        if (o.Speed > 0.3) return false;
+        var key = o.ActiveCapKey;
+        if (key is null || key.Length == 0) return false;  // free: may enter
+        return !key.EndsWith("#" + c.Uid);
+    }
+
+    /// <summary>R26 - who holds the passage? The car that has progressed
+    /// FURTHER along its own direction of travel inside the stretch (i.e.
+    /// entered first) keeps the claim; the other concedes. Progress is
+    /// measured on the shared segment's chord in each car's own travel
+    /// direction, so it is deterministic (R20) and needs no per-frame
+    /// bookkeeping. A tie (both entered side by side) goes to the lower uid.
+    /// Returns >0 when `c` holds the passage, <0 when `o` does.</summary>
+    private static int PassagePriority(Car c, Car o, RoadSegment seg)
+    {
+        double ax = seg.X2 - seg.X1, ay = seg.Y2 - seg.Y1;
+        double al = Math.Max(Math.Hypot(ax, ay), 1e-9);
+        double uC = ((c.X - seg.X1) * ax + (c.Y - seg.Y1) * ay) / al;
+        double uO = ((o.X - seg.X1) * ax + (o.Y - seg.Y1) * ay) / al;
+        // Progress along each car's own travel direction (0 at its own mouth).
+        double pC = c.Forward ? uC : al - uC;
+        double pO = o.Forward ? uO : al - uO;
+        if (pC > pO + 0.5) return 1;
+        if (pO > pC + 0.5) return -1;
+        return c.Uid < o.Uid ? 1 : -1;           // deterministic tie-break
+    }
+
+    /// <summary>R30 (docs §8) - does the chain of standing blockers in front
+    /// of `uid` bottom out? Base case: the car has NO standing blocker, so it
+    /// can drive away. Otherwise every blocker must resolve itself. A cycle
+    /// (uid already on the path) means nobody has a resolution - the total
+    /// lockdown the user forbids - so the answer is false. Depth-bounded by
+    /// the number of cars that can crowd one crossing; no memoisation, the
+    /// graph is tiny and this runs per substep.</summary>
+    private static bool Resolvable(int uid, Dictionary<int, List<int>> blockers,
+                                   List<int> visiting, int maxDepth)
+    {
+        if (visiting.Contains(uid)) return false;   // cycle: no base case
+        if (maxDepth <= 0) return false;            // give up: not resolvable
+        var bs = blockers.TryGetValue(uid, out var l) ? l : null;
+        if (bs is null || bs.Count == 0) return true;   // base case
+        visiting.Add(uid);
+        bool ok = true;
+        foreach (var b in bs)
+        {
+            if (!Resolvable(b, blockers, visiting, maxDepth - 1)) { ok = false; break; }
+        }
+        visiting.Remove(uid);
+        return ok;
+    }
+
+    /// <summary>R29 (docs §8) - walk the blocked-by chain from `uid` and
+    /// return the CYCLE it sits on, but only when every member of that cycle
+    /// is at standstill (a total lockdown). Null when there is no cycle or
+    /// when any member is still moving (it can get out of the way).</summary>
+    private static List<int>? FindLockdownCycle(int uid,
+                                                Dictionary<int, List<int>> blockers,
+                                                Dictionary<int, Car> carByUid)
+    {
+        var path = new List<int>();
+        var cur = uid;
+        while (true)
+        {
+            var at = path.IndexOf(cur);
+            if (at >= 0)
+            {
+                var cyc = new List<int>();
+                for (var i = at; i < path.Count; i++) cyc.Add(path[i]);
+                foreach (var m in cyc)
+                {
+                    var car = carByUid.GetValueOrDefault(m);
+                    if (car is null || car.Speed > 0.3) return null;   // can move
+                }
+                return cyc;
+            }
+            if (path.Count >= 16) return null;
+            path.Add(cur);
+            var bs = blockers.TryGetValue(cur, out var l) ? l : null;
+            if (bs is null || bs.Count == 0) return null;   // no cycle here
+            cur = bs[0];
+        }
+    }
+
+    /// <summary>R29 - cars the sim asked to be removed (an ERROR path, see
+    /// docs §8 R29 and tests/test_turning.py). Cleared on every
+    /// ComputeAvoidCaps call; SimEngine consumes it and despawns.</summary>
+    public static List<int> DespawnRequests = new();
+    /// <summary>R28 - total lockdowns the sim had to REPORT (an ERROR path:
+    /// prevention must keep this empty). Served in /state as 'lockdowns' +
+    /// 'lockdown_last'; the e2e suite fails when the count grows.</summary>
+    public static List<string> LockdownEvents = new();
+    private static Dictionary<string, int> _lockdownStood = new();
+    private static Dictionary<string, int> _lockdownRun = new();
+    // How long a standstill cycle must persist before the valve opens (substeps
+    // at 1/60 s). Prevention should keep this unreachable; a one-frame flicker
+    // must never delete a car.
+    private const int LockdownValveTicks = 360;   // 6.0 s of standstill
+    private const int LockdownReportTicks = 180;  // 3.0 s -> the R28 event
 
     sealed class Grid
     {
@@ -286,6 +525,7 @@ public static class CarCollisions
     {
         DebugLog.Clear();   // TEMPORARY: per-call log (tests read it after)
         var carList = new List<Car>(cars);
+        DespawnRequests.Clear();
         var grid = Grid.Build(carList);
         var caps = new Dictionary<int, double>();
         // WHY each car is capped: (cap, stable key, human text). The key
@@ -408,6 +648,25 @@ public static class CarCollisions
                 routeOff[c.Uid] = _roadOff[c.Uid];
             }
 
+        // --- the auction's inputs (docs/RIGHT_OF_WAY_NEGOTIATION.md §4) ---
+        // One pass over the fleet per substep, both maps O(cars): what each
+        // car has already paid in standing time (R16), and how many cars
+        // name it as their blocker (the blocked-by graph R30 walks, read
+        // from last substep's cap keys - a cost input, not a safety check,
+        // so a one-substep lag is honest).
+        var waitedS = new Dictionary<long, double>(carList.Count);
+        var blocking = new Dictionary<long, int>(carList.Count);
+        foreach (var cc in carList) waitedS[cc.Uid] = cc.StandstillS;
+        foreach (var cc in carList)
+        {
+            var k = cc.ActiveCapKey ?? "";
+            var hash = k.LastIndexOf('#');
+            if (hash < 0) continue;
+            var byUid = long.TryParse(k.Substring(hash + 1), out var bv) ? bv : 0L;
+            if (byUid > 0) blocking[byUid] = blocking.GetValueOrDefault(byUid, 0) + 1;
+        }
+        var liveKeys = new HashSet<int>();
+
         foreach (var c in carList)
         {
             double rad = Math.Radians(c.Heading);
@@ -415,6 +674,8 @@ public static class CarCollisions
             double rx = Math.Cos(rad), ry = -Math.Sin(rad);    // right
             double best = double.PositiveInfinity;
             int _v1By = -1; double _v1Along = 0, _v1Lat = 0, _v1Gap = 0;   // TEMPORARY
+            string _v1Rule = "R7";   // which rule owns the binding corridor cap
+            bool passC1 = PassCommitted(c, net);   // mid-pass: the named car is not my lead
             // This car's own range: fast cars see (and must react to) the
             // leader much further out so they can still stop in time.
             double lookAheadM = LookAheadForSpeed(c.Speed);
@@ -441,14 +702,70 @@ public static class CarCollisions
                 // per-pair scan affordable.
                 if (rayAlong > lookAheadM) continue;
                 double rayLat = dxc * rx + dyc * ry;
+                // A car I am COMMITTED to pass is not my lead - but only once
+                // I am actually BESIDE it. While my body still sits behind its
+                // own, the pass has not started and the following-distance rule
+                // must hold (measured: exempting the pair outright let a
+                // follower drive up to a stationary lead in CollisionTests,
+                // because R32 calls any stopped car ahead an obstruction).
+                // Slow down, move over, then go: that is what a driver does.
+                if (passC1 && o.Uid == c.PassUid)
+                {
+                    if (Math.Abs(rayLat) > (c.WidthM + o.WidthM) * 0.5)
+                        continue;   // beside: the pass has started, not my lead
+                    // Not beside yet: the pass is COMMITTED but has not
+                    // started, so the pair is still single-file - and a
+                    // standstill here can never start a pass (a stopped car
+                    // cannot become "beside" one it is stopped behind). The
+                    // missing half of the clearance relation is the cap side:
+                    // clearance = MinPass + v*PerMps inverted, so the speed
+                    // at which the pair CAN pass with the room available is
+                    // the speed I may creep to. Same constants as the demand
+                    // side - demand and feasibility can never contradict.
+                    var segP = (o.SegIdx >= 0 && o.SegIdx < net.Segments.Count)
+                        ? net.Segments[o.SegIdx] : null;
+                    if (segP != null && segP.Width > 0.0 && !segP.Oneway)
+                    {
+                        double axP = segP.X2 - segP.X1, ayP = segP.Y2 - segP.Y1;
+                        double lenP = Math.Sqrt(axP * axP + ayP * ayP);
+                        if (lenP > 1e-9)
+                        {
+                            double txP = axP / lenP, tyP = ayP / lenP;
+                            // The room a borrow can use is the carriageway's
+                            // KERB-TO-KERB travel, not what happens to be left
+                            // at the car's current lateral position: a car that
+                            // already drifted toward the oncoming lane still has
+                            // the whole pass available to it, it just has to
+                            // come off the kerb it is hugging (measured: the
+                            // primary of park_block_priority held at 0 km/h at
+                            // x 99.14 with 0.4 m read as "room left", while the
+                            // passing runs squeeze past at x 101.0).
+                            double roomP = segP.Width - c.WidthM;
+                            if (roomP > MinPassClearanceM + 0.01)
+                            {
+                                double vPass = (roomP - MinPassClearanceM) / SideClearPerMpsM;
+                                if (vPass < 1.0) vPass = 1.0;   // a creep, never a hold
+                                if (vPass < best)
+                                {
+                                    best = vPass;
+                                    _v1Rule = "R32 creep";
+                                    c.ActiveCapKey = "r32#passive";
+                                }
+                            }
+                        }
+                    }
+                }
                 // Cheap path first: on a straight road the heading ray IS the
                 // lane line, so the band test settles without walking the
-                // network. Only a pair the ray puts to the side (a curved
-                // arm, or a leader past the end of a nav line) gets the
-                // road-true measurement - that scan is O(walk samples) per
-                // PAIR and was the whole cost of the 0.09x-realtime sim.
+                // network. The band is the pair's BODY SUM, not the sedan
+                // rule - a 3 m truck beside a 3 m truck needs 3 m each side
+                // of my axis, and the old 1.8 m ray band dropped that pair
+                // before the real test ever ran (measured: a mixer braked
+                // panic-late into the rear of a stopped tractor 2.9 m to its
+                // side, which the corridor never saw).
                 double along, lat;
-                if (Math.Abs(rayLat) <= CorridorHalfWidthM && rayAlong <= lookAheadM)
+                double latBandM = (c.WidthM + o.WidthM) * 0.5;
+                if (Math.Abs(rayLat) <= latBandM && rayAlong <= lookAheadM)
                 {
                     along = rayAlong;
                     lat = rayLat;
@@ -461,13 +778,8 @@ public static class CarCollisions
                 }
                 else { continue; }
                 if (along < 0 || along > lookAheadM) continue;
-                if (Math.Abs(lat) > CorridorHalfWidthM)
-                {
-                    if (o.Speed < 6.0 && c.Speed >= 10.0 &&            // TEMPORARY
-                        along <= 40.0)
-                        Console.WriteLine($"DBGV1X t={simTime:F2} uid{c.Uid} o{o.Uid}({o.Speed:F1}) along={along:F1} lat={lat:F2}");
+                if (Math.Abs(lat) > latBandM)
                     continue;
-                }
 
                 // Oblique/crossing pair (heading differs a lot): the centre-in-
                 // corridor test is too coarse for them - a car stopped at its
@@ -492,7 +804,65 @@ public static class CarCollisions
                 // the old single CAR_LENGTH_M let mixed-length pairs close to
                 // physical overlap before "touching" triggered).
                 double gapM = along - (c.LengthM + o.LengthM) * 0.5;
-                if (gapM <= 0.25) { best = 0.0; break; }       // touching -> stop
+
+                // --- R26/R27: the head-on pair on one carriageway ---------
+                // Ask "can they pass?" BEFORE "are they touching?": an
+                // anti-parallel pair that fits both bodies plus the clearance
+                // is not a corridor threat at all - both go, each hugging its
+                // own right kerb (StVO §4, pass each other on the left).
+                // Capping such a pair at 0 is what wedged a mixer and a
+                // tractor on one 7 m arm of fig8_xing_plain (2026-10-19).
+                // When the stretch CANNOT fit both, it is single-file for
+                // that pair and the claim decides: whoever entered further
+                // (PassagePriority) holds the passage and is not capped by
+                // this pair; the other waits with the R26 reason (R19 retreat
+                // would be the next step once it is already inside).
+                var hoSeg = HeadOnSameRoad(c, o, net);
+                if (hoSeg is not null)
+                {
+                    if (hoSeg.Width >= c.WidthM + o.WidthM + MinPassClearanceM)
+                        continue;   // they can pass side by side
+                    // The stretch is a RESOURCE, the pair are its candidates,
+                    // and the award decides - not this pair's opinion of
+                    // which of two cars entered first. Grouping matters:
+                    // three cars on one pinch would otherwise argue as three
+                    // pairwise claims that can each be right and jointly
+                    // impossible (docs §3).
+                    double axH = hoSeg.X2 - hoSeg.X1, ayH = hoSeg.Y2 - hoSeg.Y1;
+                    double alH = Math.Max(Math.Hypot(axH, ayH), 1e-9);
+                    double uCH = ((c.X - hoSeg.X1) * axH + (c.Y - hoSeg.Y1) * ayH) / alH;
+                    double uOH = ((o.X - hoSeg.X1) * axH + (o.Y - hoSeg.Y1) * ayH) / alH;
+                    var resH = new Negotiation.Res(c.SegIdx,
+                                                   Math.Min(uCH, uOH) - 6.0,
+                                                   Math.Max(uCH, uOH) + 6.0);
+                    liveKeys.Add(resH.Key);
+                    var candsH = new List<Car> { c, o };
+                    if (Negotiation.Holds(resH.Key, c.Uid, candsH, waitedS,
+                                          blocking, (resH.B - resH.A) / 2,
+                                          Math.Max(c.Speed, 2.0)))
+                        continue;   // the auction says I hold the stretch
+                    best = 0.0; _v1By = o.Uid; _v1Along = along;
+                    _v1Lat = lat; _v1Gap = gapM;
+                    _v1Rule = "R26";
+                    // bitteschön (docs §6): the flash belongs to the car that
+                    // CONCEDES - the one WITHOUT the right - and is aimed at
+                    // the car whose passage it grants. Not the winner's.
+                    c.CourtesyForUid = o.Uid;
+                    c.CourtesyKind = "passage";
+                    break;
+                }
+
+                if (gapM <= 0.25)
+                {
+                    // Touching -> stop. Name the blocker BEFORE breaking:
+                    // leaving _v1By at its -1 sentinel logged every standstill
+                    // as "[R7] car -1 ahead (gap 0.0 m)", which made a 35 s
+                    // hold look unexplainable (R20: a logged rule must name
+                    // its trigger).
+                    best = 0.0; _v1By = o.Uid; _v1Along = along;
+                    _v1Lat = lat; _v1Gap = gapM;
+                    break;
+                }
 
                 // Lead speed projected onto my axis (head-on car -> 0).
                 double orad = Math.Radians(o.Heading);
@@ -534,11 +904,281 @@ public static class CarCollisions
 
             if (best < double.PositiveInfinity)
             {
-                OfferCap(c.Uid, best, $"avoid#{_v1By}",
-                         $"[R7] car {_v1By} ahead (gap {_v1Gap:F1} m)");
+                OfferCap(c.Uid, best,
+                    _v1Rule == "R26" ? $"passage#{_v1By}" : $"avoid#{_v1By}",
+                    _v1Rule == "R26"
+                        ? $"[R26] single-file passage: car {_v1By} holds it - waiting" +
+                          $" (stretch {c.SegIdx}, my room {c.WidthM:F2} m)"
+                        : $"[R7] car {_v1By} ahead (gap {_v1Gap:F1} m)");
                 DebugLog.Add($"v1 uid{c.Uid}={best:F2} along={_v1Along:F1} lat={_v1Lat:F2} by {_v1By}");   // TEMPORARY
             }
         }
+
+        // --- R8 (partial): yield right against a frontal conflict ---------
+        // User rule: two cars on a head-on line do not solve it by braking
+        // alone - each pulls right as far as the road allows, never leaving
+        // it. Only a pair that would actually touch laterally gets a shift,
+        // and only by the room its own kerb side has left, so on a 7 m arm
+        // the two keep their halves and pass. The nav clamps the request to
+        // the kerb line of the narrowest segment on the route again, so the
+        // road can never be left from either side.
+        const double FrontalClearM = 0.4;      // body clearance asked for
+        const double YieldDecayMps = 0.005;    // m per substep back to the line
+        foreach (var c in carList)
+        {
+            double wantM = 0.0;
+            var segC = net is null ? null : net.Segments[c.SegIdx];
+            double radC = Math.Radians(c.Heading);
+            double fxC = Math.Sin(radC), fyC = Math.Cos(radC);
+            double rxC = Math.Cos(radC), ryC = -Math.Sin(radC);
+            foreach (var o in grid.Near(c.X, c.Y, (int)Math.Ceiling(60.0 / CellSizeM) + 1))
+            {
+                if (o.Uid == c.Uid) continue;
+                // hdiff ~180 deg = head-on (the same convention v1 uses).
+                double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
+                if (hdiff < 150.0) continue;
+                double dxc = o.X - c.X, dyc = o.Y - c.Y;
+                double along = dxc * fxC + dyc * fyC;
+                if (along < 0.0 || along > 60.0) continue;   // only a real threat ahead
+                double lat = dxc * rxC + dyc * ryC;
+                // A right shift only helps against a threat on my LEFT (or
+                // dead ahead): pulling right away from a body that already
+                // sits on my right would CLOSE the gap - that case is left
+                // to the speed rules (R2/RBL), never to the wheel.
+                if (lat > 0.0) continue;
+                double touchM = (c.WidthM + o.WidthM) * 0.5;
+                if (Math.Abs(lat) >= touchM + FrontalClearM) continue;   // already clear
+                wantM = Math.Max(wantM, touchM + FrontalClearM - Math.Abs(lat));
+            }
+            if (wantM <= 0.0)
+            {
+                // No threat: unwind slowly, not a snap back onto the line.
+                c.YieldRightM = Math.Max(0.0, c.YieldRightM - YieldDecayMps);
+                continue;
+            }
+            if (segC is null) continue;
+            // Room to the RIGHT of this car inside its own road.
+            double ax = segC.X2 - segC.X1, ay = segC.Y2 - segC.Y1;
+            double al = Math.Max(Math.Hypot(ax, ay), 1e-9);
+            double sgn = c.Forward ? 1.0 : -1.0;
+            double tx = ax / al * sgn, ty = ay / al * sgn;
+            double offM = (c.X - segC.X1) * ty + (c.Y - segC.Y1) * -tx;
+            double roomM = segC.Width / 2.0 - c.WidthM / 2.0 - offM;
+            c.YieldRightM = Math.Min(wantM, Math.Max(0.0, roomM));
+        }
+
+        // --- R32: pass an obstruction in my lane (docs §8) ---------------
+        // A car STOPPED (parked) or much slower inside my own lane blocks the
+        // lane, and on a two-lane road the only way past is the OTHER lane.
+        // The rule in the driver's own words: never enter the shared lane
+        // unless it is clear for the whole pass, and never take it against a
+        // car that is already coming through the pinch from the other side -
+        // the stretch around the obstruction is a single-file resource, so
+        // the claim (R26) decides who may enter and the other waits behind.
+        const double OvertakeScanM = 60.0;   // how far ahead a car looks
+        foreach (var c in carList)
+        {
+            if (net is null) continue;
+            var segC32 = net.Segments[c.SegIdx];
+            if (segC32.Oneway) continue;      // no oncoming lane to borrow
+            double radC32 = Math.Radians(c.Heading);
+            double fxC32 = Math.Sin(radC32), fyC32 = Math.Cos(radC32);
+            double rxC32 = Math.Cos(radC32), ryC32 = -Math.Sin(radC32);
+            double wantM = 0.0;
+            bool blocked = false;
+            int byUid32 = -1;
+            int passUid32 = -1; double passProg32 = -1.0; double passLen32 = 0.0;
+            double passX32 = 0.0, passY32 = 0.0;
+            foreach (var o in grid.Near(c.X, c.Y, (int)Math.Ceiling(OvertakeScanM / CellSizeM) + 1))
+            {
+                if (o.Uid == c.Uid) continue;
+                if (o.SegIdx != c.SegIdx &&
+                    !(c.SegIdx >= 0 && c.SegIdx < net.SegmentNeighbours.Count &&
+                      net.SegmentNeighbours[c.SegIdx].Contains(o.SegIdx)))
+                    continue;   // same carriageway (a pass may straddle a node)
+                double dxc = o.X - c.X, dyc = o.Y - c.Y;
+                double along = dxc * fxC32 + dyc * fyC32;
+                if (along <= 0.5 || along > OvertakeScanM)
+                    continue;
+                double lat = dxc * rxC32 + dyc * ryC32;
+                double touchM = (c.WidthM + o.WidthM) * 0.5;
+                if (Math.Abs(lat) > touchM + SideClearM(c.Speed))
+                    continue;
+                double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
+                bool sameDir = hdiff < 45.0;
+                if (!sameDir)
+                    continue;
+                // An obstruction: stopped, or crawling far below my speed.
+                if (o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0))
+                    continue;
+                // A car that is STOPPED but NOT parked is a queue lead, not an
+                // obstruction: it has a route and may pull away at any moment,
+                // so borrowing the other lane past it is not a safe commitment -
+                // v1's following rule owns that pair. (Measured: committing to
+                // it let a follower overtake a stationary lead in
+                // CollisionTests.StationaryLeadCar_FollowerBrakesAndStopsBehind.)
+                // Crawling traffic (Speed > 0.5, the line above) is still fair
+                // game - a tractor, a bus that cannot turn.
+                if (o.Speed <= 0.5 && o.BicycleNav?.Parked != true)
+                    continue;
+                // How far LEFT must I sit to clear it?
+                // How far LEFT must I sit to clear it? The margin is the speed
+                // curve, so the demand and the pass speed below speak the same
+                // relation - two constants set to the same value (demand 0.5,
+                // veto 0.5) can never both hold when the delivery is off by
+                // centimetres, which is what pinned the car at 0.46 m.
+                double needM = touchM + SideClearM(c.Speed) - Math.Abs(lat);
+                if (needM > wantM)
+                {
+                    wantM = needM; passUid32 = o.Uid; passProg32 = o.Progress;
+                    passLen32 = o.LengthM; passX32 = o.X; passY32 = o.Y;
+                }
+                // The pinch: the stretch from here to just beyond the
+                // obstruction. Anything already coming through it from the
+                // other side owns it - the claim decides (R26).
+                foreach (var o2 in grid.Near(c.X, c.Y, (int)Math.Ceiling(OvertakeScanM / CellSizeM) + 1))
+                {
+                    if (o2.Uid == c.Uid || o2.Uid == o.Uid) continue;
+                    if (o2.SegIdx != c.SegIdx) continue;
+                    double h2 = Math.Abs(((c.Heading - o2.Heading + 540.0) % 360.0) - 180.0);
+                    if (h2 < 150.0) continue;         // not oncoming
+                    double dx2 = o2.X - c.X, dy2 = o2.Y - c.Y;
+                    double along2 = dx2 * fxC32 + dy2 * fyC32;
+                    // In the pinch zone (between me and past the obstruction)?
+                    // The zone reaches as far as an inbound driver can no longer
+                    // avoid entering it: its own look-ahead (reaction + braking
+                    // distance, LookAheadForSpeed) - not a fixed 8 m, which let
+                    // a car commit to the pass while an oncoming car was already
+                    // committed to the same lane (measured: the primary and the
+                    // oncoming car of park_block_priority contacted head-on at
+                    // t=11.47 s, both inside the shared lane).
+                    if (along2 < -6.0 ||
+                        along2 > along + c.LengthM + LookAheadForSpeed(o2.Speed)) continue;
+                    double lat2 = dx2 * rxC32 + dy2 * ryC32;
+                    // Only a car that would actually use the lane I need.
+                    if (lat2 < -touchM - SideClearM(c.Speed)) continue;
+                    // The claim: a driver that has to borrow the shared lane
+                    // (that is what wantM means for me) never owns it against a
+                    // driver who can stay in their own. Whoever entered further
+                    // only decides between two drivers that BOTH need it (R26).
+                    if (o2.OvertakeShiftM <= 0.05)
+                    {
+                        blocked = true; byUid32 = o2.Uid;
+                        break;
+                    }
+                    // Same resource, same auction: the borrow window from
+                    // here to past the obstruction is a single-file stretch
+                    // that both I and the oncoming car want.
+                    double axP = segC32.X2 - segC32.X1, ayP = segC32.Y2 - segC32.Y1;
+                    double alP = Math.Max(Math.Hypot(axP, ayP), 1e-9);
+                    double uCP = ((c.X - segC32.X1) * axP + (c.Y - segC32.Y1) * ayP) / alP;
+                    double uOP = ((o2.X - segC32.X1) * axP + (o2.Y - segC32.Y1) * ayP) / alP;
+                    var resP = new Negotiation.Res(c.SegIdx,
+                                                   Math.Min(uCP, uOP) - 4.0,
+                                                   Math.Max(uCP, uOP) + 4.0);
+                    liveKeys.Add(resP.Key);
+                    var candsP = new List<Car> { c, o2 };
+                    if (Negotiation.Holds(resP.Key, c.Uid, candsP, waitedS,
+                                          blocking, (resP.B - resP.A) / 2,
+                                          Math.Max(c.Speed, 2.0)))
+                        continue;  // the auction says I hold the window
+                    blocked = true; byUid32 = o2.Uid;
+                    break;
+                }
+                if (blocked) break;
+            }
+            // --- the commitment (R32) ------------------------------------
+            // wantM exists only while the obstruction is still in my line; the
+            // PASS is not over at that moment, so the intent is held by an
+            // object that names WHICH car I am passing and stays alive while
+            // that one is ahead of me. Read by the corridor bound, by v1 and
+            // by R33 - one object, three consumers.
+            if (wantM > 0.0 && !blocked && passUid32 >= 0)
+            {
+                c.PassUid = passUid32;
+                c.PassSegIdx = c.SegIdx;
+                c.PassProgress = passProg32;
+                c.PassLengthM = passLen32;
+                c.PassX = passX32; c.PassY = passY32;
+                // A commitment never shrinks mid-pass: the demand is a floor,
+                // not a value that jitters as the geometry changes.
+                c.PassShiftM = Math.Max(c.PassShiftM, wantM);
+            }
+            else if (c.PassUid >= 0 && !PassPending(c, net))
+            {
+                c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
+                c.PassLengthM = 0.0;
+                c.PassShiftM = 0.0;
+            }
+            if (blocked)
+            {
+                // The shared lane belongs to the other car: wait behind the
+                // obstruction until it has come through (R26's claim).
+                c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
+                c.PassLengthM = 0.0;
+                c.PassShiftM = 0.0;
+                c.OvertakeShiftM = 0.0;
+                OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
+                         $"[R32] lane blocked by car {byUid32} ahead - " +
+                         "waiting behind the obstruction");
+                continue;
+            }
+            // Outside the window the car belongs to its own lane: the shift is
+            // RELEASED, not decayed. The nav re-solves the line when the pass
+            // phase flips, and a decay that has barely started would leave that
+            // solve reading the OLD shift - measured: the car parked itself on
+            // the centreline (offR +0.01) for 90 m after the pass and the guard
+            // called it wrong-side, because the line it followed was still
+            // built from a 2.2 m borrow that never got released.
+            if (!PassCommitted(c, net))
+            {
+                c.OvertakeShiftM = 0.0;
+                continue;
+            }
+            if (wantM <= 0.0) wantM = c.PassShiftM;   // held inside the window
+            // Room to the LEFT inside the same carriageway: the shift may
+            // never put the car off the road (the nav clamps again against
+            // the narrowest segment on the route, this is the local bound).
+            double ax32 = segC32.X2 - segC32.X1, ay32 = segC32.Y2 - segC32.Y1;
+            double al32 = Math.Max(Math.Hypot(ax32, ay32), 1e-9);
+            double sgn32 = c.Forward ? 1.0 : -1.0;
+            double tx32 = ax32 / al32 * sgn32, ty32 = ay32 / al32 * sgn32;
+            double off32 = (c.X - segC32.X1) * ty32 + (c.Y - segC32.Y1) * -tx32;
+            double roomLeftM = off32 + segC32.Width / 2.0 - c.WidthM / 2.0;
+            // The bound is the carriageway's KERB-TO-KERB travel, not the room
+            // that happens to be left at the car's CURRENT lateral position.
+            // Measured on park_block_priority: a primary that had already
+            // drifted 0.8 m left of the centreline read roomLeftM as 0.5 m,
+            // so the 2.7 m the pass needs never got asked for, R32 stayed
+            // silent and v1's following rule pinned the car at 0 km/h behind
+            // a car parked ON the centreline (8.8 m of body on a 7 m road -
+            // the pass only fits by hugging the far kerb, which is exactly
+            // what the passing runs do at x 101.0). The nav still clamps the
+            // line against the road edge, so the shift cannot leave the road.
+            double kerbRoomM = segC32.Width - c.WidthM;
+            wantM = Math.Min(wantM, Math.Max(0.0, Math.Max(roomLeftM, kerbRoomM)));
+            if (blocked)
+            {
+                // The shared lane belongs to the other car: wait behind the
+                // obstruction until it has come through (R26's claim).
+                c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
+                c.PassShiftM = 0.0;
+                c.OvertakeShiftM = 0.0;
+                OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
+                         $"[R32] lane blocked by car {byUid32} ahead - " +
+                         "waiting behind the obstruction");
+                continue;
+            }
+            double prevShift32 = c.OvertakeShiftM;
+            c.OvertakeShiftM = wantM;
+            if (wantM > prevShift32 + 0.05)
+                c.RecordDecision(simTime,
+                    $"[R32] obstruction ahead - borrowing the free lane " +
+                    $"({wantM:F2} m left)");
+        }
+
+        // An award survives only as long as a contest is about the stretch.
+        Negotiation.Keep(liveKeys);
 
         // --- v2: oblique/crossing pair prediction + right-before-left ---
         // A car not yet inside anyone's forward corridor (e.g. approaching a
@@ -770,7 +1410,19 @@ public static class CarCollisions
                                      Math.Max(yieldCar.Speed, 3.0);
                     if (otherCar.Speed >= OtherYieldingMinSpeedMps &&
                         stageS < tClearS + SignGapMarginS)
-                        cap = 0.0;
+                    {
+                        // The user rule: holding does NOT mean braking to rest
+                        // wherever the rule happened to fire - the car creeps
+                        // up to the crossing MOUTH and stops there (there is
+                        // no painted line at an unsigned crossing, but the
+                        // mouth is where the box begins). The cap is the
+                        // speed that still brings it to rest at the mouth,
+                        // measured with reaction + comfort, so a car far out
+                        // keeps driving and only rests AT the line.
+                        double roomToMouthM = dMeet - SignCrossClearM;
+                        cap = roomToMouthM <= 0.0 ? 0.0
+                            : ApproachCapMps(0.0, roomToMouthM);
+                    }
                 }
 
                 int otherUid = yieldUid == c.Uid ? o.Uid : c.Uid;
@@ -780,6 +1432,28 @@ public static class CarCollisions
                 string v2Text = anyStationary
                     ? $"[R2] car {otherUid} stopped in my path"
                     : $"[R2] predicted crossing with car {otherUid} in {stageS:F1} s";
+                // --- OpeningGap: the queue wake-up fix ----------------------
+                // A PAIR-UP that is opening the gap (the other car drives
+                // away along my axis faster than I go) has no unavoidable
+                // conflict. v2 still reports one because every car is swept
+                // at max(current, plan) speed: a follower sitting at 0 with
+                // the throttle held is predicted as a projectile that reaches
+                // the leader within 1 s, and GradedCap's stageS<=1 s cliff
+                // caps it at ZERO while that leader drives away at 22-48 km/h
+                // with a 10-20 m gap. Measured on fig8_xing (2026-10-19):
+                // cars 43/20/16 held at 0 in seconds-long blocks - the queue
+                // woke up seconds late and the delay cascaded down the arm.
+                // v1's route-true corridor owns exactly this situation (it
+                // measures the real gap and the leader's real speed), so for
+                // a parallel pair that is opening the gap v2 must not add a
+                // cap. Oblique/crossing pairs keep it: there the conservative
+                // sweep is what the right-before-left ENTRY decision needs
+                // (a slow car that may enter must read as if it enters).
+                // Narrow trigger: only a car ALREADY AT REST is handed over,
+                // because that is the wake-up case; a rolling car keeps v2's
+                // cap (widening it to rolling pairs gridlocked the signed
+                // crossing - measured 2026-10-19, crash at t=41.6 s).
+                var oCar2 = yieldUid == c.Uid ? o : c;
                 // Same key family as v1 ("avoid#uid"): both are "car X is in
                 // my path" - the cap values oscillate between the two models
                 // tick-to-tick, and a per-model key would log a new event on
@@ -789,8 +1463,13 @@ public static class CarCollisions
                 // observes first. So the immediate v2 cap is withheld for it and
                 // the staged logic below decides its brake instead. Non-priority
                 // cars keep the immediate cap (right-before-left / stopped body).
-                if (!IsPriorityCar(yieldCar))
-                    OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text);
+                bool wakeCase = yieldCar.Speed < 0.5 &&
+                    IsParallelPair(yieldCar, oCar2) && OpeningGap(yieldCar, oCar2);
+                if (!wakeCase)
+                {
+                    if (!IsPriorityCar(yieldCar))
+                        OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text);
+                }
                 DebugLog.Add($"v2 uid{yieldUid}={cap:F2} pair({c.Uid},{o.Uid}) s={stageS:F1}");   // TEMPORARY
 
                 // Record the most-immediate crossing conflict (smallest TTC) for
@@ -929,11 +1608,15 @@ public static class CarCollisions
         // driving towards the node sits in the opposite lane of my exit arm,
         // ~3.5 m to my left, and is not on my exit - counting it held the
         // two diagonals against each other and froze an empty box.
-        const double R14ExitScanM = 15.0;    // box half-width + a car + a gap
-        const double R14ExitLateralM = 2.5;  // my exit lane's half-width band
+        const double R14ExitScanM = 25.0;    // box + a car + its braking distance
         // uid -> the car blocking my exit (the blocker is also the cap's
         // reason, so the commit block below can name it).
         var r14Blocked = new Dictionary<int, int>();
+        // R30 needs the WHOLE chain, not the first blocker: every standing
+        // body in my box/exit, plus where my stop line is.
+        var r14Blockers = new Dictionary<int, List<int>>();
+        var r14Room = new Dictionary<int, double>();
+        var r14Node = new Dictionary<int, string>();
         if (net is not null)
             foreach (var c in carList)
             {
@@ -950,15 +1633,34 @@ public static class CarCollisions
                 // c.X/c.Y is the REAR axle - the nose sits REAR_AXLE_OFFSET_M
                 // + half a body ahead, so "before the box" is measured from
                 // the nose, same as the yield stop line.
-                double stopGapM = c.LengthM * 0.5 + Config.REAR_AXLE_OFFSET_M + YieldStopNoseGapM;
+                // The line a car must stop AT: the painted yield stop line
+                // where the approach is signed, otherwise the crossing MOUTH
+                // - nothing is drawn at an unsigned crossing, but the box
+                // edge is still the line that decides (user rule: creep up
+                // and stop THERE, not 40 m short).
+                bool yieldSigned14 = net.Signs.TryGetValue((c.SegIdx, aheadNode), out var sgn14)
+                                     && sgn14 == SignType.Yield;
+                double noseGapM = yieldSigned14 ? YieldStopNoseGapM
+                                                : Math.Max(1.0, net.Segments[c.SegIdx].Width * 0.5);
+                double stopGapM = c.LengthM * 0.5 + Config.REAR_AXLE_OFFSET_M + noseGapM;
                 double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y);
-                if (dToNodeM > SignActRangeM) continue;            // not approaching yet
-                if (dToNodeM <= stopGapM) continue;                // already in - R3 owns it
-                if (c.CrossingCommittedNode == aheadNode) continue; // committed - keep going
+                if (dToNodeM > SignActRangeM) continue;              // not approaching yet
+                if (dToNodeM <= stopGapM) continue;                  // entered - R3 owns it
+                if (c.CrossingCommittedNode == aheadNode) continue;  // committed: keep going
                 // Must actually drive AT the node, else this crossing is
                 // beside me and not ahead of me.
                 double odxM = nxy.X - c.X, odyM = nxy.Y - c.Y;
                 if (fx14 * odxM + fy14 * odyM < 0.5 * dToNodeM) continue;
+                // MY exit is the LANE that continues to the right of the
+                // through axis, not the axis itself: a car waiting in the
+                // OPPOSITE lane of the exit arm is not on my exit - it sits
+                // one lane width to the left and passes me with room to
+                // spare (measured: a pickup held at its stop line "exit
+                // blocked by car 29" while car 29 sat in the other lane).
+                double exitLaneOffM = Config.LaneBaseOffsetM(
+                    net.Segments[c.SegIdx].Width, net.Segments[c.SegIdx].Lanes);
+                var bs14 = new List<int>();
+                double r14RoomM = dToNodeM - stopGapM;
                 foreach (var o in carList)
                 {
                     if (o.Uid == c.Uid) continue;
@@ -968,18 +1670,161 @@ public static class CarCollisions
                     bool inBox = dOM <= SignCrossClearM;
                     double along = ox * fx14 + oy * fy14, lat = ox * rx14 + oy * ry14;
                     bool onExit = !inBox && along > 0.0 && along <= R14ExitScanM &&
-                                  Math.Abs(lat) <= R14ExitLateralM;
+                                  Math.Abs(lat - exitLaneOffM) <= (c.WidthM + o.WidthM) * 0.5;
                     if (!inBox && !onExit) continue;
-                    // A body that drives away is clearing the crossing - only
-                    // a standing/crawling one blocks it (same threshold the
-                    // stop caps use for "effectively stationary").
-                    if (o.Speed > StationaryCapMps) continue;
-                    r14Blocked[c.Uid] = o.Uid;
-                    OfferCap(c.Uid, 0.0, $"r14#{aheadNode}#{o.Uid}",
-                             $"[R14] exit blocked by car {o.Uid} - holding before the crossing");
-                    break;
+                    // A body that drives away is clearing the crossing. A body
+                    // that is STANDING, CRAWLING or BRAKING is not: it will
+                    // rest here, so it blocks my exit. The old test only saw
+                    // one already below StationaryCapMps, which let four cars
+                    // enter a crossing each behind a car that was still
+                    // braking - and the box then held a circular wait (measured:
+                    // the signed crossing wedged with four cars, each nose in
+                    // the next one's exit, nobody able to move).
+                    if (o.Speed > StationaryCapMps && !o.IsBraking) continue;
+                    bs14.Add(o.Uid);
+                }
+                if (bs14.Count == 0) continue;
+                r14Blocked[c.Uid] = bs14[0];
+                r14Blockers[c.Uid] = bs14;
+                r14Room[c.Uid] = r14RoomM;
+                r14Node[c.Uid] = aheadNode;
+            }
+
+        // --- R30: the crossing must stay RESOLVABLE (recursive) -----------
+        // docs/DRIVING_MANEUVERS.md §8 R30 (the user rule of 2026-10-19):
+        // creeping onto a crossing is allowed EXACTLY when the chain of
+        // standing blockers ahead of me has a base case - a car that can
+        // drive away. "If that car doesn't have a resolution for leaving the
+        // crossing yet, then it must make sure that the car that this car is
+        // blocked by has a resolution and so on and so on ... down all the
+        // way" = recurse down the blocked-by chain. A cycle in that chain
+        // means nobody has a resolution, which is the total lockdown the user
+        // forbids ("it should never ever happen that the cars stand there
+        // forever"). R14 above is the depth-1 snapshot of the same rule;
+        // R30 is its recursive form: it still refuses the swastika (four
+        // cars, each nose in the next one's exit, no base case anywhere) but
+        // it lets a car follow a queue member that WILL move off, which is
+        // what the depth-1 test got wrong.
+        foreach (var e14 in r14Blocked)
+        {
+            var visiting30 = new List<int>();
+            if (Resolvable(e14.Key, r14Blockers, visiting30, 16))
+                continue;   // the chain bottoms out - creeping in is legal
+            double roomM = r14Room[e14.Key];
+            OfferCap(e14.Key, roomM <= 0.0 ? 0.0 : ApproachCapMps(0.0, roomM),
+                     $"r14#{r14Node[e14.Key]}#{e14.Value}",
+                     $"[R30] crossing would not stay resolvable (chain vs car {e14.Value}) - holding before the crossing");
+        }
+
+        // --- R29: the desperation valve (must never fire) -----------------
+        // A cycle in the blocked-by chain whose members are ALL at standstill
+        // is a total lockdown. Prevention (R30) should make it unreachable -
+        // if it is not, the sim must not stand there forever, so one car is
+        // taken out of the equation and the event is logged as an ERROR (the
+        // e2e suite fails on it, see tests/test_turning.py). The victim is
+        // the cycle member that entered LAST (highest uid: the one whose
+        // entry created the cycle), and the valve only opens after the
+        // lockdown has persisted LOCKDOWN_VALVE_S - a single-frame flicker
+        // must not delete a car.
+        foreach (var e29 in r14Blocked)
+        {
+            var cycle = FindLockdownCycle(e29.Key, r14Blockers, carByUid);
+            if (cycle is null) continue;
+            var key = string.Join(",", cycle);
+            _lockdownRun[key] = _lockdownRun.GetValueOrDefault(key, 0) + 1;
+            if (_lockdownRun[key] < LockdownValveTicks) continue;
+            var victim = cycle.Max();
+            if (!DespawnRequests.Contains(victim))
+            {
+                DespawnRequests.Add(victim);
+                _lockdownRun.Remove(key);
+                var msg = $"[R29] LOCKDOWN broken: car {victim} removed - " +
+                          $"cycle {key} stood {LockdownValveTicks / 60.0:F1} s";
+                DebugLog.Add(msg);
+                Console.WriteLine($"!! R29 DESPERATION VALVE (an error, must never " +
+                                  $"happen): {msg}");
+            }
+        }
+
+        // --- R28: the liveness invariant, MEASURED (geometric) ------------
+        // docs/DRIVING_MANEUVERS.md §8 R28: the sim must NEVER reach a total
+        // lockdown. The graph above only sees cars BEFORE the box (R14/R30
+        // are ENTRY decisions - a committed car is not in it), so it missed
+        // the situation the user showed on 2026-10-19: three cars wedged
+        // INSIDE the crossing, each capped at 0 by a predicted conflict, and
+        // nobody able to move. The measurement is therefore GEOMETRIC:
+        // >= 2 cars with their centre in the box and every car near the node
+        // standing for LOCKDOWN_REPORT_S of sim time IS a lockdown. The event
+        // names every member with its pose, its active cap key and its last
+        // decision, so the cause is read from data, not guessed.
+        var lockCars = new Dictionary<string, List<Car>>();
+        if (net is not null)
+            foreach (var c in carList)
+            {
+                var seg = net.Segments[c.SegIdx];
+                string aheadNode28 = c.Forward ? seg.EndNode : seg.StartNode;
+                if (net.NodeDegree.GetValueOrDefault(aheadNode28, 0) < 4) continue;
+                if (!net.Nodes.TryGetValue(aheadNode28, out var n28)) continue;
+                if (Math.Hypot(c.X - n28.X, c.Y - n28.Y) > SignCrossClearM + 14.0)
+                    continue;
+                if (!lockCars.TryGetValue(aheadNode28, out var ml))
+                    lockCars[aheadNode28] = ml = new List<Car>();
+                ml.Add(c);
+            }
+        foreach (var kv28 in lockCars)
+        {
+            var members = kv28.Value;
+            if (!net.Nodes.TryGetValue(kv28.Key, out var nxy28)) continue;
+            int inside28 = 0;
+            bool allStanding = members.Count >= 2;
+            foreach (var c in members)
+            {
+                if (Math.Hypot(c.X - nxy28.X, c.Y - nxy28.Y) <= SignCrossClearM) inside28++;
+                if (c.Speed > 0.3) allStanding = false;
+            }
+            if (!allStanding || inside28 < 2) { _lockdownStood.Remove(kv28.Key); continue; }
+            var stood28 = _lockdownStood.GetValueOrDefault(kv28.Key, 0) + 1;
+            _lockdownStood[kv28.Key] = stood28;
+            if (stood28 == LockdownReportTicks)
+            {
+                var parts = new List<string>();
+                foreach (var c in members)
+                {
+                    var dec = c.DecisionsSnapshot();
+                    var why = dec.Count > 0 ? dec[dec.Count - 1].Msg : "(no decision)";
+                    parts.Add($"car {c.Uid} seg {c.SegIdx} v {c.Speed * 3.6:F1} km/h " +
+                              $"at ({c.X:F2},{c.Y:F2}) head {c.Heading:F0} " +
+                              $"cap {c.ActiveCapKey ?? "-"} why {why}");
+                }
+                var msg28 = $"[R28] LOCKDOWN at node {kv28.Key}: {members.Count} cars " +
+                            $"({inside28} in the box) stood {LockdownReportTicks / 60.0:F1} s - " +
+                            string.Join(" | ", parts);
+                LockdownEvents.Add(msg28);
+                DebugLog.Add(msg28);
+                Console.WriteLine($"!! R28 LOCKDOWN (an error - prevention failed): {msg28}");
+            }
+            if (stood28 >= LockdownValveTicks)
+            {
+                // R29 on the GEOMETRIC detection as well: the graph valve
+                // above cannot see committed cars, so a wedged box would
+                // otherwise stand there forever. The victim is the car with
+                // the highest uid INSIDE the box (the last one to arrive).
+                Car? victim28 = null;
+                foreach (var m in members)
+                    if (Math.Hypot(m.X - nxy28.X, m.Y - nxy28.Y) <= SignCrossClearM &&
+                        (victim28 is null || m.Uid > victim28.Uid))
+                        victim28 = m;
+                if (victim28 is not null && !DespawnRequests.Contains(victim28.Uid))
+                {
+                    DespawnRequests.Add(victim28.Uid);
+                    _lockdownStood.Remove(kv28.Key);
+                    Console.WriteLine($"!! R29 DESPERATION VALVE (an error, must never " +
+                                      $"happen): car {victim28.Uid} removed at node " +
+                                      $"{kv28.Key} after {LockdownValveTicks / 60.0:F1} s " +
+                                      "of standstill");
                 }
             }
+        }
 
         // --- v3: road signs -------------------------------------------------
         // A car approaching a node on a YIELD-signed approach must be able to
@@ -1006,60 +1851,6 @@ public static class CarCollisions
                 double dToNodeM = Math.Hypot(c.X - nxy.X, c.Y - nxy.Y);
                 if (dToNodeM > SignActRangeM)
                     continue;   // not approaching yet
-                // COMMITTED ONCE THE NOSE CROSSES THE STOP LINE: a car with
-                // dToNodeM <= stopGapM has entered the crossing, and the
-                // sign must not hold it - only v1/v2 (a real predicted
-                // overlap) may brake it, and they release as soon as the
-                // conflict clears, so a committed car always keeps going.
-                // (User rule 2026-09-09: once you START the crossing you
-                // continue; a car that is already blocking the other cars'
-                // way must keep going.)
-                //
-                // The old rule HELD a blocked car at 0 between the stop line
-                // and a rear-bumper clear point. That was exactly the
-                // deadlock mode: the held car sat with its nose in the box,
-                // the priority car braked for the stopped body, and the body
-                // waited for the priority car - circular wait (measured on
-                // fig8_cross: uid 42 held at 3.5 m from C by the sign while
-                // uid 26 braked for it; whole loop frozen from t~30 s).
-                if (dToNodeM <= stopGapM)
-                {
-                    // (b') R14: my exit lane or the box holds a body that is
-                    // not clearing - the legal move is to hold before the
-                    // line, so the crossing never gets committed into.
-                    if (c.CrossingCommittedNode != aheadNode &&
-                        r14Blocked.TryGetValue(c.Uid, out var r14By))
-                        continue;   // the R14 cap above already holds the car
-                    // (b) Do not commit into a BLOCKED box: a stationary
-                    // body in my path means the crossing is occupied - the
-                    // legal move is to hold at the stop line. The old
-                    // unconditional commit put cars in the box behind the
-                    // blocker, where the only way out was a creep into
-                    // contact (fig8_xing: car 29 committed at t=4.3 into a
-                    // box car 5 had occupied since t~2.5, then crept for
-                    // 15 s, 2026-09-10). Once committed the user rule still
-                    // applies: keep going.
-                    if (c.CrossingCommittedNode != aheadNode &&
-                        immediateConflict.TryGetValue(c.Uid, out var blk) &&
-                        blk.OtherStationary)
-                    {
-                        // Full stop at the line until the blocker moves or
-                        // clears. (A non-priority car already carries the v2
-                        // "stopped in my path" cap; a priority car's staged
-                        // response has no immediate cap, so hold it here.)
-                        OfferCap(c.Uid, 0.0, $"avoid#{blk.Other}",
-                                 $"[R3] holding before line - box blocked by car {blk.Other}");
-                        continue;
-                    }
-                    if (c.CrossingCommittedNode != aheadNode)
-                    {
-                        c.CrossingCommittedNode = aheadNode;
-                        c.RecordDecision(simTime,
-                                         "[R3] entered crossing - committed, continuing");
-                    }
-                    continue;   // entered the crossing - committed, free to go
-                }
-
                 // GAP ACCEPTANCE (time-based, like a human driver): the car may
                 // enter only if it can CLEAR the crossing before any APPROACHING
                 // car on the other diagonal arrives. A pure proximity snapshot
@@ -1120,28 +1911,111 @@ public static class CarCollisions
                     double orad2 = Math.Radians(o.Heading);
                     if (Math.Sin(orad2) * odxM + Math.Cos(orad2) * odyM < 0.3 * dOM)
                         continue;   // exiting / crossing sideways - not a threat
+                    // R27: an arm whose car is standing AND is itself held by
+                    // a reason that does not name me cannot arrive while I
+                    // cross - it is no imminent threat, so it must not keep
+                    // me waiting (the cycle N->W->S->E->N otherwise
+                    // deadlocks). Applied to the APPROACHING (eta) threat
+                    // ONLY: a car already at/in the crossing above is a real
+                    // blocker regardless of why it is held - skipping it
+                    // there let a yield car enter an occupied box (crash at
+                    // t=41 s on fig8_xing, 2026-10-19).
+                    if (NoImminentThreat(o, c))
+                        continue;
                     double etaS = dOM / Math.Max(o.Speed, 3.0);
                     if (etaS < tClearS + SignGapMarginS)
                     { blocked = true; blockedBy = o.Uid; byFeasibility = true; break; }
                 }
-                if (!blocked) continue;
-
-                // HOLD THE LINE (full stop) while the gap is bad. The old
-                // "fastest speed that still stops at the line" cap let a
-                // SLOW car roll straight through: it could technically stop
-                // (2.5 m/s < 6.5 m/s cap) so the cap never bound, it crossed
-                // the line and committed into the path of the car it was
-                // supposed to yield to (T_015: car 34 at 8 km/h committed
-                // at t=4.35 while car 10 closed at 65 km/h, 0.7 s out). A
-                // driver at a yield sign holds the line when the gap is
-                // bad; the commit block releases the hold once the gap
-                // opens (or the box blocker moves - see (b) above).
-                OfferCap(c.Uid, 0.0, $"sign#{aheadNode}#{blockedBy}",
-                         byFeasibility
-                         ? $"[R4] cannot clear before car {blockedBy} arrives " +
-                           ($"({dToNodeM:F0} m out)")
-                         : $"[R5] yield sign: car {blockedBy} at the crossing " +
-                           ($"({dToNodeM:F0} m out)"));
+                // The user rule: crossing the stop line is only allowed when
+                // the car believes it can actually clear the crossing. A bad
+                // gap therefore does NOT mean stopping 40 m short (the old
+                // flat 0.0) and does NOT commit the car - it creeps to the
+                // line and rests THERE, and only a clear gap lets the nose
+                // cross it. A predicted real overlap is still the hard net
+                // below (R2), which brakes even a committed car.
+                if (blocked)
+                {
+                    // HOLD THE LINE (full stop) while the gap is bad. The old
+                    // "fastest speed that still stops at the line" cap let a
+                    // SLOW car roll straight through: it could technically stop
+                    // (2.5 m/s < 6.5 m/s cap) so the cap never bound, it crossed
+                    // the line and committed into the path of the car it was
+                    // supposed to yield to (T_015: car 34 at 8 km/h committed
+                    // at t=4.35 while car 10 closed at 65 km/h, 0.7 s out). A
+                    // driver at a yield sign holds the line when the gap is
+                    // bad; the commit block releases the hold once the gap
+                    // opens (or the box blocker moves - see (b) above).
+                    // The user rule: a car that may not enter does NOT brake to
+                    // rest dozens of metres before the crossing - it holds the
+                    // STOP LINE. The cap is the speed that still brings it to
+                    // rest with its nose at the line (reaction + comfort), so it
+                    // creeps up and stops AT the line; only at the line itself
+                    // does it rest. The old flat 0.0 parked cars at whatever
+                    // distance the rule happened to fire from (measured: "[R4]
+                    // cannot clear ... (31 m out)" - a whole car park short).
+                    double roomToLineM = dToNodeM - stopGapM;
+                    OfferCap(c.Uid, roomToLineM <= 0.0 ? 0.0 : ApproachCapMps(0.0, roomToLineM),
+                             $"sign#{aheadNode}#{blockedBy}",
+                             byFeasibility
+                             ? $"[R4] cannot clear before car {blockedBy} arrives " +
+                               ($"({dToNodeM:F0} m out)")
+                             : $"[R5] yield sign: car {blockedBy} at the crossing " +
+                               ($"({dToNodeM:F0} m out)"));
+                    continue;   // held at the line - NOT committed
+                }
+                // COMMITTED ONCE THE NOSE CROSSES THE STOP LINE: a car with
+                // dToNodeM <= stopGapM has entered the crossing, and the
+                // sign must not hold it - only v1/v2 (a real predicted
+                // overlap) may brake it, and they release as soon as the
+                // conflict clears, so a committed car always keeps going.
+                // (User rule 2026-09-09: once you START the crossing you
+                // continue; a car that is already blocking the other cars'
+                // way must keep going.)
+                //
+                // The old rule HELD a blocked car at 0 between the stop line
+                // and a rear-bumper clear point. That was exactly the
+                // deadlock mode: the held car sat with its nose in the box,
+                // the priority car braked for the stopped body, and the body
+                // waited for the priority car - circular wait (measured on
+                // fig8_cross: uid 42 held at 3.5 m from C by the sign while
+                // uid 26 braked for it; whole loop frozen from t~30 s).
+                if (dToNodeM <= stopGapM)
+                {
+                    // (b') R14: my exit lane or the box holds a body that is
+                    // not clearing - the legal move is to hold before the
+                    // line, so the crossing never gets committed into.
+                    if (c.CrossingCommittedNode != aheadNode &&
+                        r14Blocked.TryGetValue(c.Uid, out var r14By))
+                        continue;   // the R14 cap above already holds the car
+                    // (b) Do not commit into a BLOCKED box: a stationary
+                    // body in my path means the crossing is occupied - the
+                    // legal move is to hold at the stop line. The old
+                    // unconditional commit put cars in the box behind the
+                    // blocker, where the only way out was a creep into
+                    // contact (fig8_xing: car 29 committed at t=4.3 into a
+                    // box car 5 had occupied since t~2.5, then crept for
+                    // 15 s, 2026-09-10). Once committed the user rule still
+                    // applies: keep going.
+                    if (c.CrossingCommittedNode != aheadNode &&
+                        immediateConflict.TryGetValue(c.Uid, out var blk) &&
+                        blk.OtherStationary)
+                    {
+                        // Full stop at the line until the blocker moves or
+                        // clears. (A non-priority car already carries the v2
+                        // "stopped in my path" cap; a priority car's staged
+                        // response has no immediate cap, so hold it here.)
+                        OfferCap(c.Uid, 0.0, $"avoid#{blk.Other}",
+                                 $"[R3] holding before line - box blocked by car {blk.Other}");
+                        continue;
+                    }
+                    if (c.CrossingCommittedNode != aheadNode)
+                    {
+                        c.CrossingCommittedNode = aheadNode;
+                        c.RecordDecision(simTime,
+                                         "[R3] entered crossing - committed, continuing");
+                    }
+                    continue;   // entered the crossing - committed, free to go
+                }
             }
 
         // --- Cap decision persistence + decision log -------------------------
@@ -1171,6 +2045,13 @@ public static class CarCollisions
                     _capCandidate.Remove(c.Uid);
                     c.RecordDecision(simTime, "brake: " + r.Text);
                     c.ActiveCapKey = r.Key;
+                    // R26: the concession is VISIBLE to the other driver -
+                    // hazard lights are the real-world "I signal my intent"
+                    // (the driver enforces a 5 s minimum display, so a
+                    // negotiation cannot strobe).
+                    if (r.Key.StartsWith("passage#"))
+                        (c.Driver as BicycleDriver)?.SetHazard(true,
+                            "single-file passage - yielding the stretch");
                 }
                 else if (c.ActiveCapKey != r.Key)
                 {
@@ -1183,7 +2064,13 @@ public static class CarCollisions
                     {
                         _capCandidate.Remove(c.Uid);
                         c.RecordDecision(simTime, "brake: " + r.Text);
+                        if (c.ActiveCapKey.StartsWith("passage#") &&
+                            !r.Key.StartsWith("passage#"))
+                            (c.Driver as BicycleDriver)?.SetHazard(false);
                         c.ActiveCapKey = r.Key;
+                        if (r.Key.StartsWith("passage#"))
+                            (c.Driver as BicycleDriver)?.SetHazard(true,
+                                "single-file passage - yielding the stretch");
                     }
                 }
                 else
@@ -1201,6 +2088,8 @@ public static class CarCollisions
                     _releaseHold.Remove(c.Uid);
                     _lastCap.Remove(c.Uid);
                     _capCandidate.Remove(c.Uid);
+                    if (c.ActiveCapKey.StartsWith("passage#"))
+                        (c.Driver as BicycleDriver)?.SetHazard(false);
                     c.RecordDecision(simTime, "gap clear - resuming");
                     c.ActiveCapKey = null;
                 }
@@ -1226,9 +2115,10 @@ public static class CarCollisions
     /// not predict past its route), else linear extrapolation from its
     /// current heading. Prediction speed is max(current, planned target) -
     /// conservative, so a car that is slow now but about to cruise doesn't
-    /// read as harmless. Returns the predicted pose plus the arc-length the
-    /// car will have covered by then (used as its own braking distance if it
-    /// turns out to be the one that must yield).</summary>
+    /// read as harmless (the right-before-left ENTRY decision needs that;
+    /// see the constant block above). Returns the predicted pose plus the
+    /// arc-length the car will have covered by then (used as its own
+    /// braking distance if it turns out to be the one that must yield).</summary>
     static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t)
     {
         double v = Math.Max(MinSweepSpeedMps,
@@ -1508,7 +2398,10 @@ public static class CarCollisions
         double dx = other.X - me.X, dy = other.Y - me.Y;
         if (dx * fx + dy * fy >= 0) return false;          // not behind
         double lat = Math.Abs(dx * rx + dy * ry);
-        return lat <= CorridorHalfWidthM;
+        // Body sum, not the sedan rule: a 3 m truck behind a 3 m truck is
+        // "directly behind" at a 2.9 m lateral offset even though a sedan
+        // corridor (1.8 m) would call it a pass.
+        return lat <= (me.WidthM + other.WidthM) * 0.5;
     }
 
     /// <summary>Right-before-left (Rechts-vor-Links): true if `other` is
@@ -1536,6 +2429,29 @@ public static class CarCollisions
     /// 1 s TTC -> stop, 3 s -> the fastest speed CAR_BRAKING can still stop
     /// within `dM` (minus the standstill gap), 5 s -> mild anticipation at
     /// the gentler parking deceleration.</summary>
+    /// <summary>True while the two cars run PARALLEL (same or opposite
+    /// direction within 35 deg) - i.e. they are a lane pair, not a crossing
+    /// pair. Only those may be handed over to v1's corridor when the gap
+    /// opens (see the OpeningGap note at the call site).</summary>
+    private static bool IsParallelPair(Car a, Car b)
+    {
+        double hdiff = Math.Abs(((a.Heading - b.Heading + 540.0) % 360.0) - 180.0);
+        return hdiff < 35.0 || hdiff > 145.0;
+    }
+
+    /// <summary>True while `b` is moving AWAY from `a` along a's axis faster
+    /// than a itself goes - the gap between the two grows, so no conflict can
+    /// be unavoidable and a's brake must come from the corridor rule that
+    /// measures the real gap (v1), not from a plan-speed sweep artifact.</summary>
+    private static bool OpeningGap(Car a, Car b)
+    {
+        double ar = Math.Radians(a.Heading);
+        double fx = Math.Sin(ar), fy = Math.Cos(ar);
+        double br = Math.Radians(b.Heading);
+        double vProj = b.Speed * (Math.Sin(br) * fx + Math.Cos(br) * fy);
+        return vProj > a.Speed + 0.5;
+    }
+
     static double GradedCap(double stageSeconds, double dM)
     {
         if (stageSeconds <= 1.0) return 0.0;

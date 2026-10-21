@@ -1,30 +1,45 @@
 # Godot Frontend — Architecture & Migration Plan
 
-> Status: agreed design decisions (2026-08-31), no implementation yet.
-> Companion to `REST_API.md` (the API this document turns into a product
-> boundary) and `SMOOTH_GEOMETRY_DESIGN.md` (the geometry contract).
+> Status: agreed design decisions (2026-08-31), implementation now
+> COMPLETE through Phase 1 + Phase 7 (in-process sim, embedded API). Phase 2
+> (planning outside the simulator) is **not** done - route, raceline and speed
+> profile still live in `DrivingGame.Sim`. Companion to `REST_API.md` (the API
+> this document turns into a product boundary) and
+> `SMOOTH_GEOMETRY_DESIGN.md` (the geometry contract).
+>
+> **Current state (2026-10-19, code-verified):** ONE repo, ONE app. The Godot
+> 4.7 (.NET) project at the repo root hosts the client (`MapRenderer.cs`) and,
+> in `--source embedded` mode, the simulator itself (`SimHost.cs`) on its own
+> 60 Hz thread, with `DrivingGame.Api` embedded for external test injection.
+> The HTTP double pipeline (`--source http`, the default) to the console host
+> `DrivingGame.Server` on :5001 still coexists. Pygame is gone; the Python
+> reference repo is history.
 
 ## 1. Goal
 
 Replace the pygame frontend with a Godot 4 frontend (project:
-`../driving-game/`, Godot 4.7, C#): faster rendering, and a path to
-oblique/3D presentation later. The Python simulation — from now on called
+`/Users/hauke/prj/driving-game/`, Godot 4.7, C#): faster rendering, and a
+path to oblique/3D presentation later. The simulation — from now on called
 the **world simulator** — stays the single source of truth for physics and
 world rules. Nothing in this plan changes simulated behavior; e2e
 (`tests/test_turning.py`) must stay green throughout.
 
+The simulator is now C# (`DrivingGame.Sim`), not Python: the 1:1 port is
+recorded in `C_SHARP_PORT_SPEC.md` (closed) and the post-port features in
+`SPEC.md`.
+
 ## 2. Target architecture: three roles, one seam
 
 ```
-                      REST API (localhost:5001)
+                      REST API (127.0.0.1:5001)
 ┌───────────────────────────────┐       ◄──────────────────►       ┌─────────────────────┐
-│  WORLD SIMULATOR (Python)     │                                   │  GODOT CLIENT       │
-│  physics + world rules        │                                   │  rendering + input  │
+│  WORLD SIMULATOR (C#)         │                                   │  GODOT CLIENT       │
+│  DrivingGame.Sim              │                                   │  rendering + input  │
 │  owns all state, hosts API    │                                   │  zero driving logic │
 └───────────────────────────────┘                                   └─────────────────────┘
                       ▲
-                      │ same REST interface
-          ┌───────────┴───────────┐
+                      │ same REST interface (or an in-process
+          ┌───────────┴───────────┐     snapshot read, embedded mode)
           │  DRIVERS (any process │
           │  that holds the wheel)│
           │  • e2e suite          │
@@ -125,72 +140,106 @@ problem**, not beforehand.
 
 ## 6. Phases
 
-### Phase 1 — frontend swap (behavior-frozen)
+### Phase 1 — frontend swap (behavior-frozen) — DONE
 
 Godot renders the existing world in **2D top-down**; the AI driver stays
 inside the simulator. Zero behavior change, e2e stays green.
 
-Parity against the retired pygame frontend was only the transition-phase
+- **M1** — DONE: `GET /map` + Godot renders the static map
+- **M2** — DONE: car appears and follows (60 Hz state polling,
+  interpolation with a 100 ms render delay, minimap)
+- **M3** — DONE: car sprite + blinkers + wheel breadcrumbs, test flags, HUD
+  label, smooth render pipeline (sample buffer + sim-rate estimate + capped
+  extrapolation, so a 60 Hz sim stays smooth on a 120/144 Hz display)
+- **M4** — DONE: minimap/HUD/flags/trail; freeze overlay; the obstacle
+  PALETTE was dropped (the Godot client has no palette UI - obstacle placement
+  is REST-only, see docs/OBSTACLES.md)
+- **M5** — DONE: pygame out of the package, sim headless at a self-paced
+  60 Hz, `POST /freeze` replaces the ESC key, `GET /screenshot` removed
+
+Parity against the retired pygame frontend was only a transition-phase
 acceptance test; it is **not** a requirement any more - the e2e suite and
 the visible Godot window are the standard.
 
-- **M1** — DONE: `GET /map` + Godot renders the static map (roads,
-  markings, junction dots, colors per current config)
-- **M2** — DONE: car appears and follows (60 Hz state polling,
-  interpolation with 100 ms render delay, camera mirroring the sim's
-  camera, minimap)
-- **M3** — DONE (visual parity): car sprite + blinkers + wheel
-  breadcrumbs, test flags, HUD label, smooth rendering pipeline (double
-  HTTPRequest pipeline, 1 s-window sim-rate estimate, extrapolation).
-  NOTE: the original M3 scope "free-mode driving from the Godot window"
-  was deferred to AFTER M5 by decision.
-- **M4** — PARTIAL: minimap/HUD/flags/trail done; remaining: obstacles +
-  palette, freeze overlay
-- **M5** — DONE (user-reordered ahead of free driving): pygame is out of
-  the package. `renderer.py`, `obstacle_ui.py`, `road_surface.py` deleted;
-  the sim runs headless at a self-paced 60 Hz (hybrid sleep+spin pacing -
-  plain `time.sleep` overshoots ~50% on this platform); flag/HUD state
-  moved to a `TestFlags` object in `main.py`; `Camera` kept as pure state
-  (Godot mirrors it via `/state`); new `POST /freeze` replaces the ESC key;
-  `GET /screenshot` removed; `docs/TESTING.md` workflow updated.
-  **Next: M3-free** — free-mode driving from the Godot window via REST
-  (also measures real input latency for the Phase-2 decision)
+### Phase 7 — one app (DONE, commit `8a57de5`)
+
+- `DrivingGame.csproj` (the Godot project) references `DrivingGame.Sim`
+  AND `DrivingGame.Api`; the Sim/Server/Api/Tests dirs are excluded from
+  Godot's compile glob (SDK-style projects glob every `.cs` below the root).
+- `SimHost.cs` runs the sim IN-PROCESS on its own 60 Hz thread and embeds the
+  shared API on `--port`; `MapRenderer` reads `Engine.StateSnapshot()`
+  directly per frame - no HTTP. The `--source http` path stays as the
+  alternative, so both communication methods coexist.
+- `scripts/run_e2e.sh --embedded` and the client's Run-Test UI drive the
+  embedded API.
+
+### Phase 2 — planning outside (NOT done)
+
+Route + raceline + speed profile would move out of the simulator into an
+external AI-driver process; the world simulator would then receive only
+impulses. Today `Raceline.cs`, `BicycleNav.part1-3` and the route builder
+still live inside `DrivingGame.Sim`. Known cost if/when it moves: ~1-2
+frames of control-loop latency and a re-tuning iteration at the
+`ROAD_EDGE_TOLERANCE_M` (0.35 m) edge. The `/map` contract already carries
+layer 2, so the external driver needs no further API work.
+
+## 7. What the client draws today (code-verified)
+
+`MapRenderer.cs` is pure layer-3 presentation of the `/map` payload - it
+contains no driving logic:
+
+- **Roads as their own geometry**: `road_strips` drawn as ribbons
+  (`Polygon2D`/`MeshInstance2D` batches), one uniform `ROAD_COLOR`, plus
+  `paved_edge_rings` as the white boundary line (drawn `EDGE_LINE_INSET_M`
+  0.15 m inside the true paved edge, hidden below `EdgeLineMinZoom` 6.0 px/m).
+- **Markings** from the payload: centreline dashes, lane dividers, parking-lane
+  boundaries (dash patterns come from `marking_style`, in metres), halt lines
+  (`stop_lines`), the crossing centre disc (`crossing_markers`), one-way arrows
+  and P marks. Fine markings are batched into `MeshInstance2D` with a
+  `MarkingMinZoom` 2.0 px/m cull flag.
+- **Road signs** as real artwork: `assets/signs/vorfahrt_gewaehren.svg` and
+  `vorfahrtsstrasse.svg`, placed from `signs` (2.5 m wide on purpose).
+- **Levels**: bridge decks (`elevated_roads`/`elevated_roadways`/edge lines);
+  a car's z-index is `10 + 20*level`, so it passes UNDER a deck and OVER its
+  own road.
+- **Cars**: per-uid sprite from `Config.CAR_COLORS`, stretched to the model's
+  physical size, corner lights (blinkers orange 0.5 s period, headlights white,
+  tail/brake lights red), green/red test pennants, small per-car HUD label
+  above the nose, minimap dots, breadcrumb trail accumulated client-side from
+  the 60 Hz samples.
+- **UI**: minimap (top right), speed/zoom readouts, the test-run box
+  (bottom left: number field + Run-Test button, driving `POST /run_test`),
+  click-to-inspect car window showing `GET /car/{uid}/decisions`.
+- **Camera**: `Camera2D`, zoom = px/m; `--center x y` (metres) pins the view,
+  otherwise it auto-follows the bound car; `--focus <uid>` binds it to one
+  car; the **crash camera** re-anchors to the first car that reports a crash
+  episode at `CrashZoom` 34 px/m.
+- **One-shot diagnostics**: `--screenshot <path>` (+ `--delay <s>`),
+  `--crash-shot <path>` (one PNG 0.5 s after the crash camera latches),
+  `--motionlog <path>`, `--quit-on-test-done`, and the clean-quit generation
+  file `/tmp/driving_game_godot_gen` (the client quits ITSELF when the value
+  changes - never signal Godot).
 
 ### Phase 2 — planning outside (goal state)
 
-Route + raceline + speed profile move out of the simulator into an external
-**AI-driver process**; the world simulator then receives only impulses.
+See §6 above: **not done** as of 2026-10-19.
 
-Known cost, stated up front: the control loop gains ~1–2 frames of latency,
-and the cornering tuning sits at the 0.35 m / ~35 ms edge
-(`ROAD_EDGE_TOLERANCE_M`). Expect a re-tuning iteration (preview distance,
-corner speeds) under e2e supervision. The `/map` contract from Phase 1 is
-designed so the external driver gets layer 2 with no further API work.
+## 8. Repos & migration
 
-## 7. Repos & migration
+This became a **single repo** (consolidation decision 2026-09-05, completed
+before the port closed): the Godot project at the root IS the frontend, the
+sim lives beside it as `DrivingGame.Sim`, and the REST API is the product
+boundary between them (`DrivingGame.Api`, used by both hosts). The Python
+repo `/Users/hauke/prj/car` is history - it is no longer needed and nothing
+here depends on it.
 
-This is a **permanent split, not a feature branch**: the Godot frontend is
-not going away — pygame is. Framing it as "a branch in `car/`" would be
-wrong, because a branch implies merging back later.
+## 9. Open questions / risks
 
-- **`car/`** stays the simulator repo. The Python-side changes are small and
-  additive (new endpoints, freeze command) → short-lived branch cut from the
-  current line of development, validated by e2e, merged quickly. Pygame is
-  deleted at M5 on the mainline — it does not live on in a branch forever.
-- **`driving-game/`** becomes the frontend repo (`git init`; currently
-  unversioned). All Godot work happens there, as a proper standalone Godot
-  project at the repo root.
-- If the two-repo workflow proves annoying later, consolidating into one
-  monorepo stays open — the documented API contract is the seam either way.
-
-## 8. Open questions / risks
-
-- **Phase-2 re-tuning scope** — to be measured, not guessed: M3 gives real
-  free-mode latency numbers with plain REST polling; that measurement decides
-  whether Phase 2 needs WebSocket push or just controller re-tuning.
-- **Trail source** — client-side accumulation vs. server-sent points (M4).
-- **Process lifecycle** — for now a dev script starts simulator + Godot;
-  later, optionally, Godot spawns the simulator as a child process (single
-  entry point, clean teardown).
-- **Oblique/3D view** — pure camera/extrusion work after parity; deferred by
-  design, not by lack of plan.
+- **Phase-2 re-tuning scope** — still unmeasured; free-mode latency was never
+  the bottleneck (REST polling is ~1-3 ms RTT on localhost).
+- **Trail source** — settled: the client accumulates the breadcrumb trail
+  from the 60 Hz `x/y/heading` samples; the sim does NOT export it.
+- **Process lifecycle** — settled: one process in embedded mode; the runner
+  starts the console host + client and closes both via the generation file.
+- **Oblique/3D view** — still deferred by design (a camera decision, not a
+  new model); the world stays flat until elevation data exists.

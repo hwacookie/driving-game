@@ -1,5 +1,16 @@
 # Godot Smoke/Steam Effect on Car Collision
 
+> **Status 2026-10-19:** NOT implemented in this project. `MapRenderer.cs`
+> contains no `GPUParticles2D`/`CPUParticles2D` and no crash effect - a crash
+> is currently reported by state, not by pixels: the pair rolls back and
+> stops, hazard lights flash, `crash_episodes` increments, the decision log
+> gets an `[R2] CRASH` entry, `CrashDumper` writes the forensics file, and the
+> client's **crash camera** re-anchors to the crashed car at 34 px/m
+> (`--focus`/`--crash-shot` for the diagnostics). This page is kept as the
+> how-to if a visual puff is ever added - and note the Godot-idiom rule:
+> spawn a one-shot effect scene per crash and let it free itself, do not
+> re-trigger one persistent emitter.
+
 This is a standard effect in Godot, and it's simple to set up. The key idea: don't try to reuse one persistent particle node for every collision. Instead, spawn a small one-shot particle effect scene at the collision point each time a crash happens, let it play once, then free itself.
 
 Here's a solid Godot 4 approach:

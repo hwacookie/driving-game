@@ -18,7 +18,20 @@ public abstract record SimCommand;
 /// in its own right-hand lane and drives the loop backwards.</summary>
 public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      double? Progress, bool Add, double? Speed,
-                                     string? Color = null, bool Reverse = false) : SimCommand;
+                                     string? Color = null, bool Reverse = false,
+                                     double? CruiseKmh = null,
+                                     // The car's NAME (docs/TESTING.md): a
+                                     // scenario authors its cast, so it knows
+                                     // that this car IS the oncoming one - a
+                                     // name is an intention, and it beats the
+                                     // predicates the client would otherwise
+                                     // have to guess ("the slowest rolling
+                                     // car" named the primary at staging time
+                                     // and the camera flapped all run).
+                                     // Set WITH the spawn, not in a second
+                                     // request: a staged car must carry its
+                                     // identity before its first tick.
+                                     string? Name = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -50,6 +63,18 @@ public sealed record FlagsCommand(int? Uid,
 /// <summary>Hazard lights (Warnblinkanlage): explicit on/off, per-car via
 /// Uid (omit = primary).</summary>
 public sealed record HazardCommand(bool On, int? Uid) : SimCommand;
+
+/// <summary>Re-point the PRIMARY (followed) car - the /state top level and
+/// the cockpit describe this car. Every teleport re-points it to the newest
+/// car, so a multi-car scenario that spawned its extras AFTER its own car has
+/// to say which one it is monitoring (POST /follow).</summary>
+public sealed record FollowCommand(int Uid) : SimCommand;
+
+/// <summary>Put a car into the PARKED state where it stands (POST /park,
+/// docs §8 'Parked car'): engine off, no route, it stays put and is an
+/// obstruction other cars must pass. The car must already exist - a scenario
+/// teleports it into a lane first, then parks it.</summary>
+public sealed record ParkCommand(int Uid) : SimCommand;
 
 // --- Per-car test pennants + HUD label --------------------------------------
 
@@ -115,6 +140,27 @@ public sealed class SimEngine
     // budget context ~200 us/car/substep total). Stopwatch ticks accumulated
     // per call, printed + reset every 300 substeps (5 sim-seconds at 60 Hz).
     private long _avoidCapsTicks, _resolveTicks;
+    // Quality metric (the user's, 2026-10-19): total metres driven by every
+    // car since the sim started. Divided by sim time it is the fleet's
+    // fluidity in m/s - see docs/DRIVING_MANEUVERS.md §8 R28 measurement.
+    private double _flowMeters = 0.0;
+    // R31 standstill error (docs §8): a car that moves less than this many
+    // metres within this much WALL time is probably stuck (the user's
+    // definition of 2026-10-19, values adjustable later).
+    private const double StandstillWindowWallS = 180.0;
+    private const double StandstillMinM = 1.0;
+    // The PER-SUBSTEP fluidity the tape carries (docs/RECORD_PLAYBACK.md):
+    // _flowMeters is cumulative, so it dilutes and cannot show how fluidity
+    // CHANGED over a run. A curve needs a rolling window - metres the fleet
+    // moved over the last FluidityWindowS sim-seconds, divided by
+    // (cars x window) = m/s per car, the same unit as Q1's flow/car.
+    private const double FluidityWindowS = 5.0;
+    private readonly List<double> _windowMetres = new();
+    private double _windowSumM = 0.0;
+    private readonly Dictionary<int, (double X, double Y)> _flowPrev = new();
+    private readonly Dictionary<int, double> _sinceMeters = new();
+    private readonly Dictionary<int, double> _sinceTime = new();
+    public static List<string> StandstillErrors = new();
     private int _avoidCapsCalls, _resolveCalls;
     private const long CostReportEverySteps = 300;
     private double _physicsAccum;
@@ -257,6 +303,7 @@ public sealed class SimEngine
         // Multi-car color: deterministic per uid, red first, then the old
         // pygame obstacle palette colors.
         car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
+        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -302,6 +349,7 @@ public sealed class SimEngine
         car.LaneOffsetOverrideM = offsetM;
         car.TrailEnabled = true;
         car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
+        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -311,6 +359,9 @@ public sealed class SimEngine
         // remaining car if the followed one goes.
         _cars.Remove(uid);
         _carFlags.Remove(uid);
+        _flowPrev.Remove(uid);
+        _sinceMeters.Remove(uid);
+        _sinceTime.Remove(uid);
         if (_followUid == uid)
             _followUid = _cars.Count > 0 ? _cars.Keys.Max() : null;
     }
@@ -374,6 +425,15 @@ public sealed class SimEngine
                 // Explicit color override (validated at the API layer);
                 // otherwise the uid-based palette assignment above stands.
                 if (!string.IsNullOrEmpty(tp.Color)) newCar.Color = tp.Color;
+                newCar.EmergencyRole = newCar.Color == "police";   // R35
+                // A SLOW VEHICLE (km/h): the class top speed stays what the
+                // sprite's class says, this car just chooses to drive slower -
+                // a tractor, a delivery van, a car hunting a parking spot. The
+                // test scenarios need it to stage real slow traffic instead of
+                // a stopped car (R32 treats a crawler as an obstruction, a
+                // queue lead it must not pass).
+                if (tp.CruiseKmh is not null && tp.CruiseKmh.Value > 0.0)
+                    newCar.CruiseCapMps = tp.CruiseKmh.Value / 3.6;
                 _cars[newCar.Uid] = newCar;
                 _carFlags[newCar.Uid] = new TestFlags();
                 // Unaddressed flags/label (legacy clients that set them before
@@ -383,6 +443,17 @@ public sealed class SimEngine
                     _carFlags[newCar.Uid] = _unaddressedFlags;
                     _unaddressedFlags = null;
                 }
+                // A name given WITH the spawn wins over an adopted label: the
+                // scenario asked for THIS car to be the parked one, and the
+                // legacy label belongs to whatever car the client was thinking
+                // of (measured: the suite's /label for the test number made
+                // every staged extra adopt it, so the cast came out unnamed).
+                if (!string.IsNullOrEmpty(tp.Name))
+                {
+                    var fl = _carFlags.TryGetValue(newCar.Uid, out var f0)
+                        ? f0 : new TestFlags();
+                    fl.HudLabel = tp.Name;
+                }
                 _followUid = newCar.Uid;
                 Console.WriteLine(
                     $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +
@@ -390,6 +461,34 @@ public sealed class SimEngine
                     $"{(tp.Speed is not null ? " (rolling start)" : "")}\n");
                 break;
             }
+
+            case FollowCommand fc:
+                if (_cars.ContainsKey(fc.Uid))
+                {
+                    _followUid = fc.Uid;
+                    Console.WriteLine($"🎯 primary car set to #{fc.Uid}");
+                }
+                break;
+
+            case ParkCommand pc:
+                if (_cars.TryGetValue(pc.Uid, out var pcar))
+                {
+                    // The nav only exists once the car has TICKED (Car.Update
+                    // creates it lazily). A car staged while the sim is FROZEN
+                    // has never ticked, so parking it used to be a silent no-op
+                    // - and an unparked stopped car is a queue lead, which R32
+                    // refuses to pass by design, which is what pinned the car
+                    // behind the "parked" one at 0 km/h for a whole minute
+                    // (measured: 16,145 R32 rejections reading "stopped NOT
+                    // parked"). Create the nav the same way the first tick
+                    // would, then park it.
+                    if (pcar.Driver is BicycleDriver && pcar.BicycleNav is null)
+                        pcar.BicycleNav = new BicycleNav(pcar, Network);
+                    pcar.BicycleNav?.ParkNow();
+                    Console.WriteLine($"🅿  car #{pcar.Uid} PARKED where it stands " +
+                                      $"(seg {pcar.SegIdx}, {pcar.X:F1},{pcar.Y:F1})");
+                }
+                break;
 
             case CarsCommand cc:
                 if (cc.Action == "clear")
@@ -656,6 +755,78 @@ public sealed class SimEngine
                 _physicsAccum -= DtFixed;
                 stepsThisFrame++;
                 _simStepsTotal++;
+                // --- Quality metrics (the user's, 2026-10-19) -------------
+                // (a) FLEET FLOW: the total metres every car drives, summed -
+                // divided by sim time that is the fleet's fluidity in m/s
+                // (high = traffic flows, low = it is stuck). Measured here,
+                // at the substep START, so every car is counted on EVERY
+                // path (the collision branch is skipped for a single car).
+                // (b) R31 STANDSTILL ERROR (docs §8): a car that moves less
+                // than StandstillMinM within StandstillWindowWallS of WALL
+                // time is probably stuck - "something is wrong". Wall time,
+                // so the sim window scales with the warp factor.
+                // --- the per-substep FLUIDITY the tape carries -------------
+                // The cumulative flow_m_total cannot show how fluidity CHANGED
+                // over a run - it dilutes. A curve needs a window: metres the
+                // fleet moved over the last FluidityWindowS sim-seconds,
+                // divided by (cars x window) = m/s per car. Same unit as Q1's
+                // flow/car, so a comparison of two runs is curve against curve
+                // (docs/RECORD_PLAYBACK.md).
+                var simNow31 = _simStepsTotal * DtFixed;
+                var winSim31 = StandstillWindowWallS * Math.Max(TimeWarp, 1.0);
+                long tFlow0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                double movedSum = 0.0;
+                int movingCount = 0;
+                foreach (var c in _cars.Values)
+                {
+                    // The substep this car is being updated on - the tape's and
+                    // the decision log's clock. Set BEFORE the `continue` below
+                    // so a car seen for the first time still carries it.
+                    c.SimStep = _simStepsTotal;
+                    if (c.Speed > 0.5) movingCount++;
+                    if (!_flowPrev.TryGetValue(c.Uid, out var fp))
+                    {
+                        _flowPrev[c.Uid] = (c.X, c.Y);
+                        _sinceTime[c.Uid] = simNow31;
+                        continue;
+                    }
+                    double movedM = Math.Hypot(c.X - fp.X, c.Y - fp.Y);
+                    _flowPrev[c.Uid] = (c.X, c.Y);
+                    _flowMeters += movedM;
+                    movedSum += movedM;
+                    _sinceMeters[c.Uid] = _sinceMeters.GetValueOrDefault(c.Uid, 0.0) + movedM;
+                    var wStart = _sinceTime.GetValueOrDefault(c.Uid, simNow31);
+                    if (simNow31 - wStart < winSim31) continue;
+                    // The window is over: did the car go anywhere?
+                    if (_sinceMeters[c.Uid] < StandstillMinM)
+                    {
+                        var msg31 = $"[R31] STANDSTILL ERROR: car {c.Uid} moved " +
+                                    $"{_sinceMeters[c.Uid]:F2} m in {StandstillWindowWallS:F0} s wall " +
+                                    $"({simNow31 - wStart:F0} s sim) at ({c.X:F1},{c.Y:F1}) " +
+                                    $"seg {c.SegIdx} v {c.Speed * 3.6:F1} km/h";
+                        StandstillErrors.Add(msg31);
+                        Console.WriteLine($"!! {msg31}");
+                    }
+                    _sinceTime[c.Uid] = simNow31;
+                    _sinceMeters[c.Uid] = 0.0;
+                }
+                if (StepCost.Enabled) StepCost.Add(StepCost.Flow, tFlow0, _cars.Count);
+                // Close the rolling window and derive the two fleet numbers the
+                // tape stores per substep.
+                _windowMetres.Add(movedSum);
+                _windowSumM += movedSum;
+                int windowSteps = (int)Math.Ceiling(FluidityWindowS / DtFixed);
+                while (_windowMetres.Count > windowSteps)
+                {
+                    _windowSumM -= _windowMetres[0];
+                    _windowMetres.RemoveAt(0);
+                }
+                double elapsedS = _simStepsTotal * DtFixed;
+                double windowS = Math.Min(FluidityWindowS, elapsedS);
+                double fluidityMpsPerCar = _cars.Count > 0 && windowS > 0.0
+                    ? _windowSumM / (_cars.Count * windowS) : 0.0;
+                double movingShare = _cars.Count > 0
+                    ? (double)movingCount / _cars.Count : 0.0;
                 if (CollisionsEnabled && _cars.Count > 1)
                 {
                     // TWO-PASS collision substep. Loop A advances every car and
@@ -675,6 +846,22 @@ public sealed class SimEngine
                                                                    _simStepsTotal * DtFixed);
                     _avoidCapsTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tAvoid0;
                     _avoidCapsCalls++;
+                    if (StepCost.Enabled) StepCost.Add(StepCost.Avoid, tAvoid0, _cars.Count);
+                    // R29 (docs §8): the desperation valve. A total lockdown
+                    // should be unreachable - prevention (R30) refuses the
+                    // entry that would create one. If a cycle of standstill
+                    // cars nevertheless persisted, CarCollisions asks for one
+                    // car to be taken out of the equation so the sim never
+                    // stands there forever. That is an ERROR: it is logged
+                    // here and the e2e suite fails on it.
+                    if (CarCollisions.DespawnRequests.Count > 0)
+                        foreach (var victim in CarCollisions.DespawnRequests)
+                            if (_cars.ContainsKey(victim))
+                            {
+                                RemoveCar(victim);
+                                Console.WriteLine($"!! R29: car {victim} DESPAWNED to break a " +
+                                                  "standstill cycle (an error - see §8 R29)");
+                            }
                     foreach (var c in _cars.Values)
                     {
                         double preX = c.X, preY = c.Y, preH = c.Heading;
@@ -697,14 +884,18 @@ public sealed class SimEngine
                                 AcceleratePressed = control.AcceleratePressed,
                                 BrakePressed = control.BrakePressed,
                             };
+                        long tUpd0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         c.Update(DtFixed, Network, control);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Upd, tUpd0, 1);
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-UPD uid{c.Uid} v={c.Speed:F4}");
 
                         // Stop-on-contact with obstacles (ALL modes): brake at
                         // full braking and clamp so the body box never
                         // interpenetrates an obstacle - the car rests against it.
+                        long tContact0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Contact, tContact0, 1);
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-CONTACT uid{c.Uid} v={c.Speed:F4}");
 
@@ -721,6 +912,7 @@ public sealed class SimEngine
                         // actual deceleration and overshoots the standstill
                         // gap. Braking from the pre-substep speed guarantees
                         // the full CAR_BRAKING rate whenever the cap binds.
+                        long tCap0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         if (avoidCaps.TryGetValue(c.Uid, out double cap))
                         {
                             double ceiling = Math.Max(cap, preSpeed - Config.CAR_BRAKING * DtFixed);
@@ -736,6 +928,7 @@ public sealed class SimEngine
                             if (held && (preSpeed > ceiling + 0.02 || ceiling < 1.0))
                                 c.IsBraking = true;
                         }
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Caps, tCap0, 1);
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-CAP uid{c.Uid} v={c.Speed:F4}");
                     }
@@ -752,25 +945,34 @@ public sealed class SimEngine
                         Console.WriteLine($"RESOLVE-STOPPED 37/38: {string.Join(",", inContact)}");
                     _resolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tResolve0;
                     _resolveCalls++;
+                    if (StepCost.Enabled) StepCost.Add(StepCost.Resolve, tResolve0, _cars.Count);
 
                     foreach (var c in _cars.Values)
+                    {
+                        long tV0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         Validator.Check(c, DtFixed, Network,
                                         simTime: _simStepsTotal * DtFixed,
                                         inContact: inContact.Contains(c.Uid));
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Validate, tV0, 1);
+                    }
                     foreach (var c in _cars.Values)
                     {
-                        var nav = c.BicycleNav;
-                        bool inTurn = nav is not null && nav.InTurnBlendZone(nav.S);
-                        bool uturnNow = nav is not null && nav.UturnActive;
-                        bool onWrongSide = false;
-                        if (!inTurn && !uturnNow)
-                            onWrongSide = LaneGuard.Check(c, DtFixed, Network);
+                        long tGuard0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                        // Lane guard: the guard owns the whole decision now -
+                        // it asks the R33 intent (turn swing, U-turn, R32 pass,
+                        // merge, pull-out) itself, so the caller no longer
+                        // pre-skips some maneuvers and the guard carries a
+                        // second, older skip. One owner, one question.
+                        bool onWrongSide = LaneGuard.Check(c, DtFixed, Network,
+                                                          simTime: _simStepsTotal * DtFixed);
 
                         // Off-road check (FREE mode only): stop the car + warning.
                         bool freeOffRoad = false;
                         if (c.Driver!.GetName() == "FREE")
                         {
+                            long tRoad0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                             freeOffRoad = !c.IsOnRoad(Network);
+                            if (StepCost.Enabled) StepCost.Add(StepCost.Road, tRoad0, 1);
                             if (freeOffRoad) c.Speed = 0;
                             // Map edge check.
                             if (c.X < 0 || c.X > Network.WorldWidth ||
@@ -782,8 +984,8 @@ public sealed class SimEngine
                             }
                         }
                         _perCarState[c.Uid] = (onWrongSide, freeOffRoad);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Guard, tGuard0, 1);
                     }
-                    if (_simStepsTotal % CostReportEverySteps == 0) ReportCollisionCost();
                 }
                 else
                 {
@@ -791,35 +993,41 @@ public sealed class SimEngine
                     foreach (var c in _cars.Values)
                     {
                         double preX = c.X, preY = c.Y, preH = c.Heading;
+                        long tUpd0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         c.Update(DtFixed, Network, carControl.GetValueOrDefault(c.Uid, ControlInput.Empty));
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Upd, tUpd0, 1);
 
                         // Stop-on-contact with obstacles (ALL modes): brake at
                         // full braking and clamp so the body box never
                         // interpenetrates an obstacle - the car rests against it.
+                        long tContact0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                         bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Contact, tContact0, 1);
+                        long tValidate0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 
                         // Physics validation (independent check). While in contact
                         // the motion is externally constrained by a solid object,
                         // so the validator suspends the turning-radius invariant
                         // for that frame - jump/snap/off-road checks keep running.
                         Validator.Check(c, DtFixed, Network, inContact: inContact);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Validate, tValidate0, 1);
 
-                        // Lane guard: wrong-side driving (skipped during active
-                        // turns - lateral offset from the incoming centreline is
-                        // expected; and for the whole U-turn, where crossing the
-                        // centreline is INTENDED).
-                        var nav = c.BicycleNav;
-                        bool inTurn = nav is not null && nav.InTurnBlendZone(nav.S);
-                        bool uturnNow = nav is not null && nav.UturnActive;
-                        bool onWrongSide = false;
-                        if (!inTurn && !uturnNow)
-                            onWrongSide = LaneGuard.Check(c, DtFixed, Network);
+                        // Lane guard: the guard owns the whole decision now -
+                        // it asks the R33 intent (turn swing, U-turn, R32 pass,
+                        // merge, pull-out) itself, so the caller no longer
+                        // pre-skips some maneuvers and the guard carries a
+                        // second, older skip. One owner, one question.
+                        long tGuard0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                        bool onWrongSide = LaneGuard.Check(c, DtFixed, Network,
+                                                          simTime: _simStepsTotal * DtFixed);
 
                         // Off-road check (FREE mode only): stop the car + warning.
                         bool freeOffRoad = false;
                         if (c.Driver!.GetName() == "FREE")
                         {
+                            long tRoad0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                             freeOffRoad = !c.IsOnRoad(Network);
+                            if (StepCost.Enabled) StepCost.Add(StepCost.Road, tRoad0, 1);
                             if (freeOffRoad) c.Speed = 0;
                             // Map edge check.
                             if (c.X < 0 || c.X > Network.WorldWidth ||
@@ -831,8 +1039,40 @@ public sealed class SimEngine
                             }
                         }
                         _perCarState[c.Uid] = (onWrongSide, freeOffRoad);
+                        if (StepCost.Enabled) StepCost.Add(StepCost.Guard, tGuard0, 1);
                     }
                 }
+                // --- the tape (docs/RECORD_PLAYBACK.md) -------------------
+                // One record per SUBSTEP per car, at the substep END: the pose
+                // is what the renderer drew, and the cap key is the rule that
+                // owns this car's speed - so a standstill is explainable AT a
+                // frame when scrubbing, not only after the fact.
+                // R16 input: how long each car has been standing. One
+                // addition per car per substep, reset when it rolls.
+                foreach (var c in _cars.Values)
+                    c.StandstillS = c.Speed < 0.5 ? c.StandstillS + DtFixed : 0.0;
+
+                if (RunTape.Recording)
+                {
+                    long tTape0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                    var wrongNow = new Dictionary<int, bool>(_cars.Count);
+                    foreach (var e in _perCarState)
+                        wrongNow[e.Key] = e.Value.OnWrongSide;
+                    var namesNow = new Dictionary<int, string>(_cars.Count);
+                    foreach (var kvf in _carFlags)
+                        if (kvf.Value.HudLabel is not null && kvf.Value.HudLabel != "")
+                            namesNow[kvf.Key] = kvf.Value.HudLabel;
+                    RunTape.Record(_simStepsTotal, _cars.Values.ToList(), wrongNow,
+                                   namesNow,
+                                   fluidityMpsPerCar, movingShare);
+                    if (StepCost.Enabled) StepCost.Add(StepCost.Tape, tTape0, _cars.Count);
+                }
+                // Cost accounting: same window as the collision-cost report
+                // (CostReportEverySteps substeps = 5 sim-seconds at 60 Hz).
+                // Outside the if/else so a single-car or --no-collisions run
+                // still gets a table.
+                if (_simStepsTotal % CostReportEverySteps == 0 && StepCost.Enabled)
+                    StepCost.Report(CostReportEverySteps, DtFixed);
             }
         }
 
@@ -877,7 +1117,9 @@ public sealed class SimEngine
             tf.FlagRedPending = null;
         }
 
+        long tPayload0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
         UpdateState(followed, stepsThisFrame);
+        if (StepCost.Enabled) StepCost.Add(StepCost.Payload, tPayload0, _cars.Count);
     }
 
     /// <summary>Stopwatch-based cost of the collision system, printed every
@@ -943,6 +1185,13 @@ public sealed class SimEngine
     {
         ["wrong_side_frames"] = s.WrongSideFrames,
         ["wrong_side_seconds"] = s.WrongSideSeconds,
+        // Quality metric for the results table: how often the car crossed the
+        // centreline (a legal pass of an obstruction = out and back = 2).
+        ["centreline_crossings"] = s.CentrelineCrossings,
+        // R33: how often it crossed with NO manoeuvre asking for it. Not a
+        // quality metric - an error. The corridor makes it unreachable, so a
+        // non-zero count means whatever feeds the corridor broke its bounds.
+        ["unexplained_crossings"] = s.UnexplainedCrossings,
     };
 
     private void UpdateState(Car? followed, int stepsThisFrame)
@@ -965,9 +1214,15 @@ public sealed class SimEngine
                 ["speed_kmh"] = c.Speed * 3.6,
                 ["level"] = Network.Segments[c.SegIdx].Level,
                 ["segment"] = c.SegIdx,
+                // Symbolic anchor (docs §8 "Segment names"): readable traces.
+                ["segment_name"] = Network.Segments[c.SegIdx].Name,
                 ["progress"] = c.Progress,
                 ["on_road"] = c.IsOnRoad(Network),
                 ["wrong_side"] = pcs.OnWrongSide,
+                // Per-car lane-guard counters so a MULTI-car run can measure
+                // centreline crossings and wrong-side time for every car, not
+                // just the primary (results table, docs §8 "Liveness & quality").
+                ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(c)),
                 // Collision contact: true while this car is pinned against
                 // another by collision resolution (a crash). The multi-car
                 // crossing scenario fails the instant any car reports it.
@@ -996,6 +1251,26 @@ public sealed class SimEngine
                 ["color"] = c.Color,
                 // Driver class for the renderer's click-to-inspect info window.
                 ["driver"] = c.Driver?.GetName() ?? "NONE",
+                // The COURTESY signal (docs §6, bitteschön): set by the car
+                // that concedes a right-of-way resource, aimed at the car
+                // whose passage it grants. The renderer draws the flash from
+                // the conceder toward that target - a display of an award
+                // that must already be correct, never a decision.
+                ["courtesy_for"] = c.CourtesyForUid,
+                ["courtesy_kind"] = c.CourtesyKind,
+                // Parking state, in the SAME shape the other /state builder
+                // answers (the one at the followed-car branch). Without it the
+                // client could not tell a parked obstruction from a queue
+                // lead, and a camera asked to watch "the parked car" found
+                // nothing (measured: /state answered no 'parking' key at all
+                // for a staged park_block_priority cast).
+                ["parking"] = new Dictionary<string, object?>
+                {
+                    ["style"] = c.BicycleNav?.ParkStyle,
+                    ["phase"] = c.BicycleNav?.ParkPhase ?? "none",
+                    ["parked"] = c.BicycleNav?.Parked == true,
+                    ["reversing"] = c.BicycleNav?.ReverseParkActive == true,
+                },
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(c.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(c.Uid, out var tf) ? tf.HudLabel : null,
             });
@@ -1025,6 +1300,27 @@ public sealed class SimEngine
                 ["flags"] = FlagsPayload(null),
                 ["hud_label"] = null,
                 ["cars"] = carsPayload,
+                // R28 (docs §8): total lockdowns the sim had to report.
+                // Prevention must keep this at 0; the e2e suite fails when
+                // it grows (see tests/test_turning.py).
+                ["lockdowns"] = CarCollisions.LockdownEvents.Count,
+                ["lockdown_last"] = CarCollisions.LockdownEvents.Count > 0
+                    ? CarCollisions.LockdownEvents.Last() : "",
+                // Quality metric (the user's): metres driven per second of
+                // sim time by the WHOLE fleet (see §8 R28 measurement).
+                ["flow_m_total"] = _flowMeters,
+                ["flow_m_per_s"] = _flowMeters /
+                    Math.Max(_simStepsTotal * DtFixed, 1e-9),
+                // R31 (docs §8): cars that moved < StandstillMinM within
+                // StandstillWindowWallS of wall time. 0 = nothing stuck.
+                ["standstill_errors"] = StandstillErrors.Count,
+                ["standstill_last"] = StandstillErrors.Count > 0
+                    ? StandstillErrors.Last() : "",
+                // R33 (docs §8): centreline crossings with NO manoeuvre asking
+                // for them. 0 = the corridor held. Not a quality metric - an
+                // error, and the e2e suite fails when it grows.
+                ["lane_guard_errors"] = LaneGuard.UnexplainedCrossings(),
+                ["lane_guard_last"] = LaneGuard.LastUnexplained(),
             };
         }
         else
@@ -1050,6 +1346,7 @@ public sealed class SimEngine
                 ["speed_kmh"] = car.Speed * 3.6,
                 ["driver"] = car.Driver?.GetName() ?? "NONE",
                 ["segment"] = car.SegIdx,
+                ["segment_name"] = Network.Segments[car.SegIdx].Name,
                 // Vertical level of the current segment (0 = ground, 1 =
                 // bridge): the renderer z-orders the car above its own deck
                 // but below any higher level.
@@ -1069,6 +1366,8 @@ public sealed class SimEngine
                 ["accelerating"] = car.IsAccelerating,
                 ["wrong_side"] = pcs.OnWrongSide,
                 ["driver"] = car.Driver!.GetName(),
+                ["courtesy_for"] = car.CourtesyForUid,
+                ["courtesy_kind"] = car.CourtesyKind,
                 // Parking state for the e2e suite: a reverse-in park
                 // deliberately crosses the flag to stage the back-in, so the
                 // suite must wait for 'parked' instead of latching arrival.
@@ -1097,6 +1396,20 @@ public sealed class SimEngine
                 // x/y/heading samples.)
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(car.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(car.Uid, out var tf2) ? tf2.HudLabel : null,
+                ["lockdowns"] = CarCollisions.LockdownEvents.Count,
+                ["lockdown_last"] = CarCollisions.LockdownEvents.Count > 0
+                    ? CarCollisions.LockdownEvents.Last() : "",
+                ["flow_m_total"] = _flowMeters,
+                ["flow_m_per_s"] = _flowMeters /
+                    Math.Max(_simStepsTotal * DtFixed, 1e-9),
+                ["standstill_errors"] = StandstillErrors.Count,
+                ["standstill_last"] = StandstillErrors.Count > 0
+                    ? StandstillErrors.Last() : "",
+                // R33 (docs §8): centreline crossings with NO manoeuvre asking
+                // for them. 0 = the corridor held. Not a quality metric - an
+                // error, and the e2e suite fails when it grows.
+                ["lane_guard_errors"] = LaneGuard.UnexplainedCrossings(),
+                ["lane_guard_last"] = LaneGuard.LastUnexplained(),
             };
         }
 

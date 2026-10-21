@@ -37,6 +37,17 @@ public class Car
     /// cornering budget) - see Config.VEHICLE_CLASS_SPECS.</summary>
     public Config.VehicleSpec Spec => Config.SpecForColor(Color);
     public double TopSpeedMps => Spec.TopSpeedMps;
+    /// <summary>What this car CHOOSES to drive at, m/s (0 = no choice, use the
+    /// class limit). The class top speed stays the physical ceiling - a mixer
+    /// still cannot do 180 km/h - but a driver may hold far below it: a tractor
+    /// at 10 km/h, a van hunting a parking spot. R32 reads the difference: a
+    /// crawler is an obstruction to pass, a queue lead that merely happens to
+    /// be at 0 is not.</summary>
+    public double CruiseCapMps { get; internal set; } = 0.0;
+    /// <summary>The speed that actually applies: the driver's choice inside the
+    /// class ceiling.</summary>
+    public double EffectiveTopMps => CruiseCapMps > 0.0
+        ? Math.Min(TopSpeedMps, CruiseCapMps) : TopSpeedMps;
     public double AccelMps2 => Spec.AccelMps2;
     public double LatAccelMax => Spec.LatAccelMax;
 
@@ -101,6 +112,25 @@ public class Car
     /// of this flag (a real brake light works even with the lights off).</summary>
     public bool TaillightsOn { get; set; }
 
+    // --- Negotiation state (docs/RIGHT_OF_WAY_NEGOTIATION.md) -------------
+    /// <summary>R35 (docs §5): the ROLE this car drives with. The emergency
+    /// vehicle changes PREFERENCE only - it never changes what is physically
+    /// possible, so it does not get through a pinch a normal car could not
+    /// fit through. Default follows the sprite: a police car is on duty.</summary>
+    public bool EmergencyRole { get; set; }
+    /// <summary>Seconds this car has been standing still (speed below the
+    /// crawl line), reset the moment it rolls. R16 anti-starvation reads it:
+    /// a car that keeps losing a contested stretch becomes more expensive
+    /// until it wins it.</summary>
+    public double StandstillS { get; internal set; }
+    /// <summary>The COURTESY signal (docs §6, the user's word: bitteschön).
+    /// Set by the car that CONCEDES a right-of-way resource - the one
+    /// WITHOUT the right - and aimed at the car whose passage it grants,
+    /// named by the resource's target. A display of an award that must
+    /// already be correct, never a decision of its own.</summary>
+    public long CourtesyForUid { get; internal set; }
+    public string CourtesyKind { get; internal set; }   // sign# / r14# / passage# / r32#
+
     // --- Driver decision log -------------------------------------------------
     // EVENTS, not per-frame samples: one entry each time the reason this car
     // is being held back CHANGES (new threat, threat gone, ...). The
@@ -109,17 +139,35 @@ public class Car
     public sealed class CarDecision
     {
         public double T;      // sim time (s)
+        public long Step;     // SUBSTEP index - the tape's clock (see docs/RECORD_PLAYBACK.md)
         public string Msg = "";
     }
+    /// <summary>The text of the MOST RECENT decision this car made, and the
+    /// substep it was made on. The tape reads these two together at the moment
+    /// of recording, so a decision reaches the tape the instant it happens -
+    /// the 100-entry Decisions cap only protects live memory and can never
+    /// truncate what the tape already kept.</summary>
+    public string LastDecisionMsg { get; internal set; } = "";
     private readonly object _decLock = new();
     public const int MaxDecisions = 100;
     public List<CarDecision> Decisions { get; } = new();
+
+    /// <summary>The substep this car was last updated on. Set by SimEngine at
+    /// every substep. The tape and the decision index need it: `simTime` is a
+    /// double derived from the step count, and round(t / DtFixed) re-introduces
+    /// exactly the float rounding that clock comment warns about.</summary>
+    public long SimStep { get; internal set; }
+    /// <summary>The substep of the MOST RECENT decision (0 = none yet) - what
+    /// lets the tape mark the substeps worth scrubbing to.</summary>
+    public long LastDecisionStep { get; internal set; }
 
     public void RecordDecision(double simTime, string msg)
     {
         lock (_decLock)
         {
-            Decisions.Add(new CarDecision { T = simTime, Msg = msg });
+            Decisions.Add(new CarDecision { T = simTime, Step = SimStep, Msg = msg });
+            LastDecisionStep = SimStep;
+            LastDecisionMsg = msg;
             if (Decisions.Count > MaxDecisions) Decisions.RemoveAt(0);
         }
     }
@@ -149,6 +197,46 @@ public class Car
     /// a pair stays pinned in contact.</summary>
     public bool InContact { get; internal set; }
     public int ContactWith { get; internal set; }
+    /// <summary>How far (m) the driver model currently asks the nav to sit
+    /// RIGHT of the nominal lane line - the R8 lateral avoidance of a
+    /// frontal conflict (user rule: yield to the right as far as the road
+    /// allows, never leaving it). Clamped by the nav to the kerb line of the
+    /// narrowest segment on the route; decays back to the lane line when no
+    /// frontal threat is seen.</summary>
+    public double YieldRightM { get; internal set; }
+    /// <summary>How far (m) the driver model asks the nav to sit LEFT of the
+    /// nominal lane line - the R32 overtake of an obstruction (a parked or
+    /// much slower car) in my own lane. Positive = borrow the other lane;
+    /// the nav clamps it to the far kerb, so the car never leaves the road,
+    /// and it decays back to the lane line once the pass is done (docs
+    /// §8 R32). Distinct from YieldRightM, which is the R8 yield AGAINST a
+    /// frontal conflict - that one only ever moves right.</summary>
+    public double OvertakeShiftM { get; internal set; }
+    /// <summary>The obstruction this car is COMMITTED to pass (R32): which
+    /// car, on which segment, at what progress along it, and how many metres
+    /// of the other lane the pass borrows.
+    /// The lateral REQUEST alone is not a commitment. R32 asks only while the
+    /// obstruction is still "in my line", so the moment the car has shifted
+    /// far enough the obstruction leaves the line, wantM drops to 0 and the
+    /// shift decays back - measured on park_block_overtake, where the car
+    /// crossed the centreline at t=1.07 s with the shift already near zero,
+    /// so R33 called the crossing unexplained and v1 still named the parked
+    /// car as my lead. This says WHICH car I am passing and stays alive while
+    /// that one is still ahead of me on the same segment - no timer, no magic
+    /// distance. PassUid = -1 means no commitment.</summary>
+    public int PassUid { get; internal set; } = -1;
+    public int PassSegIdx { get; internal set; } = -1;
+    public double PassProgress { get; internal set; } = -1.0;   // 0..1 along PassSegIdx
+    public double PassShiftM { get; internal set; } = 0.0;      // metres borrowed
+    public double PassLengthM { get; internal set; } = 0.0;     // the obstruction's own length
+    /// <summary>Where the obstruction I am passing STANDS (metres, world).
+    /// The segment+progress pair broke at a segment change: park_block_priority
+    /// now parks its car exactly on the node straight_m, so the pass straddles
+    /// the hand-off and the moment the car reached segment 1 the record died
+    /// (SegIdx != PassSegIdx) - the borrow was still running and the guard called
+    /// it wrong-side. A world point has no such seam.</summary>
+    public double PassX { get; internal set; }
+    public double PassY { get; internal set; }
     /// <summary>Monotonic count of CRASH EPISODES this car has been part of
     /// (one per contact episode, the same event that logs the "[R2] CRASH"
     /// decision). InContact is transient - it is only set while the pair is
@@ -274,12 +362,16 @@ public class Car
         _freeTime += dt;
         // R25 (StVO §3(3)) speed limit: hard post-filter clamping the car to
         // its configured top speed every step. Log once when the cap engages.
-        bool capBites = Speed > TopSpeedMps;
+        // The driver's own cruise choice (CruiseCapMps) sits INSIDE the class
+        // ceiling and is reported as such, so a slow vehicle says why it is
+        // slow instead of looking like a capped sports car.
+        bool capBites = Speed > EffectiveTopMps;
         if (capBites && !_speedCapEngaged)
             RecordDecision(_freeTime,
-                $"[R25] speed capped at limit {TopSpeedMps:F1} m/s");
+                $"[R25] speed capped at limit {EffectiveTopMps:F1} m/s"
+                + (CruiseCapMps > 0.0 ? " (cruise choice)" : ""));
         _speedCapEngaged = capBites;
-        Speed = Math.Max(-Config.REVERSE_MAX_SPEED_M, Math.Min(TopSpeedMps, Speed));
+        Speed = Math.Max(-Config.REVERSE_MAX_SPEED_M, Math.Min(EffectiveTopMps, Speed));
         // Deadband so the car doesn't oscillate around 0 when neither gear
         // input is held.
         if (!accel && !brake && Math.Abs(Speed) < 0.05) Speed = 0.0;

@@ -88,3 +88,24 @@ This depends heavily on sign/symbol size, but there are usable rules of thumb:
 | Pure detection ("something is there") | up to ±20–35° | substantially larger, but without content recognition |
 
 These values hold for "normal" conditions (daylight, clear visibility, average visual acuity). Under fog/rain, the existing §3 StVO-derived rule already applies (50 m visibility → speed cap), and older/less experienced simulated drivers could reasonably be parameterized with a reduced effective recognition cone and/or shorter recognition distance — consistent with the experience parameter introduced in Section 4.
+
+## 7. Implemented in the sim (2026-10-19, code-verified)
+
+How the recommendations above map onto `DrivingGame.Sim/CarCollisions.cs`
+(and what is still missing):
+
+| Doc recommendation | In code |
+|--------------------|---------|
+| §1 Tier 0/1 at 60 Hz, Tier 2/3 coarser | The **physical net** (speed caps + `Resolve` rollback) runs every substep at 60 Hz. The **decision layer** is persistence/threshold-based, not a fixed clock: a cap's reason is re-evaluated every substep but a *release* requires the reason to be absent for `ReleaseHoldTicks(uid)` = 30 + (uid·14)%31 substeps (0.5–1.0 s), i.e. §3's "decision + minimum hold time". |
+| §2 reaction time as a delay | `ReactionTimeS = 1.0` s enters the stopping demand (`ApproachCapMps`: `v·t_react + v²/(2·a_comfort) ≤ room`), so a follower plans like a driver who reacts after ~1 s. NOT yet a sampled distribution, NOT yet per-driver experience. |
+| §2 comfort vs emergency braking | `ComfortBrakingMps2 = 5.0` m/s² (≈0.5 g) is what the DRIVER demands; `Config.CAR_BRAKING = 10.0` m/s² (≈1 g) stays the physical maximum the sim APPLIES. |
+| §3 decision persistence + per-vehicle jitter | `ReleaseHoldTicks` is a pure function of the uid (deterministic, no run randomness — R20), inside the doc's 0.5–1.5 s band and above the ~0.3 s box-boundary flicker period. |
+| §4 experience parameter (novice vs expert) | **Not implemented.** No per-car experience; every simulated driver is identical. Driver profiles (Cautious/Normal/Sporty) are still PLANNED (SPEC.md roadmap). |
+| §5 staged priority response | `Car.AlertOtherUid / AlertStartT / AlertLastTtc / AlertLastSeenT` + `AlertGraceS = 1.0` s watch-then-brake, with `AlertClearHoldS = 0.3` s before the alert may clear (a single-tick absence must not reset the grace clock). |
+| Sign/signal recognition (§6) | Only the **yield sign** is modelled, as a proximity rule: `SignActRangeM` (approach range), `PriorityProximityM` (a priority car already at the crossing), `GapScanRangeM` (the temporal gap-acceptance scan). No angle cone, no recognition distance, no traffic lights yet. |
+
+Open follow-ups from this document: sample the reaction time from a
+right-skewed distribution instead of the flat 1.0 s, add the per-car
+experience parameter (reaction mean/variance, perception threshold, miss
+probability), and gate sign reading on the ±9–10° recognition cone before
+applying a yield rule.

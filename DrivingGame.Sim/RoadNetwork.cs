@@ -16,6 +16,12 @@ public class RoadSegment
     public int Id;
     public double X1, Y1, X2, Y2;   // world pixel coords
     public string Highway = "";
+    /// <summary>Symbolic anchor: "StartNode→EndNode" (assigned by
+    /// RoadNetwork.CreateFromParts). Tests and the API address a segment by
+    /// this name instead of a positional index, so adding or deleting a
+    /// track can never silently shift what a test anchors to - an index in a
+    /// test is a coincidence, a name is an intention.</summary>
+    public string Name = "";
     public bool Oneway;
     public double Width;            // metres
     public string StartNode = "";   // node id at (x1, y1)
@@ -78,13 +84,32 @@ public class RoadNetwork
     public double WorldWidth { get; init; }
     public double WorldHeight { get; init; }
     public Dictionary<string, List<int>> NodeConnections { get; private set; } = new();  // node_id -> [segment_indices]
+    /// <summary>Per segment INDEX: the indices of every segment that SHARES A
+    /// NODE with it. A manoeuvre may straddle a junction - a parked car that
+    /// sits on the node, a pass that starts before it and ends after it - so
+    /// "same carriageway" must mean adjacent, not the same index (measured:
+    /// park_block_priority staged the obstruction on node straight_m, and the
+    /// strict test left the approaching car unable to see it at all, so it
+    /// braked into a queue it could have passed).
+    /// Built once with the network, never per query.</summary>
+    public List<HashSet<int>> SegmentNeighbours { get; private set; } = new();
     public Dictionary<string, int> NodeDegree { get; private set; } = new();            // node_id -> connection count
+    /// <summary>Symbolic segment anchor ("StartNode\u2192EndNode") -> positional
+    /// index. First occurrence wins; ambiguous names are in
+    /// <see cref="SegmentNameAmbiguous"/> and must not be used as an anchor.
+    /// Built once at map build (the network never changes at runtime).</summary>
+    public Dictionary<string, int> SegmentByName { get; private set; } = new();
+    public Dictionary<string, List<int>> SegmentNameAmbiguous { get; private set; } = new();
     public Dictionary<string, (double HalfWidth, string Highway)> NodeMaxWidth { get; private set; } = new();
     /// <summary>name → (x, y, heading, seg_idx, forward, lateral_offset_m).</summary>
     public Dictionary<string, (double X, double Y, double Heading, int SegIdx, bool Forward, double LateralOffsetM)> StartPoints { get; } = new();
 
     // Lazy caches (the road network never changes at runtime).
     public SmoothGeometry.SmoothedNetwork? SmoothedCache { get; set; }
+    /// <summary>Declared lane structure per segment (see <see cref="LaneGeometry"/>).
+    /// Built once on first use by the lane guard - it is DATA, so asking
+    /// "which lane am I in" is arithmetic, not a geometry search.</summary>
+    public LaneGeometry? LaneGeometryCache { get; set; }
     /// <summary>Eroded paved polygon for the raceline corridor (mirrors
     /// raceline.py's _raceline_safe). Built once on first use by
     /// <see cref="Raceline.LegalCorridor"/>; tests may inject a pre-built one.</summary>
@@ -235,7 +260,36 @@ public class RoadNetwork
         };
         net.Nodes = nodes;
         net.Segments = segments;
+        // Symbolic anchors (see RoadSegment.Name): derived, never authored -
+        // the node ids a map already has ARE the anchors. A name that hits
+        // more than one segment (the same node pair used twice) is recorded
+        // as ambiguous so the API can refuse it with the candidate list
+        // instead of picking one silently.
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            if (seg.Name is null || seg.Name.Length == 0)
+                seg.Name = seg.StartNode + "\u2192" + seg.EndNode;
+            if (!net.SegmentByName.ContainsKey(seg.Name))
+                net.SegmentByName[seg.Name] = i;
+            else
+            {
+                if (!net.SegmentNameAmbiguous.TryGetValue(seg.Name, out var al))
+                    net.SegmentNameAmbiguous[seg.Name] = al = new List<int>
+                    { net.SegmentByName[seg.Name] };
+                al.Add(i);
+            }
+        }
         net.NodeConnections = nodeConnections;
+
+        // Segment neighbourhood from the node map (see the field's doc).
+        var nbrs = new List<HashSet<int>>(segments.Count);
+        for (int i = 0; i < segments.Count; i++) nbrs.Add(new HashSet<int>());
+        foreach (var l in nodeConnections.Values)
+            for (int a = 0; a < l.Count; a++)
+                for (int b = 0; b < l.Count; b++)
+                    if (l[a] != l[b]) nbrs[l[a]].Add(l[b]);
+        net.SegmentNeighbours = nbrs;
         net.NodeDegree = nodeDegree;
         net.NodeMaxWidth = nodeMaxWidth;
         return net;
@@ -923,4 +977,30 @@ public class RoadNetwork
             .ToArray();
         return holes.Length > 0 ? new Polygon(exterior, holes) : new Polygon(exterior);
     }
+    /// <summary>A cheap, deterministic fingerprint of the map's GEOMETRY.
+    /// The tape names the map, but a name alone does not pin its shape: if a
+    /// map definition changes, an old screenshot no longer matches the roads
+    /// the tape was recorded against. One checksum makes that checkable, and
+    /// it is computed once per run, not per frame.</summary>
+    public static string MapFingerprint(RoadNetwork net)
+    {
+        long sum = 0;
+        long fnv = 0x811C9DC5L;
+        void mix(long v)
+        {
+            fnv = (fnv ^ v) * 0x01000193L;
+            fnv &= 0xFFFFFFFFL;
+            sum += v;
+        }
+        mix(net.Segments.Count);
+        mix(net.Signs.Count);
+        foreach (var seg in net.Segments)
+        {
+            mix((long)(seg.X1 * 1000)); mix((long)(seg.Y1 * 1000));
+            mix((long)(seg.X2 * 1000)); mix((long)(seg.Y2 * 1000));
+            mix((long)(seg.Width * 1000)); mix(seg.Oneway ? 1 : 0);
+        }
+        return $"segs={net.Segments.Count} signs={net.Signs.Count} sum={sum:X} fnv={fnv:X}";
+    }
+
 }

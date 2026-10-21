@@ -1,5 +1,12 @@
 # Multi-Car Plan (parallel test runs)
 
+> **Status 2026-10-19 (code-verified):** all steps are DONE and the plan's
+> contract is what the code implements today. Two decisions in this document
+> have since been superseded and are marked below: the 4-color palette (now
+> seven vehicle sprites) and "no car–car collisions in this phase" (collisions
+> ARE implemented now - see `CarCollisions.cs` and SPEC.md). The rest still
+> matches `SimEngine.cs`, `GameApi.cs` and `MapRenderer.cs`.
+
 Goal: several cars on the map at once, each with its own driver state,
 controls, test flags and HUD label — so e2e scenarios can run in parallel.
 The Godot frontend is **already multi-capable** (`_carNodes` per uid, TAB
@@ -29,6 +36,9 @@ small Godot additions.
 5. **No car–car collisions in this phase** — moving cars pass through each
    other (today's behavior). SAT stop-on-contact exists only for static
    obstacles. Collisions are a separate, later decision.
+   *(SUPERSEDED 2026-09-06: car-to-car avoidance + contact resolution are
+   implemented in `CarCollisions.cs` and run per substep in `SimEngine.Tick`;
+   `--no-collisions` on the host is the isolation switch.)*
 6. **`/state` shape** — legacy top-level fields stay (primary car) AND a
    new `cars` array is always exported (empty when no cars). Godot already
    prefers the array; it switches over automatically.
@@ -62,17 +72,27 @@ see deleted `tinted_car_sprite`), committed as PNGs in `assets/`.
 ```json
 {
   "car_uid": 3,
-  "x": ..., "y": ..., "heading": ...,          // rear axle, world px (as today)
+  "x": ..., "y": ..., "heading": ...,          // rear axle, world METRES
   "speed_kmh": ..., "level": ...,              // what Godot reads today
   "segment": ..., "progress": ...,             // for per-car readouts
   "on_road": ..., "wrong_side": ...,
   "blinker_left": ..., "blinker_right": ...,   // per-car blinker lights
-  "hazard": ...,
-  "color": "yellow",                            // red|blue|yellow|white
+  "hazard": ..., "braking": ..., "accelerating": ...,
+  "headlights_on": ..., "taillights_on": ...,
+  "in_contact": ..., "crash_episodes": ..., "contact_with": ...,
+  "body_corners": [[x, y], ...],               // the crash-detection box, metres
+  "driver": "BICYCLE" | "FREE",
+  "color": "blue",                              // vehicle model name
   "flags": {"green": [x, y, h] | null, "red": [x, y, h] | null},
-  "hud_label": "7/21" | null
+  "hud_label": "7/24" | null
 }
 ```
+
+`color` is one of `Config.CAR_COLORS` = `blue`, `silver`, `police`, `tan`,
+`tractor`, `pickup`, `mixer`, assigned as `(uid-1) % 7` unless
+`POST /teleport {"color": ...}` overrides it. `POST /teleport` also takes
+`"reverse": true` to spawn facing the OTHER way along the same two-way road
+(two-way traffic in the crossing-stress runs).
 
 ---
 
@@ -181,6 +201,11 @@ see deleted `tinted_car_sprite`), committed as PNGs in `assets/`.
 - Car–car collision physics (SAT exists for static obstacles; reusing it
   for moving pairs is a separate task with its own design questions:
   full stop vs. yield, which car yields, validator interaction)
+  — **DONE since 2026-09-06**, see `CarCollisions.cs`.
 - A parallel e2e runner itself (threads in `test_turning.py` or a new
-  script) — the sim will be ready for it; building the runner is a follow-up
-- Per-car cockpit views in `tools/controller.py`
+  script) — the sim will be ready for it; building the runner is a follow-up.
+  — the crossing-stress runners (`run_crossing_stress_test`) are exactly this:
+  50 cars in one scenario, driven through the API.
+- Per-car cockpit views in `tools/controller.py` — the cockpit itself is
+  gone (pygame); the Godot client's click-to-inspect car window (fed by
+  `GET /car/{uid}/decisions`) is the equivalent.

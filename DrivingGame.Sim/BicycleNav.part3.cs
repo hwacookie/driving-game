@@ -1061,6 +1061,29 @@ public sealed partial class BicycleNav
     // Per-frame update
     // ====================================================================
 
+    /// <summary>Put the car into the PARKED state where it stands (POST /park,
+    /// docs §8 'Parked car'). The nav's own parking manoeuvre ends in exactly
+    /// this state; this is the entry point for a car that was PLACED into a
+    /// spot instead of driven into one - the scenario needs an obstruction
+    /// that is a real car: engine off, no route, it stays put, and every
+    /// other car has to pass it (R32). Parking lights come on.</summary>
+    public void ParkNow()
+    {
+        Parked = true;
+        ParkStyle = "forward";
+        _parkStyleLocked = true;
+        ParkPhase = "parked";
+        _reversePark = null;
+        _mergeEpisode = null;
+        LaneChangeSignal = null;
+        _prevLaneChangeSignal = null;
+        var car = _car;
+        car.Speed = 0.0;
+        car.TargetSpeed = 0.0;
+        car.RecordDecision(_navTime,
+            "[PARK] parked where it stands - engine off, no route");
+    }
+
     public void Update(double dt, ControlInput control)
     {
         var car = _car;
@@ -1161,6 +1184,8 @@ public sealed partial class BicycleNav
         // from MERGE_SIGNAL_AHEAD_M before the merge zone starts, off once the car
         // has settled onto the new line (past s1).
         LaneChangeSignal = null;
+        if (_car.OvertakeShiftM > 0.05)
+            LaneChangeSignal = "left";
         if (_mergeEpisode is not null && _ref is not null)
         {
             var (s0, s1, direction) = _mergeEpisode.Value;

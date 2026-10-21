@@ -415,7 +415,8 @@ public static class Raceline
         List<(double X, double Y)> P,
         List<(double X, double Y)> N,
         StationProps[] stationProps,
-        List<(double X, double Y)? >? junctionNodes = null)
+        List<(double X, double Y)? >? junctionNodes = null,
+        double leftReliefM = 0.0)
     {
         // Cache the eroded pavement on the network: it never changes, and
         // both the erosion (a buffer over the whole map) and the repeated
@@ -668,7 +669,11 @@ public static class Raceline
             }
             // One-way roads have no oncoming lane, so the centreline bound does
             // not apply; everywhere else it does, scaled by f_near near a node.
-            double lft = onewayI ? -left : centreLimit * fNear;
+            // A COMMITTED pass (R32) is the one case where the oncoming half may
+            // be used: the bound relaxes by the requested relief and never past
+            // the left kerb. 0 relief = the hard bound, unchanged.
+            double lft = onewayI ? -left
+                               : Math.Max(-left, centreLimit * fNear - leftReliefM);
             if (atJuncTwoWay)
                 lft = Math.Max(lft, tJunc + centreLimit * fNear);
             if (lft > hgt)                          // degenerate / very narrow
@@ -818,10 +823,11 @@ public static class Raceline
         public double? MergeFromM { get; }
         public double MergeS0 { get; }
         public double MergeS1 { get; }
+        public double LeftReliefM { get; }
 
         public SolveCacheKey(List<(double X, double Y)> rounded, double ds,
             double? baseOffset, bool autoBase, double? mergeFromM,
-            double mergeS0, double mergeS1)
+            double mergeS0, double mergeS1, double leftReliefM)
         {
             Q = new long[rounded.Count * 2];
             for (int i = 0; i < rounded.Count; i++)
@@ -836,6 +842,7 @@ public static class Raceline
             MergeFromM = mergeFromM is null ? null : Math.Round(mergeFromM.Value, 3);
             MergeS0 = Math.Round(mergeS0, 3);
             MergeS1 = Math.Round(mergeS1, 3);
+            LeftReliefM = Math.Round(leftReliefM, 3);
         }
 
         public bool Equals(SolveCacheKey? other)
@@ -844,6 +851,7 @@ public static class Raceline
             return Ds == other.Ds && AutoBase == other.AutoBase
                 && BaseOffset == other.BaseOffset && MergeFromM == other.MergeFromM
                 && MergeS0 == other.MergeS0 && MergeS1 == other.MergeS1
+                && LeftReliefM == other.LeftReliefM
                 && Q.SequenceEqual(other.Q);
         }
 
@@ -861,6 +869,7 @@ public static class Raceline
                 if (MergeFromM is not null) h ^= BitConverter.DoubleToInt64Bits(MergeFromM.Value).GetHashCode() + 23;
                 h ^= BitConverter.DoubleToInt64Bits(MergeS0).GetHashCode();
                 h ^= BitConverter.DoubleToInt64Bits(MergeS1).GetHashCode();
+                h ^= BitConverter.DoubleToInt64Bits(LeftReliefM).GetHashCode() + 31;
                 return h;
             }
         }
@@ -901,10 +910,11 @@ public static class Raceline
         bool autoBase = false,
         double? mergeFromM = null,
         double mergeS0 = 0.0,
-        double mergeS1 = 0.0)
+        double mergeS1 = 0.0,
+        double leftReliefM = 0.0)
     {
         var key = new SolveCacheKey(rounded, ds, baseOffset, autoBase,
-                                    mergeFromM, mergeS0, mergeS1);
+                                    mergeFromM, mergeS0, mergeS1, leftReliefM);
         lock (_cacheLock)
         {
             if (_solveCache.TryGetValue(key, out var hit))
@@ -914,7 +924,7 @@ public static class Raceline
             }
         }
         var result = SolveLineImpl(network, rounded, routeSegIdx, ds, baseOffset,
-                                   autoBase, mergeFromM, mergeS0, mergeS1);
+                                   autoBase, mergeFromM, mergeS0, mergeS1, leftReliefM);
         lock (_cacheLock)
         {
             _misses++;
@@ -953,7 +963,8 @@ public static class Raceline
         bool autoBase = false,
         double? mergeFromM = null,
         double mergeS0 = 0.0,
-        double mergeS1 = 0.0)
+        double mergeS1 = 0.0,
+        double leftReliefM = 0.0)
     {
         // How far the driven line may deviate from the nominal lane position.
         // The curvature objective alone lets the solver abandon its lane by a
@@ -969,7 +980,7 @@ public static class Raceline
         var props = StationSegments(network, routeSegIdx, P);
         var (N, K) = NormalsAndCurvature(P, ds);
         var junction = JunctionNodePerStation(network, P);
-        var (lo, hi) = LegalCorridor(network, P, N, props, junction);
+        var (lo, hi) = LegalCorridor(network, P, N, props, junction, leftReliefM);
 
         double[] baseProf;
         BaseNominal baseNom;

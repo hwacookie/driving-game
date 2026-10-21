@@ -408,11 +408,21 @@ public class RacelineReferenceTests
     // ------------------------------------------------------------------
 
     /// <summary>RE-BASELINE: rewrites data/raceline_reference/basic.json from the
-    /// CURRENT C# implementation. The original dump came from the retired pygame
-    /// repo (tools/raceline_reference.py); per user decision the C# codebase is
-    /// now its own reference, so this test pins current behaviour as a regression
-    /// guard instead of Python parity. Run on purpose after intentional raceline
-    /// changes, then re-run the suite:
+    /// CURRENT C# implementation AND THE CURRENT MAP. The original dump came
+    /// from the retired pygame repo (tools/raceline_reference.py); per the user
+    /// decision of 2026-09-11 the C# codebase is its own reference, so this
+    /// pins current behaviour as a regression guard, not Python parity.
+    ///
+    /// The per-case tests are coupled to the MAP LAYOUT (see the note above
+    /// NetworkMatchesReference): a deliberate map edit - a road split, a tile
+    /// deleted - invalidates the recorded routes, so the baseline has to be
+    /// rebuilt from the current network, not just re-solved on the old inputs.
+    /// Each recorded route is re-resolved by its NODE NAMES on the current map;
+    /// a route whose nodes no longer connect is dropped and reported, so the
+    /// rebuild never silently solves a route that does not exist.
+    ///
+    /// Run on purpose after intentional raceline or map changes, then re-run
+    /// the suite:
     ///   dotnet test DrivingGame.Sim.Tests/ --filter "FullyQualifiedName~RebaselineReferenceFile"
     /// </summary>
     [Fact(Skip = "manual re-baseline tool - run on purpose, then re-run the reference tests")]
@@ -420,7 +430,10 @@ public class RacelineReferenceTests
     {
         var reference = LoadReference();
         var network = TestMaps.BuildBasicTestMap();
-        InjectPythonGeometry(network);
+        // NO InjectPythonGeometry here: the baseline is regenerated FROM the
+        // current map, so its `safe` polygon is the production (NTS) erosion -
+        // which is exactly what the gate tests then inject back, making the
+        // injected and the production path identical by construction.
 
         using var origDoc = JsonDocument.Parse(File.ReadAllText(FindReferenceFile()));
         var root = origDoc.RootElement;
@@ -436,17 +449,47 @@ public class RacelineReferenceTests
             new(a.Select(v => (JsonNode)v).ToArray());
 
         var casesJson = new JsonArray();
+        var dropped = new List<string>();
         foreach (var c in reference.Cases)
         {
-            // Same pipeline as the gate tests: solve on the injected geometry,
+            // Re-resolve the recorded route on the CURRENT map by node name.
+            // Segment INDICES shift with every map edit, so they are never
+            // carried over - only the node chain is.
+            var segIdx = new List<int>();
+            var chain = new List<string>();
+            bool resolvable = true;
+            for (int i = 0; i + 1 < c.Nodes.Length; i++)
+            {
+                var hops = HopOf(network, c.Nodes[i], c.Nodes[i + 1]);
+                if (hops is null) { resolvable = false; break; }
+                var (idxs, mids) = hops.Value;
+                segIdx.AddRange(idxs);
+                chain.Add(c.Nodes[i]);
+                chain.AddRange(mids);
+            }
+            if (!resolvable || segIdx.Count == 0)
+            {
+                dropped.Add(c.Name);
+                continue;
+            }
+            chain.Add(c.Nodes[^1]);
+
+            // The recorded route may have been re-drawn on the current map
+            // (a road split at a new node), so the node chain is rebuilt too -
+            // the rounded polyline must follow the SAME chain the segments
+            // describe, or the two halves of the case disagree.
+            var rounded = RoadNetworkGeometry.SmoothChain(
+                chain.Select(n => network.Nodes[n]).ToList());
+
+            // Same pipeline as the gate tests: solve on the regenerated geometry,
             // intermediates from the resampled rounded centerline.
             var result = Raceline.SolveLine(
-                network, c.Rounded, c.SegIdx.ToList(),
+                network, rounded, segIdx,
                 baseOffset: c.BaseOffset, autoBase: c.AutoBase,
                 mergeFromM: c.MergeFromM, mergeS0: c.MergeS0, mergeS1: c.MergeS1);
 
-            var (P, S, _) = Raceline.Resample(c.Rounded, Raceline.SampleM);
-            var props = Raceline.StationSegments(network, c.SegIdx.ToList(), P);
+            var (P, S, _) = Raceline.Resample(rounded, Raceline.SampleM);
+            var props = Raceline.StationSegments(network, segIdx, P);
             var (N, K) = Raceline.NormalsAndCurvature(P, Raceline.SampleM);
             var junction = Raceline.JunctionNodePerStation(network, P);
             var (lo, hi) = Raceline.LegalCorridor(network, P, N, props, junction);
@@ -464,21 +507,21 @@ public class RacelineReferenceTests
             casesJson.Add(new JsonObject
             {
                 ["name"] = c.Name,
-                ["nodes"] = new JsonArray(c.Nodes.Select(n => (JsonNode)n).ToArray()),
-                ["seg_idx"] = new JsonArray(c.SegIdx.Select(i => (JsonNode)i).ToArray()),
+                ["nodes"] = new JsonArray(chain.Select(n => (JsonNode)n).ToArray()),
+                ["seg_idx"] = new JsonArray(segIdx.Select(i => (JsonNode)i).ToArray()),
                 ["kwargs"] = kwargs,
-                ["rounded"] = PtsJson(c.Rounded),
+                ["rounded"] = PtsJson(rounded),
                 ["P"] = PtsJson(result.Points),
-                ["N"] = PtsJson(result.Normals),
+                ["N"] = PtsJsonInto(result.Normals, 1.0),   // unit normals: NO frame scale
                 ["offsets"] = Arr(result.Offsets),
                 ["cum"] = Arr(result.Cum),
                 ["K"] = Arr(K),
                 ["lo"] = Arr(lo),
                 ["hi"] = Arr(hi),
                 ["base_prof"] = Arr(baseProf),
-                ["props"] = new JsonArray(c.Props.Select(p =>
+                ["props"] = new JsonArray(props.Select(p =>
                     (JsonNode)new JsonArray(p.Oneway ? 1 : 0, p.Width, p.Lanes, p.Parking)).ToArray()),
-                ["junction"] = new JsonArray(c.Junction.Select(j =>
+                ["junction"] = new JsonArray(junction.Select(j =>
                     j is null ? (JsonNode?)null
                               : new JsonArray(j.Value.X * pxPerM, j.Value.Y * pxPerM)).ToArray()),
             });
@@ -488,17 +531,20 @@ public class RacelineReferenceTests
         {
             ["map"] = root.GetProperty("map").GetString()!,
             ["pxPerM"] = pxPerM,
-            ["corner_radius_m"] = root.GetProperty("corner_radius_m").GetDouble(),
-            ["corner_arc_steps"] = root.GetProperty("corner_arc_steps").GetInt32(),
-            ["node_count"] = reference.NodeCount,
-            ["segment_count"] = reference.SegmentCount,
-            ["nodes"] = new JsonObject(reference.Nodes.ToDictionary(
+            ["corner_radius_m"] = Config.ROAD_CORNER_RADIUS_M,
+            ["corner_arc_steps"] = 10,
+            ["node_count"] = network.Nodes.Count,
+            ["segment_count"] = network.Segments.Count,
+            ["nodes"] = new JsonObject(network.Nodes.ToDictionary(
                 kv => kv.Key, kv => (JsonNode)new JsonArray(kv.Value.X * pxPerM,
                                                             kv.Value.Y * pxPerM))),
-            ["node_degree"] = new JsonObject(reference.NodeDegree.ToDictionary(
+            ["node_degree"] = new JsonObject(network.NodeDegree.ToDictionary(
                 kv => kv.Key, kv => (JsonNode)kv.Value)),
-            ["paved"] = JsonNode.Parse(root.GetProperty("paved").GetRawText())!,
-            ["safe"] = JsonNode.Parse(root.GetProperty("safe").GetRawText())!,
+            // Map geometry regenerated from the CURRENT network (GeoJSON in the
+            // fixture's own frame) - the old dump's `paved`/`safe` describe a
+            // map that no longer exists.
+            ["paved"] = GeoJsonOf(network.GetPavedPolygon(), pxPerM),
+            ["safe"] = GeoJsonOf(network.RacelineSafe, pxPerM),
             ["cases"] = casesJson,
         };
 
@@ -507,6 +553,81 @@ public class RacelineReferenceTests
         using (var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
             outDoc.WriteTo(writer);
         _reference = null;   // force reload on the next test run
+        Console.WriteLine($"re-baseline: {casesJson.Count} cases kept, " +
+                          $"{dropped.Count} dropped (route no longer on the map): " +
+                          $"{string.Join(", ", dropped)} - {path}");
+    }
+
+    /// <summary>The segment run joining two nodes on the CURRENT map: direct
+    /// when one segment connects them, otherwise ONE intermediate node - which
+    /// is what a deliberate road split introduces (a 300 m segment becomes two
+    /// 150 m segments through a new mid node). Returns (segment indices,
+    /// intermediate node names), or null when the two nodes are not connected
+    /// at all - the route then no longer exists and the case is dropped.
+    ///
+    /// One level of splitting is enough for the map edits this project makes
+    /// (a road is split, not subdivided repeatedly); deeper chains report as
+    /// unresolvable rather than guessing a path through the graph.</summary>
+    private static (List<int>, List<string>)? HopOf(RoadNetwork net, string a, string b)
+    {
+        var direct = SegIdxOf(net, a, b);
+        if (direct is not null) return (new List<int> { direct.Value }, new List<string>());
+        // One intermediate node: what a deliberate road split introduces.
+        // Walk the segments that touch `a` (NodeConnections is only filled by
+        // the OSM loader, so the adjacency comes from the segment list itself)
+        // and see whether any of their far ends connects to `b`.
+        for (int i = 0; i < net.Segments.Count; i++)
+        {
+            var s = net.Segments[i];
+            if (s.StartNode != a && s.EndNode != a) continue;
+            var m = s.StartNode == a ? s.EndNode : s.StartNode;
+            if (m == b || m == a) continue;
+            var h2 = SegIdxOf(net, m, b);
+            if (h2 is null) continue;
+            return (new List<int> { i, h2.Value }, new List<string> { m });
+        }
+        return null;
+    }
+
+    /// <summary>Segment index joining two nodes in either direction, or null
+    /// when the current map has no such road.</summary>
+    private static int? SegIdxOf(RoadNetwork net, string a, string b)
+    {
+        for (int i = 0; i < net.Segments.Count; i++)
+        {
+            var s = net.Segments[i];
+            if ((s.StartNode == a && s.EndNode == b) ||
+                (s.StartNode == b && s.EndNode == a))
+                return i;
+        }
+        return null;
+    }
+
+    /// <summary>NTS geometry -> the shapely __geo_interface__ object the
+    /// loader reads, written in the fixture's own frame.</summary>
+    private static JsonNode GeoJsonOf(Geometry g, double pxPerM)
+    {
+        List<Polygon> polys = g switch
+        {
+            MultiPolygon mp => mp.Geometries.Cast<Polygon>().ToList(),
+            Polygon p => new List<Polygon> { p },
+            _ => new List<Polygon>(),
+        };
+        JsonArray Rings(Polygon poly)
+        {
+            var rings = new List<LinearRing> { (LinearRing)poly.ExteriorRing };
+            rings.AddRange(poly.InteriorRings.Select(r => (LinearRing)r));
+            return new(rings.Select(r =>
+                (JsonNode)new JsonArray(r.Coordinates.Select(c =>
+                    (JsonNode)new JsonArray(c.X * pxPerM, c.Y * pxPerM)).ToArray())).ToArray());
+        }
+        return new JsonObject
+        {
+            ["type"] = polys.Count == 1 ? "Polygon" : "MultiPolygon",
+            ["coordinates"] = polys.Count == 1
+                ? Rings(polys[0])
+                : new JsonArray(polys.Select(pp => (JsonNode)Rings(pp)).ToArray()),
+        };
     }
 
     static void InjectPythonGeometry(RoadNetwork network)

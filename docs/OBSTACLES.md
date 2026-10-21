@@ -1,5 +1,15 @@
 # Obstacles — Specification
 
+> **Status 2026-10-19 (code-verified):** Part 1 is implemented in
+> `DrivingGame.Sim/Obstacles.cs` (`Obstacle`, `ObstacleGeometry`,
+> `ObstacleManager`) and covered by `SafetySystemsTests`. Placement today
+> goes through the **REST API only** — the Godot client has no palette UI
+> (the pygame `obstacle_ui.py` it used to have was deleted at M5), so the
+> palette section below is HISTORICAL. `ObstacleManager.Move()` still exists
+> (it re-aligns at the new spot) but nothing calls it: there is no drag-and-
+> drop path in the client yet. Obstacles are also NOT drawn by the client
+> yet - they block cars invisibly.
+
 Foundation for the **Ausweichen** maneuver (`DRIVING_MANEUVERS.md` §6):
 before avoidance behavior can be specified and tested, obstacles must be
 placeable on the road. This document covers **Part 1: placement tooling +
@@ -11,10 +21,12 @@ it remains to be specified in `DRIVING_MANEUVERS.md` §6.
 - An **obstacle** is a world object with position `(x, y)`, heading, type and
   color. It is drawn into the scene and exists until deleted.
 - Obstacles come in two **classes**:
-  - **Static** (implemented in Part 1): never moves. Current type: the
-    *parked car* — same size as the player car (`config.CAR_LENGTH` ×
-    `CAR_WIDTH`, 4.4 m × 1.8 m), same sprite asset, recolored. It is scenery that other cars must deal with
-    (`DRIVING_MANEUVERS.md` §6).
+- **Static** (implemented in Part 1): never moves. Current type: the
+    *parked car* — sedan-sized (`Config.CAR_LENGTH_M` × `CAR_WIDTH_M`,
+    4.4 m × 1.8 m) REGARDLESS of its color: `ObstacleGeometry.BoxCorners`
+    always uses the sedan box, so an obstacle is not (yet) per-model sized
+    like a live car is. Same sprite assets, recolored. It is scenery that
+    other cars must deal with (`DRIVING_MANEUVERS.md` §6).
   - **Movable** (later parts, not yet specified): other cars, pedestrians,
     children. They move — they may leave the collision point before the car
     arrives, and may only be visible from far away — so avoiding them requires
@@ -47,10 +59,13 @@ it remains to be specified in `DRIVING_MANEUVERS.md` §6.
 - Every obstacle has a **stable id** (assigned on placement) — required for
   removal via the REST API and unambiguous in saved layouts.
 
-## Palette UI (the box next to the minimap)
+## Palette UI (the box next to the minimap) — HISTORICAL (pygame, retired)
 
-A fixed panel in the top-right corner, **immediately left of the minimap**
-(the HUD stays bottom-left; the palette must not overlap either).
+The pygame frontend had a fixed panel in the top-right corner, **immediately
+left of the minimap** (the HUD stayed bottom-left; the palette must not
+overlap either). The Godot client does NOT reproduce it - obstacle placement
+is REST-only, and the client draws only what the API reports. Keep the
+section as the interaction spec if a palette is ever rebuilt in Godot.
 
 ```
 ┌───────────────┬────────────┐
@@ -68,9 +83,7 @@ A fixed panel in the top-right corner, **immediately left of the minimap**
 - **SAVE / LOAD** buttons (see "Save / Load" below).
 - **Trashcan** at the bottom of the box.
 
-### Interactions (left mouse button, shared with map panning: a LMB
-hold-drag on empty map area pans the camera; every press that starts a
-palette drag - a slot or a world obstacle - is consumed by the UI)
+### Interactions (left mouse button; HISTORICAL — pygame only)
 
 1. **Place**: press on a palette slot → a ghost car follows the cursor over
    the map, already shown with its final heading (lane travel direction under
@@ -91,9 +104,12 @@ rejection on release is never surprising.
 
 ## Save / Load (Obstacle Layouts)
 
-The road network itself is never saved — it comes from the OSM database or
-the test-map builder. What is saved is the **obstacle layout** on top of it,
-so that a scenario can be set up once and driven again later (and shared).
+The road network itself is never saved — it comes from the OSM cache
+(`data/osm_cache/`) or the test-map builder. What is saved is the **obstacle
+layout** on top of it, so that a scenario can be set up once and driven
+again later (and shared). In the C# engine this is `ObstacleManager`:
+`Save(name)`, `Load(name, network)`, `ListLayouts()`, `SanitizeName(name)`,
+with files under `data/obstacles/<map_name>/<name>.json`.
 
 - A **layout** = the current set of obstacles: for each one its type, color,
   world coordinates `(x, y)` and heading. Nothing else (car position, camera)
@@ -143,13 +159,16 @@ through one (decision 2026-08-25). Implemented as a per-frame geometric check
 in the same pattern as the off-road detector:
 
 - **Detection**: every frame, test the player car's body box (the same
-  four-corner geometry the on-road check uses) against each obstacle's
-  footprint (for now: 4.5 m × 2.0 m rectangle at its position and heading;
+  four-corner geometry the on-road check uses, at the car's REAL per-class
+  footprint from `Config.VEHICLE_SIZES`) against each obstacle's
+  footprint (for now: a 4.4 m × 1.8 m sedan rectangle at its position and
+  heading — `ObstacleGeometry.BoxCorners` always uses the sedan box;
   applies to both classes — a movable obstacle is checked where it is *now*).
   Intersection = contact.
 - **Response — physically plausible, per the hard rule in AGENTS.md**:
   - On first contact the car brakes with full braking deceleration
-    (`A_BRAKE`) until stopped — no instant velocity zeroing from speed.
+    (`Config.CAR_BRAKING` = 10 m/s²) until stopped — no instant velocity
+    zeroing from speed.
   - While in contact the car does not move into the obstacle: forward motion
     is clamped so the two boxes never interpenetrate (the car rests against
     it, like against a wall).
@@ -164,9 +183,12 @@ in the same pattern as the off-road detector:
 
 ## Rendering
 
-- Obstacles are drawn like the player car: same sprite pipeline (scale with
-  zoom, rotate to heading), above road markings and below HUD/minimap/palette.
-- They do not appear on the minimap (for now).
+- **Not implemented in the Godot client (2026-10-19):** `MapRenderer.cs` has
+  no obstacle path, so a placed obstacle blocks cars but stays invisible on
+  screen. If a visual is added, it should follow the player-car pipeline
+  (sprite, scale with zoom, rotate to heading), above road markings and
+  below HUD/minimap.
+- They do not appear on the minimap.
 
 ## Explicitly Out of Scope (Part 1)
 

@@ -67,10 +67,26 @@ The first list should contain only the boundaries above. A new use of a
 metre value that appears there is either a boundary you are adding or a
 bug.
 
+## Audit results (2026-10-19, verified)
+
+- `PIXELS_PER_METER` — empty.
+- `pxPerM`/`PxPerM` — only `DrivingGame.Sim.Tests/RacelineReferenceTests.cs`
+  (the fixture boundary above). The Godot client does not name a scale factor
+  at all: `Camera2D.zoom` IS px/m and is used directly.
+- leftover `…Px` names (`git ls-files '*.cs' | xargs grep -nE
+  "(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*Px([^A-Za-z0-9_]|$)"` minus
+  `pxPerM|PxPerM`, plus a separate check for bare `Px`/`Py` names) — only
+  `MapRenderer.cs`'s blinker-dot radius (`rPx`, divided back out by
+  `Camera2D.zoom`), which is the client's own screen frame and allowed by
+  rule 3.
+
 ## History
 
-The frame flip happened in `feat/unified-units` (2026-09): `Config.PIXELS_PER_METER`
+The frame flip happened in `feat/unified-units` (2026-09 → 2026-10): `Config.PIXELS_PER_METER`
 went from 2 to 1 and then away entirely, the sim's world frame became
 metres, and the `pxPerM` parameters threaded through the geometry and
 navigation code were dropped. The `diary/` still describes the old
-pixel frame — that is history, not a current fact.
+pixel frame — that is history, not a current fact. The follow-up naming
+sweep (`2651ca2`) removed the leftover `…Px` sim-frame names, and the
+docs (`SPEC.md`, `REST_API.md`, `TESTING.md`) were reconciled against the
+code on 2026-10-19.

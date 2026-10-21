@@ -387,132 +387,197 @@ START_POINT_NUMBER = {
 # parking approach (parking ramp + kerb drift + back-in + stop at the
 # flag), which is slower - 45 s covers them.
 DETERMINISTIC_TESTS = [
+    # --- Symbolic anchors -------------------------------------------------
+    # expected_end_segment is a segment NAME ("startNode→endNode" - the
+    # arrow character, see RoadSegment.Name and GET /segment_names), NOT a
+    # positional index. run_deterministic_test resolves names to indices once
+    # at startup and fails fast when a name is unknown, so adding or deleting
+    # a track can never silently move what a scenario anchors to (the old
+    # "+48 index shift" hazard). An index in a test is a coincidence, a name
+    # is an intention.
+    #
+    # Tuple fields (see run_deterministic_test):
+    #   0 start_point  1 direction  2 target km/h  3 expected end segment
+    #   4 duration s   5 description 6 start_progress 7 kerb_check
+    #   8 end_flag_progress  9 expect_wrong_side (NEGATIVE test)
+    #  10 extra_cars: list of dicts {start_point|segment, progress, speed_mps,
+    #      throttle, expect_end} - other cars in the same world. throttle=False
+    #      leaves a car where it was put: that is how a PARKED car is staged.
     # 90-degree corners (the classic reported bug)
-    ('corner_right_entry', 'right', 50, 6, 60.0,
+    ('corner_right_entry', 'right', 50, 'cornerR_c→cornerR_w', 60.0,
      "Taking a sharp 90° right corner"),
-    ('corner_left_entry', 'left', 50, 8, 60.0,
+    ('corner_left_entry', 'left', 50, 'cornerL_c→cornerL_e', 60.0,
      "Taking a sharp 90° left corner"),
     # T-junction (perpendicular 3-way)
-    ('tjunction_from_top', 'left', 50, 11, 60.0,
+    ('tjunction_from_top', 'left', 50, 'tjunc_center→tjunc_e', 60.0,
      "T-junction: turning left off the stem"),
-    ('tjunction_from_top', 'right', 50, 10, 60.0,
+    ('tjunction_from_top', 'right', 50, 'tjunc_center→tjunc_w', 60.0,
      "T-junction: turning right off the stem"),
+    # SAME two maneuvers WITH ONCOMING TRAFFIC on the bar: a second car
+    # drives the cross street directly against the turning car's path. The
+    # pair must not touch at the node - the turn has to be taken with the
+    # gap that is actually there, not by hoping the bar is empty.
+    ('tjunction_from_top', 'left', 50, 'tjunc_center→tjunc_e', 60.0,
+     "T-junction left turn WITH an oncoming car on the bar (must not collide "
+     "at the node)",
+     TURN_SPAWN_PROGRESS, False, END_FLAG_PROGRESS, False,
+     [{'start_point': 'tjunction_from_east', 'progress': 0.5,
+       'speed_mps': 50 / 3.6, 'throttle': True}]),
+    ('tjunction_from_top', 'right', 50, 'tjunc_center→tjunc_w', 60.0,
+     "T-junction right turn WITH an oncoming car on the bar (must not collide "
+     "at the node)",
+     TURN_SPAWN_PROGRESS, False, END_FLAG_PROGRESS, False,
+     [{'start_point': 'tjunction_from_west', 'progress': 0.5,
+       'speed_mps': 50 / 3.6, 'throttle': True}]),
     # Y-intersection (shallow ~40 degree diverging angles)
-    ('y_from_stem', 'left', 50, 14, 60.0,
-     "Y-intersection: taking the left fork"),
-    ('y_from_stem', 'right', 50, 13, 60.0,
-     "Y-intersection: taking the right fork"),
+    # The stem runs NORTH->fork (y_stem 250,400 -> y_center 250,220), so the car
+    # enters HEADING SOUTH: its left hand is EAST, its right hand is WEST. The
+    # fork arms are named by compass quarter, not by turn - y_se (400,50) is
+    # south-EAST and y_sw (100,50) is south-WEST. A left turn therefore ends on
+    # y_center->y_se, a right turn on y_center->y_sw.
+    ('y_from_stem', 'left', 50, 'y_center→y_se', 60.0,
+     "Y-intersection: taking the left fork (the south-east arm)"),
+    ('y_from_stem', 'right', 50, 'y_center→y_sw', 60.0,
+     "Y-intersection: taking the right fork (the south-west arm)"),
     # 4-way crossroads
-    ('crossroads_from_north', 'left', 50, 18, 60.0,
+    ('crossroads_from_north', 'left', 50, 'cross_center→cross_e', 60.0,
      "4-way crossroads: turning left"),
-    ('crossroads_from_north', 'right', 50, 17, 60.0,
+    ('crossroads_from_north', 'right', 50, 'cross_w→cross_center', 60.0,
      "4-way crossroads: turning right"),
-    ('crossroads_from_north', 'straight', 50, 16, 60.0,
+    ('crossroads_from_north', 'straight', 50, 'cross_center→cross_s', 60.0,
      "4-way crossroads: going straight through"),
     # One-way street (legal direction)
-    ('oneway_entry', 'straight', 50, 20, 60.0,
+    ('oneway_entry', 'straight', 50, 'ow_center→ow_e', 60.0,
      "Entering a one-way street in the legal direction"),
     # Mixed one-way/two-way crossroads (tile (4,2)): W spoke is one-way
     # INTO the junction; entering from the west, the car must swing
     # slightly right across the junction into its own lane on the two-way
     # east side (the keep-centre-on-left rule does not apply on the
     # one-way approach - no oncoming traffic there).
-    #
-    # NOTE: the expected end segments below are POSITIONAL indices into
-    # network.segments - they shift when tracks are added to the basic
-    # map. The figure-8 inserted 48 segments at index 104 (Sept 2026),
-    # moving everything after it by +48: old 111/114 -> 159/162, and for
-    # the park tests further down old 109 -> 157. Verify against the node
-    # names if the map changes again.
-    ('mixed_from_west', 'straight', 50, 159, 60.0,
+    ('mixed_from_west', 'straight', 50, 'mixin_center→mixin_e', 60.0,
      "One-way into a two-way crossroads: straight through"),
     # Mixed one-way/two-way crossroads (tile (4,3)): W spoke is one-way
     # OUT of the junction; entering from the east (two-way), the car
     # crosses the junction and eases onto the narrow one-way exit.
-    ('mixed_from_east', 'straight', 50, 162, 60.0,
+    ('mixed_from_east', 'straight', 50, 'mixout_center→mixout_w', 60.0,
      "Two-way into a one-way exit: straight through"),
     # Simple curves (degree-2 nodes, no blinker needed). Under the running
     # protocol only the corner ENTRY is covered (last 20% of the approach
     # + first 20% of the target segment) - the long S-curve traversal the
     # old stop-at-50% protocol measured is out of scope now.
-    ('s_curve', 'straight', 50, 26, 60.0,
+    ('s_curve', 'straight', 50, 's_p3→s_p4', 60.0,
      "Following a zig-zag S-curve road"),
-    # Test 12 overrides: spawn at 50% of the approach segment AND finish
+    # Test 16 overrides: spawn at 50% of the approach segment AND finish
     # at the 50% point of the end segment (tuple fields:
     # start_progress=0.5, kerb_check=False, end_flag_progress=0.5).
-    ('hairpin_entry', 'straight', 50, 29, 60.0,
+    ('hairpin_entry', 'straight', 50, 'hair_corner→hair_b', 60.0,
      "Driving a hairpin bend (entry side)", 0.5, False, 0.5),
-    ('sweeping_curve', 'straight', 50, 31, 60.0,
-     "Following a wide, sweeping curve"),
+    # --- R32 obstruction tests (the two-lane straight road, tile (0,0)) ----
+    # The road is 7 m = ONE driving lane per direction (two lanes in total),
+    # now split at straight_m so arrival can be judged by segment. A car is
+    # parked INSIDE the driving lane of the second stretch, so the lane is
+    # blocked and the only way past is the other lane.
+    ('park_block_overtake', 'straight', 50, 'straight_n→straight_m', 60.0,
+     "A parked car blocks the lane - drive around it (R32 overtake: out into "
+     "the free lane, past the obstruction, back to the right)",
+     0.15, False, 0.85, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 0.5,
+       'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'name': 'parked_car'}]),
+    # Same road, same obstruction, but traffic comes from BOTH ends at once:
+    # the car whose lane is clear may take the shared lane first, the one
+    # that is blocked must wait for it - the single-file passage claim (R26)
+    # decides, and the two must never touch.
+    ('park_block_priority', 'straight', 50, 'straight_m→straight_s', 60.0,
+     "Parked car in one lane + a car from the opposite end: the UNBLOCKED "
+     "car gets the passage, the blocked one waits (R26/R32)",
+     # The end flag sits at 85% of the WHOLE straight, not of one segment
+     # (user decision 2026-10-21): straight_n (y=350) to straight_s (y=50) is
+     # 300 m, so 85% is 255 m along - y=95, which is 70% of segment 1.
+     # The primary therefore has to drive THROUGH the node straight_m (where
+     # the parked car now stands) and stop in the far segment.
+     0.15, False, 0.7, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 1.0,
+       # 50% of the WHOLE straight, not of this segment: straight_n (y=350)
+       # to straight_s (y=50) is 300 m, so the middle is the node straight_m
+       # at y=200 - the junction between the two segments. The obstruction
+       # now sits where the route hands over, so the pass has to work ACROSS
+       # a segment change (user decision 2026-10-21).
+       'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'name': 'parked_car'},
+      {'start_point': 'straight_reverse', 'progress': 0.15,
+       'speed_mps': 50 / 3.6, 'throttle': True,
+       'expect_end': 'straight_n→straight_m', 'name': 'oncoming_car'}]),
+    # A SLOW VEHICLE (10 km/h) in my lane, not a parked one: the obstruction
+    # MOVES, so the pass window moves with it and the overtake has to be
+    # re-evaluated instead of aimed at a fixed spot. R32 calls a crawler an
+    # obstruction (a queue lead that merely happens to be at 0 it must not
+    # pass); R36 keeps the borrow of the oncoming lane at the minimum.
+    ('slow_pass_overtake', 'straight', 50, 'straight_n→straight_m', 60.0,
+     "A slow (10 km/h) car ahead at 35% - overtake it and come back "
+     "(R32 pass of a crawler, R36 minimal borrow)",
+     0.15, False, 0.85, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 0.35,
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'name': 'slow_car'}]),
+    # The SAME crawler with traffic coming from the OTHER end. The shared lane
+    # is a single-file resource, so the overtaking car may NOT enter it while
+    # an oncoming car owns it. What a driver does - and what this scenario
+    # expects (user decision 2026-10-21): brake, CRAWL behind the slow car,
+    # WAIT for the oncoming car to clear the pinch, and only THEN overtake.
+    # Not: stop and stay stopped, not: dive past the crawler head-on.
+    ('slow_pass_priority', 'straight', 50, 'straight_n→straight_m', 60.0,
+     "Slow car ahead + oncoming traffic: brake, crawl behind it, wait, then "
+     "overtake (R26 claim, R32, R36)",
+     0.15, False, 0.85, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 0.70,
+       # 35% of the WHOLE straight, not of this segment: straight_n (y=350)
+       # to straight_s (y=50) is 300 m, so 35% is 105 m along - y=245, which
+       # is 70% of segment 0 (user decision 2026-10-21).
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'name': 'slow_car'},
+      {'start_point': 'straight_reverse', 'progress': 0.15,
+       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
     # Hairpin, entered from the opposite end (reverse direction)
-    ('hairpin_exit', 'straight', 50, 28, 60.0,
+    ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
-    # Roundabout (one-way ring, 4 two-way spokes). 'straight'
-    # (or 'left') at the entry just merges onto the ring and then
-    # keeps circling it FOREVER - a one-way loop has no "next
-    # different segment" to naturally stop at unless the car
-    # actually exits onto a spoke. 'right' does that here
-    # (verified: exits west, segments 28) - a real, completed
+    # Roundabout (one-way ring, 4 two-way spokes). 'straight' (or 'left')
+    # at the entry just merges onto the ring and keeps circling it FOREVER
+    # - a one-way loop has no "next different segment" to naturally stop at
+    # unless the car actually exits onto a spoke. 'right' does that here
+    # (verified: exits west, the rb_west_far spoke) - a real, completed
     # roundabout maneuver instead of an endless circle.
     # The ring is COUNTER-CLOCKWISE (correct for Germany / right-hand
-    # traffic: the island stays on your left). Entering from the north
-    # and going counter-clockwise, the first exit encountered is WEST
-    # (seg 99 = rb_west_far spoke). Monitoring keeps running THROUGH
-    # the intermediate ring segments instead of stopping at the first
-    # one, since only 99 (the actual exit) counts as arrival. Takes
-    # longer than a normal turn (~25s to go most of the way around
-    # before exiting), hence the longer duration override.
-    ('roundabout_from_north', 'right', 40, 99, 60.0,
+    # traffic: the island stays on your left). Entering from the north and
+    # going counter-clockwise, the first exit encountered is WEST.
+    # Monitoring keeps running THROUGH the intermediate ring segments
+    # instead of stopping at the first one, since only the west exit counts
+    # as arrival. Takes longer than a normal turn (~25 s to go most of the
+    # way around before exiting), hence the longer duration override.
+    ('roundabout_from_north', 'right', 40, 'rb_west_far→rb_r16', 60.0,
      "Circling the roundabout and taking the first exit (west)"),
-    # Sliver junction (the real-world segment-815 layout: a 4.16 m
-    # approach stub meeting a 3-way junction where one exit is a
-    # near-90-degree turn). The car must get through the tiny
-    # stub and onto the correct exit without clipping the junction.
-    # NOTE: segment indices shifted from 41/42/43 to 97/96/99 due to
-    # the 64-node roundabout ring, and again to 101/102/103 after the
-    # multi-width U-turn track was added (straight=101 sliv_str,
-    # right=102 sliv_w, left=103 sliv_e).
-    # DISABLED for now (pre-existing failures: car goes off-road on
-    # the short dead-end exits after the turn) - re-enable once the
-    # sliver exit geometry is fixed.
-    # ('sliver_approach', 'straight', 80, 101, 15.0,
-    #  "Sliver junction: going straight through the tiny approach stub"),
-    # ('sliver_approach', 'right', 80, 102, 15.0,
-    #  "Sliver junction: turning right off the tiny approach stub"),
-    # ('sliver_approach', 'left', 80, 103, 15.0,
-    #  "Sliver junction: turning left off the tiny approach stub"),
     # Park from different lateral start positions (docs/DRIVING_MANEUVERS.md
-    # §1 variant). Straight parking avenue (tile (4,1), segment index 109 -
-    # NOTE: the game's state/flag API uses 0-based indices, NOT the 1-based
-    # RoadSegment id 110): two-way, 19.4 m = per side two 3.5 m driving
-    # lanes + a 2.7 m parking lane at the kerb (solid centreline, painted P
-    # marks). The car starts at 15% of the segment and must park at the flag
-    # (50%) with BOTH right-hand wheels within 30 cm of the right kerb (the
-    # extra tuple fields: start_progress, kerb_check) - i.e. INSIDE the
-    # parking lane. Only the lateral spawn position varies between the three,
-    # always on our own side of the road; it is baked into the named start
-    # points. From the left (overtaking) driving lane the car must first
-    # merge right onto the normal line, well before the flag - a human never
-    # backs in from the overtaking lane; from inside the PARKING LANE it
-    # merges LEFT back into traffic first - the parking lane is for
-    # parking, not for travelling (user rules, replace the old "hold
-    # initial line" rule of 2026-08-27).
-    ('park_6lane_left_lane', 'straight', 80, 157, 45.0,
-     "Park from the left (overtaking) driving lane - merge right first", 0.15, True),
-    ('park_6lane_right_lane', 'straight', 80, 157, 45.0,
+    # §1 variant). Straight parking avenue (tile (4,1)): two-way, 19.4 m
+    # = per side two 3.5 m driving lanes + a 2.7 m parking lane at the kerb
+    # (solid centreline, painted P marks). The car starts at 15% of the
+    # segment and must park at the flag (90%) with BOTH right-hand wheels
+    # within 30 cm of the right kerb (the extra tuple fields:
+    # start_progress, kerb_check) - i.e. INSIDE the parking lane.
+    # (2026-10-19, user decision: the two other lateral starts - from the
+    # overtaking lane and from inside the parking lane - are out of the
+    # suite; the plain back-in park from the normal lane stays.)
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
      "Back-in park from the right (normal) driving lane", 0.15, True),
-    ('park_6lane_parking', 'straight', 80, 157, 45.0,
-     "Park from inside the parking lane - rejoin the driving lane first", 0.15, True),
     # NEGATIVE TEST (wrong-side detector) - runs LAST on purpose: the old
-    # test-14 config. Spawn at 80% of segment 29, i.e. right at the
+    # test-14 config. Spawn at 80% of the hairpin approach, i.e. right at the
     # hairpin fillet, already rolling at 50 km/h. The car cannot make the
     # ~166-degree turn in time and slides across the centreline into the
-    # oncoming lane at the tip of the V. This scenario is EXPECTED to
-    # drive wrong-side: it PASSES when the suite detects the violation
-    # (live 'wrong_side' state or the lane-guard frame counter) and FAILS
-    # if the car somehow stays in its own lane - it proves the detection
-    # works instead of testing driving quality.
-    ('hairpin_exit', 'straight', 50, 28, 60.0,
+    # oncoming lane at the tip of the V. This scenario is EXPECTED to drive
+    # wrong-side: it PASSES when the suite detects the violation (live
+    # 'wrong_side' state or the lane-guard frame counter) and FAILS if the
+    # car somehow stays in its own lane - it proves the detection works
+    # instead of testing driving quality.
+    ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "NEGATIVE: spawn too close to the hairpin corner at 50 km/h - must "
      "slide into the oncoming lane and trigger the wrong-side detection",
      0.8, False, 0.5, True),
@@ -526,19 +591,25 @@ DETERMINISTIC_TESTS = [
     # without a game crash and without off-road/wrong-side - the jitter
     # count itself is informational: it shows at how many cars the sim
     # starts stuttering. Dispatched by start_point name, not through
-    # monitor_turn (see run_deterministic_test).
+    # monitor_turn (see run_multi_car_stress_test).
     ('fig8_stress', 'straight', 0, None, 170.0,
-     "Multi-car stress: 51 cars on the figure-8 for 30 s of sim time (drivable density on the 723 m loop, odd count - see STRESS_PHASE_CARS; --stress-cars N overrides)"),
+     "Multi-car stress: 51 cars on the figure-8 for 30 s of sim time "
+     "(drivable density on the 723 m loop, odd count - see STRESS_PHASE_CARS; "
+     "--stress-cars N overrides)"),
     # RIGHT-OF-WAY CROSSING STRESS: 50 cars (25 per direction, interleaved)
     # on the basic map's real degree-4 figure-8 crossing, accelerator held,
-    # run for up to 300 s of sim time or until the FIRST crash (two cars
-    # pinned in contact). Two variants: the signed crossing (tile (2,3),
-    # Vorfahrt signs) and the un-signed crossing (tile (3,3), right-before-
-    # left). Dispatched by start_point name, not through monitor_turn.
-    ('fig8_xing', 'straight', 0, None, 300.0,
-     "Right-of-way crossing (WITH signs): 50 cars, 25/direction, 300 s or first crash"),
-    ('fig8_xing_plain', 'straight', 0, None, 300.0,
-     "Right-of-way crossing (NO signs, right-before-left): 50 cars, 25/direction, 300 s or first crash"),
+    # run for up to CROSSING_MAX_SIM_SECONDS (60 s, user decision 2026-10-19:
+    # "no crash within one minute" = success) of sim time or until the FIRST
+    # crash (two cars pinned in contact). Two variants: the signed crossing
+    # (tile (2,3), Vorfahrt signs) and the un-signed crossing (tile (3,3),
+    # right-before-left). Dispatched by start_point name, not through
+    # monitor_turn.
+    ('fig8_xing', 'straight', 0, None, 60.0,
+     "Right-of-way crossing (WITH signs): 50 cars, 25/direction, 60 s or "
+     "first crash"),
+    ('fig8_xing_plain', 'straight', 0, None, 60.0,
+     "Right-of-way crossing (NO signs, right-before-left): 50 cars, "
+     "25/direction, 60 s or first crash"),
 ]
 
 # Scenarios the NUMBERED suite skips (start_point -> reason). The raw --only
@@ -1153,9 +1224,15 @@ class TurnTester:
                                             crashed, aborted)
 
     # Right-of-way crossing stress: 50 cars, half per direction, run for up
-    # to 300 s of sim time or until the FIRST crash.
+    # to CROSSING_MAX_SIM_SECONDS of SIM time or until the FIRST crash.
+    # User decision 2026-10-19: the run counts as SUCCESS once no car has
+    # crashed within ONE MINUTE of sim time - the old 300 s window ran
+    # "forever" on the wall clock (and at --warp 4 still minutes per
+    # scenario) without adding signal: every crash seen so far happened
+    # within the first ~8-16 s, and a fleet that survives a full minute of
+    # dense two-way flow through one crossing is the behaviour we want.
     CROSSING_N_CARS = 50
-    CROSSING_MAX_SIM_SECONDS = 300.0
+    CROSSING_MAX_SIM_SECONDS = 60.0
     CROSSING_POLL_S = 0.1
 
     @staticmethod
@@ -1202,14 +1279,23 @@ class TurnTester:
         return segs
 
     def _crossing_result(self, start_point: str, passed: bool, aborted: bool,
-                         game_crashed: bool, crash_info: str | None) -> dict:
+                         game_crashed: bool, crash_info: str | None,
+                         metrics: dict | None = None) -> dict:
         """Scenario-level result in print_summary's shape."""
+        m = metrics or {}
         return {
             'start_point': start_point,
             'direction': 'crossing',
             'passed': passed and not aborted,
             'aborted': aborted,
             'off_road_detected': False,
+            'centreline_crossings': m.get('crossings', 0),
+            'off_road_hits': m.get('off_road_hits', 0),
+            'wall_duration_s': m.get('wall_s', 0.0),
+            'sim_duration_s': m.get('sim_s', 0.0),
+            'flow_m_per_s': m.get('flow_per_car_s', 0.0),
+            'driving_cars': m.get('cars', 0),
+            'warp': m.get('warp'),
             'instant_snap_detected': False,
             'teleport_detected': False,
             'game_crashed': game_crashed,
@@ -1228,9 +1314,9 @@ class TurnTester:
                                  label: str | None = None) -> dict:
         """Spawn 50 cars (25 per direction, interleaved) on one figure-8
         crossing loop, hold the accelerator on all of them, and run for up
-        to 300 s of sim time or until the FIRST crash (a car reporting
-        'in_contact'). Passes only if the whole fleet drives the full
-        window without a crash.
+        to CROSSING_MAX_SIM_SECONDS (60 s) of sim time or until the FIRST
+        crash (a car reporting 'in_contact' / a crash episode). Passes once
+        the fleet survives that whole minute without a crash.
         """
         if results is None:
             results = load_results()
@@ -1274,11 +1360,21 @@ class TurnTester:
         # same midpoint when n_cars > len(loop).
         colors = ['blue', 'silver', 'police', 'tan', 'tractor', 'pickup', 'mixer']
         offset = self._crossing_safe_offset(loop, n_cars)
+        # The spawn discipline (user rule): the fleet must not move AT ALL
+        # while it is being placed. A rolling start meant the first cars were
+        # already at speed when the last one appeared, so the whole fleet
+        # arrived at the crossing at once and locked it. Freeze the sim,
+        # place every car at rest, then release the brake.
+        try:
+            self._api_session.post(f"{API_URL}/freeze", timeout=5,
+                                   json={'frozen': True})
+        except requests.exceptions.RequestException:
+            pass
         for k, (seg, prog) in enumerate(
                 self._arc_uniform_spawns(loop, n_cars, offset=offset)):
             reverse = (k % 2 == 1)
             self._api_session.post(f"{API_URL}/teleport", timeout=5, json={
-                'segment': seg, 'progress': prog, 'speed': spawn_speed_mps,
+                'segment': seg, 'progress': prog, 'speed': 0.0,
                 'add': True, 'color': colors[k % len(colors)],
                 'reverse': reverse})
 
@@ -1306,13 +1402,20 @@ class TurnTester:
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
 
-        # 3. Hold the throttle for every car.
+        # 3. Hold the throttle for every car - and only now unfreeze: the
+        #    fleet accelerates once ALL cars exist (see the spawn discipline
+        #    above).
         for uid in uids:
             try:
                 self._api_session.post(f"{API_URL}/control", timeout=5,
                                        json={'uid': uid, 'accelerate': True})
             except requests.exceptions.RequestException:
                 pass
+        try:
+            self._api_session.post(f"{API_URL}/freeze", timeout=5,
+                                   json={'frozen': False})
+        except requests.exceptions.RequestException:
+            pass
 
         # 4. Run: poll /state, fail on the FIRST crash, stop at 300 s sim.
         print(f"   GO! {n_cars} cars accelerating - watching for crashes")
@@ -1341,12 +1444,32 @@ class TurnTester:
         t0_sim = None
         aborted = game_crashed = False
         crash_info = None
+        expected_uids: set[int] | None = None
+        flow_base: float | None = None
+        lock_base: int | None = None
         last_report = -1e9
         wall_deadline = time.time() + self.CROSSING_MAX_SIM_SECONDS * 20.0
         # Crash episodes are counted per car (monotonic, GET /state
         # 'crash_episodes'); baseline right before the run so a car that
         # somehow arrives already crashed does not read as a new contact.
         crash_base: dict[int, int] = {}
+        # R33 (docs §8): the lane guard's ERROR channel, not its detector
+        # channel. A centreline crossing the guard cannot attribute to a
+        # named intent is a driving error even when the per-car wrong-side
+        # flag stayed false - the flag answers "is it on the wrong side",
+        # the invariant answers "was the crossing explained". Read as a
+        # delta over the scenario so a lifetime count cannot latch.
+        guard_base: int | None = None
+        # Quality metrics for the run's results table (docs §8 "Liveness &
+        # quality"): metres the fleet drove, sim/wall time it covered, and
+        # how often any car crossed the centreline. Baselines come from the
+        # FIRST poll, so a scenario reports its own window, not the game's
+        # lifetime.
+        wall_start = time.time()
+        flow_base_m: float | None = None
+        sim_base: float | None = None
+        cross_base: int | None = None
+        flow_end_m, sim_end, cross_end = 0.0, 0.0, 0
         while True:
             if abort_check is not None and abort_check():
                 aborted = True
@@ -1360,11 +1483,58 @@ class TurnTester:
             cars = st.get('cars', [])
             sim_t = st.get('time')
             _trace_line(sim_t, cars)
+            if isinstance(sim_t, (int, float)):
+                flow_end_m = st.get('flow_m_total') or 0.0
+                sim_end = sim_t
+                cross_end = sum((c.get('lane_guard_stats') or {})
+                                .get('centreline_crossings', 0) for c in cars)
+                if flow_base_m is None:
+                    flow_base_m = flow_end_m
+                    sim_base = sim_t
+                    cross_base = cross_end
             for c in cars:
                 crash_base.setdefault(c['car_uid'], c.get('crash_episodes', 0))
+            if guard_base is None:
+                guard_base = st.get('lane_guard_errors', 0)
             if t0_sim is None and isinstance(sim_t, (int, float)):
                 t0_sim = sim_t
             elapsed = (sim_t - t0_sim) if t0_sim is not None else 0.0
+
+            # R33: an unexplained crossing is an error, whatever the per-car
+            # detector says.
+            if guard_base is not None and st.get('lane_guard_errors', 0) > guard_base:
+                print(f"\n   ❌ unexplained centreline crossing at t={elapsed:.1f}s "
+                      f"(lane_guard_errors {guard_base} -> {st.get('lane_guard_errors', 0)})")
+                crash_info = "unexplained centreline crossing (R33 invariant)"
+                break
+
+            # R28 (docs §8): a total lockdown is an ERROR - prevention must
+            # keep it unreachable, so the run fails the moment the sim had
+            # to report one.
+            lk = st.get('lockdowns') or 0
+            if lock_base is None:
+                lock_base = lk
+            elif lk > lock_base and elapsed >= 1.0:
+                crash_info = (f"R28 LOCKDOWN at t={elapsed:.1f}s "
+                              f"({lk - lock_base} event(s)): "
+                              f"{st.get('lockdown_last', '')[:400]}")
+                print(f"\n   ❌ {crash_info}")
+                break
+
+            # R29 (docs §8): a car taken out of the equation is an ERROR.
+            # Prevention (R30) must make the lockdown valve unreachable, so
+            # a shrinking fleet here is a failure - it must never read as
+            # "survived" with a smaller denominator.
+            if expected_uids is None and len(cars) >= self.CROSSING_N_CARS:
+                expected_uids = {c['car_uid'] for c in cars}
+            elif expected_uids is not None and elapsed >= 5.0:
+                gone = expected_uids - {c['car_uid'] for c in cars}
+                if gone:
+                    crash_info = (f"R29 lockdown valve: car {min(gone)} "
+                                  f"despawned at t={elapsed:.1f}s "
+                                  f"({len(gone)} car(s) removed)")
+                    print(f"\n   ❌ {crash_info}")
+                    break
 
             # The FIRST crash is the first NEW contact episode, not the first
             # poll that happens to see the transient in_contact flag: a pinned
@@ -1386,8 +1556,25 @@ class TurnTester:
             if elapsed - last_report >= 10.0:
                 speeds = [c['speed_kmh'] for c in cars]
                 moving = sum(1 for v in speeds if v > 3.6)
+                # Quality metric (the user's, 2026-10-19): metres driven by
+                # the WHOLE fleet per second of sim time over this run window.
+                # High = fluid traffic, low = the fleet is stuck. Unlike the
+                # 'moving' snapshot it also punishes creeping at 2 km/h.
+                ft = st.get('flow_m_total') or 0.0
+                if flow_base is None:
+                    flow_base = ft
+                flow_win = (ft - flow_base) / elapsed if elapsed > 0 else 0.0
+                # The numbers only mean anything for a MULTI-car run, and what
+                # matters is PER CAR: the fleet total over the cars involved.
+                per_car = flow_win / max(len(cars), 1)
+                # R31 (docs §8): cars that moved < 1 m within the wall-time
+                # window - a warning, not a verdict (the thresholds are still
+                # being tuned; the crossing run is far shorter than 3 min).
+                stuck = st.get('standstill_errors') or 0
                 print(f"   t={elapsed:5.0f}s  no crash  moving {moving}/"
-                      f"{len(cars)}")
+                      f"{len(cars)}  flow/car {per_car:.1f} m/s "
+                      f"({flow_win:.0f} m/s fleet)"
+                      f"{'  stuck ' + str(stuck) if stuck else ''}")
                 last_report = elapsed
 
             if elapsed >= self.CROSSING_MAX_SIM_SECONDS:
@@ -1428,9 +1615,22 @@ class TurnTester:
             'expected_end_segment': None,
         })
         save_results(results)
+        # Quality metrics of this run (docs §8): the metres the fleet drove
+        # over its own window, per car that was supposed to drive.
+        _wall = time.time() - wall_start
+        _sim = max(0.0, sim_end - (sim_base or sim_end))
+        _flow = max(0.0, flow_end_m - (flow_base_m or flow_end_m))
+        _metrics = {
+            'wall_s': _wall,
+            'sim_s': _sim,
+            'crossings': max(0, cross_end - (cross_base or cross_end)),
+            'flow_per_car_s': (_flow / max(_sim, 1e-9)) / max(n_cars, 1),
+            'cars': n_cars,
+            'warp': self._time_warp_cached(),
+        }
         return self._crossing_result(start_point, passed=passed,
                                      aborted=aborted, game_crashed=game_crashed,
-                                     crash_info=crash_info)
+                                     crash_info=crash_info, metrics=_metrics)
 
     def _right_side_kerb_gaps_m(self, state: dict, start_point: str):
         """Gap (m) between the car's RIGHT FLANK at both wheel stations and
@@ -1685,7 +1885,8 @@ class TurnTester:
                       kerb_check: bool = False,
                       end_flag_progress: float = END_FLAG_PROGRESS,
                       expect_wrong_side: bool = False,
-                      spawn_speed_kmh: float | None = None) -> dict:
+                      spawn_speed_kmh: float | None = None,
+                      extra_cars: list[dict] | None = None) -> dict:
         """Monitor a turn for violations.
         
         Args:
@@ -1759,6 +1960,16 @@ class TurnTester:
         # Reset and enable breadcrumbs for visual debugging
         self.reset_controls()
         requests.post(f"{API_URL}/toggle", json={'breadcrumbs': True})
+
+        # WATCH MODE (docs/AGENTS.md, user decision 2026-10-21): staging must
+        # not race the sim. Every car is placed AT SPEED while the world is
+        # halted, the harness polls until all uids exist, and only then does
+        # the run start at the requested pace - otherwise the first second of
+        # the manoeuvre under review is spent driving into a half-staged
+        # world, which is what "loses half the action".
+        watch = os.environ.get("DG_FREEZE_STAGE") == "1"
+        if watch:
+            requests.post(f"{API_URL}/freeze", json={'frozen': True})
         
         # Create a fresh car at the given start point or a random location.
         # Deterministic scenarios start MID-segment (50%) so the maneuver
@@ -1781,10 +1992,91 @@ class TurnTester:
             # to the track number / start-point name.
             self.set_hud_label(label if label is not None
                                else str(START_POINT_NUMBER.get(start_point) or start_point))
+
+            # --- other cars in the same world (multi-car scenarios) --------
+            # docs/DRIVING_MANEUVERS.md §8: the T-junction pair runs with a
+            # second car on the bar, the obstruction tests with a car that is
+            # PARKED inside a lane. throttle=False leaves a car exactly where
+            # the teleport put it (the nav never gets a signal to move), which
+            # is how a parked car is staged - the spawn itself is frozen
+            # discipline: speed 0, no throttle afterwards.
+            extra_uids: list[int] = []
+            throttle_uids: list[int] = []
+            crash_base_extra: dict[int, int] = {}
+            primary_uid = self.get_state().get('car_uid')
+            if extra_cars:
+                for spec in extra_cars:
+                    before = {c['car_uid'] for c in self.get_state().get('cars', [])}
+                    payload = {'add': True}
+                    if 'start_point' in spec:
+                        payload['start_point'] = spec['start_point']
+                    else:
+                        payload['segment'] = spec['segment']
+                    payload['progress'] = spec.get('progress', 0.5)
+                    payload['speed'] = spec.get('speed_mps', 0.0)
+                    if spec.get('cruise_kmh') is not None:
+                        # A slow vehicle: the km/h this car chooses to drive at
+                        # (its class ceiling still applies) - staging real
+                        # slow traffic rather than a stopped car.
+                        payload['cruise_kmh'] = spec['cruise_kmh']
+                    # The car's ROLE, carried WITH the spawn (the sim sets
+                    # the label atomically - a second request would race the
+                    # first tick). The client can then address "the oncoming
+                    # car" by what it IS instead of by what it looks like,
+                    # and the tape header names the cast once for the review.
+                    if spec.get('name'):
+                        payload['name'] = spec['name']
+                    requests.post(f"{API_URL}/teleport", json=payload)
+                    got = None
+                    for _ in range(60):
+                        now_cars = {c['car_uid'] for c in self.get_state().get('cars', [])}
+                        new = now_cars - before
+                        if new:
+                            got = min(new)
+                            break
+                        time.sleep(0.1)
+                    if got is None:
+                        print("   ❌ extra car never spawned - aborting scenario")
+                        return self._aborted_result(start_point, direction, target_speed, results)
+                    extra_uids.append(got)
+                    if spec.get('park'):
+                        # A REAL parked car (docs §8 'Parked car'): the sim
+                        # puts it into the nav's parked state - engine off,
+                        # no route, it stays put. A car that merely has no
+                        # throttle is not parked: it still has a route and
+                        # may roll off, so the obstruction the scenario tests
+                        # would be a coincidence, not a state.
+                        requests.post(f"{API_URL}/park", json={'uid': got})
+                    if spec.get('throttle'):
+                        throttle_uids.append(got)
+                    print(f"   👤 extra car uid {got} "
+                          f"({'driving' if spec.get('throttle') else 'PARKED'})")
+                st0 = self.get_state()
+                crash_base_extra = {c['car_uid']: c.get('crash_episodes', 0)
+                                    for c in st0.get('cars', [])}
+                # Every teleport re-points the PRIMARY car (the one /state's
+                # top level describes) to the newest spawn - a scenario that
+                # monitors its own car has to say so after staging the extras.
+                if primary_uid is not None:
+                    requests.post(f"{API_URL}/follow", json={'uid': primary_uid})
+                    # Commands are QUEUED and applied on the sim's tick loop,
+                    # so reading the state right away can still describe the
+                    # newest extra - every later baseline (start position,
+                    # entry progress, violation counters) would then belong to
+                    # the WRONG car (measured: the obstruction test read the
+                    # parked car's pose as its own start). Poll for the
+                    # re-point instead of assuming it landed.
+                    for _ in range(60):
+                        if (self.get_state() or {}).get('car_uid') == primary_uid:
+                            break
+                        time.sleep(0.05)
         else:
             print("📍 Creating new car at random location...")
             self.create_car_at_random()
             self.set_hud_label(None)
+
+        if watch:
+            requests.post(f"{API_URL}/freeze", json={'frozen': False})
 
         if _aborted():
             return self._aborted_result(start_point, direction, target_speed, results)
@@ -1802,6 +2094,10 @@ class TurnTester:
         # baseline, making them invisible to the monitor's delta check.
         violations_at_start = 0
         ws_frames_at_start = 0
+        ws_secs_at_start = 0.0
+        cross_at_start = 0
+        flow_at_start = 0.0
+        sim_at_start = 0.0
         try:
             state = self.get_state()
             initial_segment = state['segment']
@@ -1812,6 +2108,14 @@ class TurnTester:
                 .get('wrong_side_frames', 0)
             ws_secs_at_start = (state.get('lane_guard_stats') or {}) \
                 .get('wrong_side_seconds', 0.0)
+            # Quality metrics baselines (docs §8 "Liveness & quality"): the
+            # counters are lifetime values, so a scenario reports its OWN
+            # delta - centreline crossings and the fleet flow over the
+            # scenario window.
+            cross_at_start = (state.get('lane_guard_stats') or {}) \
+                .get('centreline_crossings', 0)
+            flow_at_start = state.get('flow_m_total') or 0.0
+            sim_at_start = state.get('time') or 0.0
             print(f"   Starting at segment {initial_segment}")
             print(f"   Position: ({state['x']:.0f}, {state['y']:.0f})")
             print(f"   Heading: {state['heading']:.1f}°")
@@ -1847,12 +2151,26 @@ class TurnTester:
                         # (tests 8 + 16: "passed" without reaching the flag).
                         # Parking tests keep their explicit 50% destination.
                         if not kerb_check:
-                            d0 = ((seg['x1'] - state['x']) ** 2
-                                  + (seg['y1'] - state['y']) ** 2)
-                            d1 = ((seg['x2'] - state['x']) ** 2
-                                  + (seg['y2'] - state['y']) ** 2)
-                            if d1 < d0:   # car enters at the far end
-                                prog_flag = 1.0 - prog_flag
+                            if expected_end_segment == initial_segment:
+                                # SAME-segment scenario (the obstruction tests
+                                # drive along one stretch and finish further
+                                # along it): which side the car enters from is
+                                # NOT a guess here - the spawn says it, via the
+                                # car's own direction of travel. The nearest-
+                                # endpoint heuristic below picks the wrong side
+                                # when the spawn sits mid-segment, which put
+                                # the flag at 45% for a destination stated at
+                                # 85% (a run that "passed" 42 m short of its
+                                # goal, 2026-10-19).
+                                if not state.get('forward', True):
+                                    prog_flag = 1.0 - prog_flag
+                            else:
+                                d0 = ((seg['x1'] - state['x']) ** 2
+                                      + (seg['y1'] - state['y']) ** 2)
+                                d1 = ((seg['x2'] - state['x']) ** 2
+                                      + (seg['y2'] - state['y']) ** 2)
+                                if d1 < d0:   # car enters at the far end
+                                    prog_flag = 1.0 - prog_flag
                         flag_point = (seg['x1'] + prog_flag * (seg['x2'] - seg['x1']),
                                       seg['y1'] + prog_flag * (seg['y2'] - seg['y1']))
                     else:
@@ -1917,8 +2235,16 @@ class TurnTester:
             print(f"      Error: {e}")
         if setup_aborted:
             return self._aborted_result(start_point, direction, target_speed, results)
+        # WHERE the destination is on the target segment: the red flag is
+        # placed at end_flag_progress, so "arrived" must mean the car crossed
+        # THAT mark - a hardcoded 0.5 let a scenario whose flag sits at 85%
+        # pass while the car was still stuck at half the segment (measured on
+        # the obstruction test: the car crept past 50% behind a parked car
+        # and the suite called it an arrival, 35 m short of its destination).
+        arrival_prog = 0.5 if kerb_check else end_flag_progress
         if expected_end_segment is not None:
-            print(f"   Expected end segment: {expected_end_segment}")
+            print(f"   Expected end segment: {expected_end_segment}"
+                  f" - destination at {arrival_prog * 100:.0f}% of it")
         print(f"\n🔍 Monitoring turn for {duration}s...")
         print(f"   Checking for:")
         print(f"     - Off-road violations")
@@ -1942,6 +2268,15 @@ class TurnTester:
         game_crashed = False
         wrong_side_detected = False
         stopped_ok = False
+        # Multi-car scenarios: contact between ANY pair in the world (the
+        # primary's own crash check cannot see a second car hitting a third),
+        # and when an extra reached its expected end segment (the priority
+        # verdict: who got the single-file passage first).
+        collision_detected = False
+        extra_arrival: dict[int, float] = {}
+        # SIM time at which the PRIMARY car reached its destination - the
+        # priority verdict compares it against an extra's arrival.
+        primary_arrival_sim: float | None = None
         braking_for_end = False
         violation_details = None
         positions = []
@@ -1989,6 +2324,30 @@ class TurnTester:
                 break
             frames_checked += 1
             current_heading = state['heading']
+
+            # --- multi-car extras -----------------------------------------
+            # Throttle for the extras that are supposed to drive; a PARKED
+            # car is left alone (no signal = it stays where it was put).
+            for uid in throttle_uids:
+                try:
+                    requests.post(f"{API_URL}/control",
+                                  json={'uid': uid, 'accelerate': True},
+                                  timeout=2)
+                except requests.exceptions.RequestException:
+                    pass
+            for c in state.get('cars') or []:
+                if c.get('in_contact'):
+                    collision_detected = True
+                elif c.get('crash_episodes', 0) > crash_base_extra.get(
+                        c['car_uid'], c.get('crash_episodes', 0)):
+                    collision_detected = True
+            for spec, uid in zip(extra_cars or [], extra_uids):
+                exp = spec.get('expect_end')
+                if exp is None or uid in extra_arrival:
+                    continue
+                if any(cc['car_uid'] == uid and cc.get('segment_name') == exp
+                       for cc in state.get('cars') or []):
+                    extra_arrival[uid] = state.get('time') or 0.0
             
             # Client-side teleport/jump check: an independent, coarser
             # safety net alongside the game's own internal (per-physics-
@@ -2154,6 +2513,7 @@ class TurnTester:
                 fdy = state['y'] - flag_point[1]
                 if (fdx * fdx + fdy * fdy) ** 0.5 <= FLAG_REACH_RADIUS_M:
                     reached_expected_segment = True
+                    primary_arrival_sim = state.get('time') or 0.0
                     prog_pct = (state.get('progress') or 0.0) * 100
                     print(f"\n   ✅ Crossed the end flag at {prog_pct:.0f}% "
                           f"of segment {state['segment']} "
@@ -2209,8 +2569,9 @@ class TurnTester:
                         # (kerb_check) scenarios.
                         pass
                     crossed_now = (prog is not None and entry is not None and (
-                        (entry < 0.5 and prog >= 0.5)
-                        or (entry > 0.5 and prog <= 0.5)))
+                        (entry < arrival_prog and prog >= arrival_prog)
+                        or (entry > arrival_prog
+                            and prog <= arrival_prog)))
                     # Reverse-in parking (§1b): the car deliberately drives
                     # PAST the flag to stage the back-in, stops ~3 m beyond
                     # it, then reverses into the spot at the kerb. The
@@ -2237,7 +2598,7 @@ class TurnTester:
                               f"requires a STOP AT the flag")
                     crossed_half = (crossed_now and state['speed_kmh'] < FLAG_CRAWL_KMH) \
                         or (prog is not None and entry is not None
-                            and abs(entry - 0.5) < 0.02)
+                            and abs(entry - arrival_prog) < 0.02)
                     if crossed_half and not reverse_done:
                         crossed_half = False   # staging, not arrival
                     if passed_flag:
@@ -2253,7 +2614,7 @@ class TurnTester:
                     # approach failed.
                     seg_len = state.get('segment_length')
                     if prog is not None and seg_len:
-                        dist_flag_m = abs(prog - 0.5) * seg_len
+                        dist_flag_m = abs(prog - arrival_prog) * seg_len
                         speed_ms = state['speed_kmh'] / 3.6
                         brake_dist_m = (speed_ms ** 2) / (2.0 * CAR_BRAKING) \
                             + max(1.0, speed_ms * 0.15)   # polling/reaction slack
@@ -2278,6 +2639,7 @@ class TurnTester:
                             crossed_half = True   # stopped right at the flag
                     if crossed_half:
                         reached_expected_segment = True
+                        primary_arrival_sim = state.get('time') or 0.0
                         print(f"\n   ✅ Reached end segment {state['segment']} "
                               f"at {prog * 100:.0f}% (target: 50%)")
                         print(f"      Time: {time.time() - start_time:.2f}s")
@@ -2315,6 +2677,7 @@ class TurnTester:
                     # Legacy random-location mode: any segment change counts;
                     # drive to the far end of it and stop there.
                     reached_expected_segment = True
+                    primary_arrival_sim = state.get('time') or 0.0
                     print(f"\n   ✅ Reached designated end segment {state['segment']}!")
                     print(f"      Time: {time.time() - start_time:.2f}s")
                     print(f"      Max heading change per frame: {max_heading_change_per_frame:.1f}°")
@@ -2339,6 +2702,9 @@ class TurnTester:
             self._psleep(0.05)  # Check at ~20 FPS
         else:
             final_pos = (state['x'], state['y'])
+
+        if watch:
+            requests.post(f"{API_URL}/freeze", json={'frozen': False})
 
         if _aborted():
             return self._aborted_result(start_point, direction, target_speed, results)
@@ -2389,6 +2755,30 @@ class TurnTester:
         # the destination is a different maneuver, not this test.
         # EXCEPTION: negative detector tests (expect_wrong_side) PASS when
         # the violation fires - they exist to prove the detection works.
+        # --- multi-car verdicts (docs §8) --------------------------------
+        # A contact between ANY pair in the world fails the scenario: the
+        # primary's own crash check cannot see a second car hitting a third.
+        # The priority scenarios additionally say which extra must have had
+        # the passage FIRST - it has to reach its end before the primary,
+        # because the car whose lane is blocked waits (R26/R32).
+        collision_detected = collision_detected or any(
+            c.get('in_contact') or
+            c.get('crash_episodes', 0) > crash_base_extra.get(
+                c['car_uid'], c.get('crash_episodes', 0))
+            for c in [state] + (state.get('cars') or [])
+            if c.get('car_uid') is not None)
+        priority_failed = False
+        if extra_cars and primary_arrival_sim is not None:
+            for spec, uid in zip(extra_cars, extra_uids):
+                if spec.get('expect_end') is None:
+                    continue
+                t = extra_arrival.get(uid)
+                if t is None or not (t < primary_arrival_sim):
+                    priority_failed = True
+                    print(f"\n   ❌ PRIORITY: extra car {uid} did not get the "
+                          f"passage before the primary "
+                          f"(extra {t if t is not None else 'never'} s vs "
+                          f"primary {primary_arrival_sim:.2f} s of sim time)")
         if expect_wrong_side:
             passed = wrong_side_detected
         else:
@@ -2402,6 +2792,8 @@ class TurnTester:
                 and not game_crashed
                 and not kerb_failed
                 and not wrong_side_detected
+                and not collision_detected
+                and not priority_failed
             )
         
         # Prepare results
@@ -2431,6 +2823,25 @@ class TurnTester:
             'end_flag_progress': end_flag_progress,
             'kerb_gaps_m': kerb_gaps,
             'max_heading_change_per_frame': max_heading_change_per_frame,
+            # Quality metrics (docs §8): centreline crossings of the primary,
+            # and the fleet's metres-per-second over the scenario window -
+            # normalised to the cars that were SUPPOSED to drive (a parked
+            # car contributes 0 m and must not dilute the number).
+            'centreline_crossings': max(0, (state.get('lane_guard_stats') or {})
+                                        .get('centreline_crossings', 0) - cross_at_start),
+            'flow_m_per_s': ((state.get('flow_m_total') or 0.0) - flow_at_start) /
+                            max((state.get('time') or 0.0) - sim_at_start, 1e-9),
+            'driving_cars': 1 + len(throttle_uids),
+            'world_cars': 1 + len(extra_uids),
+            'collision_detected': collision_detected,
+            'priority_failed': priority_failed,
+            'extra_arrivals': extra_arrival,
+            # For the run's results table: SIM time the scenario covered and
+            # how many off-road hits the validator logged in THIS scenario
+            # (the counter is a lifetime log, so it is the delta again).
+            'sim_duration_s': max(0.0, (state.get('time') or 0.0) - sim_at_start),
+            'off_road_hits': max(0, state.get('validator_violations', 0)
+                                  - violations_at_start),
             'violation_details': violation_details,
             'positions': positions,
             'aborted': False,
@@ -2576,6 +2987,26 @@ class TurnTester:
             print("   Start the game with: python -m src.main --map basic --api\n")
             sys.exit(1)
 
+        # Symbolic segment anchors (docs/DRIVING_MANEUVERS.md §8 "Segment
+        # names"): a scenario says WHICH road it must end on
+        # ("startNode→endNode"), and the suite resolves that to the map's
+        # positional index once. Adding or deleting a track can therefore
+        # never silently move an anchor - and an anchor that no longer exists
+        # fails fast here instead of comparing against a shifted index.
+        try:
+            seg_names = requests.get(f"{API_URL}/segment_names", timeout=3).json()
+        except (requests.exceptions.RequestException, ValueError):
+            seg_names = {}
+
+        def _resolve_seg(v: "int | str | None") -> "int | None":
+            if isinstance(v, str):
+                if v in seg_names:
+                    return int(seg_names[v])
+                print(f"\n❌ Unknown segment anchor '{v}' - the map has no such "
+                      f"start→end pair (renamed or deleted track?).")
+                sys.exit(1)
+            return v
+
         print(f"\n{len(available)} named start points available on this map.")
         print("\nEach test will:")
         print("  1. Teleport to a KNOWN start point (exact position + heading)")
@@ -2628,7 +3059,8 @@ class TurnTester:
                         continue
                     print(f"   ⚠️  Jump target {k} is not in the selected set - ignoring")
 
-            start_point, direction, speed, expected_end_segment = test[0], test[1], test[2], test[3]
+            start_point, direction, speed = test[0], test[1], test[2]
+            expected_end_segment = _resolve_seg(test[3])
             duration = test[4] if len(test) > 4 else 15.0
             description = test[5] if len(test) > 5 else None
             start_progress = (test[6] if len(test) > 6
@@ -2636,6 +3068,7 @@ class TurnTester:
             kerb_check = bool(test[7]) if len(test) > 7 else False
             end_flag_progress = test[8] if len(test) > 8 else END_FLAG_PROGRESS
             expect_wrong_side = bool(test[9]) if len(test) > 9 else False
+            extra_cars = test[10] if len(test) > 10 else None
             print(f"\n\n{'#'*60}")
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
             print(f"{'#'*60}")
@@ -2696,7 +3129,8 @@ class TurnTester:
                                            start_progress=start_progress,
                                            kerb_check=kerb_check,
                                            end_flag_progress=end_flag_progress,
-                                           expect_wrong_side=expect_wrong_side)
+                                           expect_wrong_side=expect_wrong_side,
+                                           extra_cars=extra_cars)
 
             _emit({'type': 'done', 'index': i, 'passed': result['passed'],
                    'aborted': bool(result.get('aborted'))})
@@ -2830,8 +3264,36 @@ class TurnTester:
                 if v.get('screenshot'):
                     print(f"   Screenshot: {v['screenshot']}")
         
-        print("\n" + "="*60)
-        
+        # --- the run's results table (docs §8 "Liveness & quality") ------
+        # One line per scenario: how often it crossed the centreline, how
+        # many off-road hits it logged, wall time, SIM time, the warp factor
+        # it ran at, and the fluidity figure (metres per second per car that
+        # was supposed to drive). The flow column is blank where the metric
+        # does not apply (a single car's flow is just its own speed).
+        print(f"\n{'─'*60}")
+        print("RESULTS TABLE (crossings · off-road · wall · sim · warp · "
+              "flow m/s per car)")
+        print(f"{'─'*60}")
+        hdr = (f"{'#':>3} {'scenario':<26} {'xng':>4} {'off':>4} "
+               f"{'wall s':>8} {'sim s':>8} {'warp':>5} {'flow/car':>9}")
+        print(hdr)
+        for n, r in enumerate(self.test_results, 1):
+            if r.get('aborted'):
+                continue
+            warp = r.get('warp') or self._time_warp_cached()
+            single = (r.get('world_cars') or 1) <= 1
+            flow = ("" if single or r.get('flow_m_per_s') is None
+                    else f"{r['flow_m_per_s']:.1f}")
+            print(f"{n:>3} {str(r.get('start_point') or '?'):<26} "
+                  f"{r.get('centreline_crossings', 0):>4} "
+                  f"{r.get('off_road_hits', 0):>4} "
+                  f"{r.get('duration', 0.0):>8.1f} "
+                  f"{r.get('sim_duration_s', 0.0):>8.1f} "
+                  f"{(f'{warp:.1f}x' if isinstance(warp, float) else '-'):>5} "
+                  f"{(flow if flow else '-'):>9}")
+        print(f"{'─'*60}")
+        print("="*60)
+
         if passed == len(runnable):
             print(green("🎉 ALL TESTS PASSED! Smooth turns, no violations."))
         else:

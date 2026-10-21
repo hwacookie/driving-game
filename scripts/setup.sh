@@ -14,7 +14,8 @@
 #      has no imported textures and the window would render without signs
 #      and car sprites).
 #   4. C# build (verifies the toolchain compiles all projects).
-#   5. Port 5001 check (the game API port - we deliberately do NOT use
+#   5. Prune regenerated artifacts (suite logs, crash dumps, SDK backups)
+#   6. Port 5001 check (the game API port - we deliberately do NOT use
 #      5000, where macOS AirPlay Receiver squats).
 #
 # System prerequisites that are missing cannot be installed by this script
@@ -29,7 +30,7 @@ ok()   { echo "  [ok]   $1"; }
 warn() { echo "  [warn] $1"; }
 err()  { echo "  [FAIL] $1"; fail=1; }
 
-echo "==> 1/5 System prerequisites"
+echo "==> 1/6 System prerequisites"
 
 # --- Godot (.NET/Mono build; the runner expects 4.7.x) ---
 GODOT_BIN="${GODOT_BIN:-/Applications/Godot_mono.app/Contents/MacOS/Godot}"
@@ -60,7 +61,7 @@ else
   err "python3 not found"
 fi
 
-echo "==> 2/5 Python venv (.venv)"
+echo "==> 2/6 Python venv (.venv)"
 if [ ! -x "$ROOT/.venv/bin/python" ]; then
   if python3 -m venv .venv; then
     ok "created .venv"
@@ -80,7 +81,7 @@ if [ -x "$ROOT/.venv/bin/python" ]; then
   fi
 fi
 
-echo "==> 3/5 Godot asset import (.godot/imported)"
+echo "==> 3/6 Godot asset import (.godot/imported)"
 if [ -x "$GODOT_BIN" ]; then
   if "$GODOT_BIN" --headless --path "$ROOT" --import >/dev/null 2>&1; then
     N_IMPORTED="$(ls "$ROOT/.godot/imported" 2>/dev/null | wc -l | tr -d ' ')"
@@ -96,7 +97,7 @@ else
   warn "skipped (no Godot found)"
 fi
 
-echo "==> 4/5 C# build"
+echo "==> 4/6 C# build"
 if command -v dotnet >/dev/null 2>&1; then
   if dotnet build DrivingGame.Server/DrivingGame.Server.csproj -v q --nologo && \
      dotnet build DrivingGame.csproj -v q --nologo; then
@@ -108,7 +109,41 @@ else
   warn "skipped (no .NET SDK found)"
 fi
 
-echo "==> 5/5 Port 5001 (game API)"
+echo "==> 5/6 Prune regenerated artifacts"
+# These are OUTPUTS of runs, not inputs: tests/run_test_*.log is one text log
+# per suite run and logs/ holds the crash dumps the physics watchdog writes.
+# Both are gitignored (.gitignore: tests/run_test_*.log, logs/), so removing
+# old ones cannot lose anything the repo needs. The newest few stay, because
+# a crash dump is the evidence for a run someone is about to investigate.
+KEEP_LOGS=20
+KEEP_CRASH=50
+pruned=0
+n_logs=$(ls tests/run_test_*.log 2>/dev/null | wc -l | tr -d ' ')
+if [ "${n_logs:-0}" -gt "$KEEP_LOGS" ]; then
+  ls -1t tests/run_test_*.log | tail -n $((n_logs - KEEP_LOGS)) | while read -r f; do
+    rm -f "$f"; done
+  echo "  [ok]   run logs: kept the newest $KEEP_LOGS of $n_logs"
+  pruned=1
+else
+  ok "run logs: ${n_logs:-0} file(s), nothing to prune"
+fi
+n_crash=$(ls logs/*.json 2>/dev/null | wc -l | tr -d ' ')
+if [ "${n_crash:-0}" -gt "$KEEP_CRASH" ]; then
+  ls -1t logs/*.json | tail -n $((n_crash - KEEP_CRASH)) | while read -r f; do
+    rm -f "$f"; done
+  echo "  [ok]   crash dumps: kept the newest $KEEP_CRASH of $n_crash"
+  pruned=1
+else
+  ok "crash dumps: ${n_crash:-0} file(s), nothing to prune"
+fi
+if [ -f DrivingGame.csproj.old ]; then
+  rm -f DrivingGame.csproj.old
+  echo "  [ok]   removed DrivingGame.csproj.old (an SDK-bump backup)"
+  pruned=1
+fi
+[ "$pruned" -eq 0 ] && ok "nothing to prune"
+
+echo "==> 6/6 Port 5001 (game API)"
 if lsof -nP -iTCP:5001 -sTCP:LISTEN >/dev/null 2>&1; then
   HOLDER="$(lsof -nP -iTCP:5001 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1}')"
   warn "port 5001 is held by '${HOLDER:-?}' - the game API cannot start."

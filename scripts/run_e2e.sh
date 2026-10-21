@@ -54,6 +54,17 @@ EXTRA_ARGS=()
 HOST_ARGS=()   # --fast / --warp N go to the C# host, not to the suite
 PACING=""      # empty = the default below (--warp 4)
 FOCUS_UID=""   # --focus-car <uid>: the client binds to that car
+MAXIM=0        # --maximized: the Godot window fills the screen (borderless)
+# --watch: the TWO-MODE rule (AGENTS.md). Watching is not racing: the window
+# fills the screen, the camera pins on the named hotspot, and the harness
+# HALTS the sim while it stages the cars, spawns every one of them AT SPEED,
+# polls until every uid exists, and only then unfreezes at the requested
+# pace. An e2e run (--warp 4, smaller window, named scenarios) never does.
+DG_FREEZE_STAGE="${DG_FREEZE_STAGE:-0}"; export DG_FREEZE_STAGE
+# --crash-shot <path>: one PNG 0.5 s after the crash camera latches (diagnostic).
+# Read from the environment (set it when invoking the runner); initialised empty
+# so `set -u` does not die on an unset variable.
+CRASH_SHOT="${CRASH_SHOT:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-godot) RUN_GODOT=0; shift ;;
@@ -62,6 +73,10 @@ while [ $# -gt 0 ]; do
     --warp) HOST_ARGS+=(--warp "$2"); PACING=1; shift 2 ;;
     --realtime) PACING=1; shift ;;   # explicit: real time, no warp
     --focus-car) FOCUS_UID="$2"; shift 2 ;;   # watch that car (the last crashed uid)
+    --maximized) MAXIM=1; shift ;;   # Godot window at full screen size
+    --watch) MAXIM=1; DG_FREEZE_STAGE=1; export DG_FREEZE_STAGE; shift ;;
+    --zoom) CAM_ZOOM="$2"; shift 2 ;;
+    --center) CAM_CENTER="$2 $3"; shift 3 ;;
     *) EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
@@ -223,9 +238,19 @@ fi
 # zoomed on the car, in follow mode"). Crossing scenarios (50 cars) keep the
 # pinned view of the junction instead - following one car among 50 shows less.
 GODOT_CAM_ARGS=()
+# Godot's OWN options go BEFORE the "--" separator (everything after it is the
+# client's). --fullscreen maximizes the window: the project keeps stretch
+# DISABLED (viewport == window, see project.godot), so the overlays - minimap,
+# zoom label - are laid out from GetVisibleRect() and follow the new size.
+GODOT_WIN_ARGS=()
+if [ "$MAXIM" -eq 1 ] && [ "$RUN_GODOT" -eq 1 ]; then
+  GODOT_WIN_ARGS=(--fullscreen)
+  echo "==> Window: MAXIMIZED (--fullscreen) - the map fills the screen"
+  [ "${DG_FREEZE_STAGE:-0}" = "1" ] && echo "==> Staging: sim FROZEN while cars are placed, unfrozen at the announced pace"
+fi
 if [ "$RUN_GODOT" -eq 1 ]; then
-  GODOT_CAM_ARGS=(--zoom 14)
-  echo "==> Camera: follow mode at zoom 14 (px/m) - the window tracks the car"
+  GODOT_CAM_ARGS=(--zoom "${CAM_ZOOM:-14}")
+  echo "==> Camera: follow mode at zoom ${CAM_ZOOM:-14} (px/m) - the window tracks the car"
 fi
 if [ -n "$TEST_NUMBER" ]; then
   # Camera aiming is cosmetic - a failure here must never abort the run.
@@ -235,9 +260,47 @@ num, api = int(sys.argv[1]), sys.argv[2]
 rows = json.loads(subprocess.check_output(
     [sys.executable, "tests/test_turning.py", "--list-json"]))
 key = next((r["key"] for r in rows if r["number"] == num), None)
-prefix = {"fig8_xing": "xing_", "fig8_xing_plain": "xingp_"}.get(key)
+prefix = {"fig8_xing": "xing_", "fig8_xing_plain": "xingp_",
+          # The T-junction scenarios (incl. the two new ones that run it
+          # WITH oncoming traffic): pin the window on the junction, since
+          # what matters is the pair meeting at the node, not one car's
+          # drive across the tile.
+          "tjunction_from_top": "tjunc_",
+          # The obstruction tests: pin on the two-lane straight road, where
+          # the pass of the parked car happens.
+          "park_block_overtake": "straight_",
+          "park_block_priority": "straight_",
+          # The crawler test: the obstruction MOVES, but it starts at a known
+          # spot - the window stays there, so the pass is in the box from the
+          # first frame (the focus is the slow car, not the overtaking one).
+          "slow_pass_overtake": "straight_"}.get(key)
 if not prefix:
-    sys.exit(0)   # not a crossing scenario -> no camera override
+    sys.exit(0)   # not a camera-pinned scenario -> no override
+# The obstruction tests: what happens there is a PASS of a parked car, and
+# the pass happens AT the obstruction, not at the middle of the road - so the
+# window goes on the spot the scenario parks its car at (75% along the
+# scenario's own segment), otherwise the parked car is off-screen entirely
+# and the run shows nothing but empty asphalt.
+OBSTRUCTION_T = {"park_block_overtake": 0.5,      # parked at 50% of segment 0
+                 "park_block_priority": 1.0,      # parked ON the node straight_m
+                 "slow_pass_overtake": 0.35,      # the crawler's start
+                 "slow_pass_priority": 0.70}      # 35% of the WHOLE straight
+
+if key in OBSTRUCTION_T:
+    try:
+        # The name contains a non-ASCII arrow, so it goes through the name
+        # map first and the numeric route second - a raw unicode path in the
+        # URL is what made this whole branch answer nothing.
+        names = json.loads(urllib.request.urlopen(f"{api}/segment_names", timeout=5).read())
+        idx = names["straight_n\u2192straight_m"]
+        with urllib.request.urlopen(f"{api}/segment/{idx}", timeout=5) as r:
+            sg = json.loads(r.read())
+        t = OBSTRUCTION_T[key]
+        print(f"{sg['x1'] + (sg['x2'] - sg['x1']) * t:.2f} "
+              f"{sg['y1'] + (sg['y2'] - sg['y1']) * t:.2f}")
+    except Exception:
+        pass
+    sys.exit(0)
 xs = ys = n = 0.0
 i = 0
 while True:
@@ -256,8 +319,34 @@ if n:
 EOF
 ) || CAM=""
   if [ -n "$CAM" ]; then
-    GODOT_CAM_ARGS=(--center $CAM --zoom 26)
-    echo "==> Crossing scenario: camera PINNED on the crossing ($CAM) @ zoom 26 - no car follow, the crash is in the box"
+    GODOT_CAM_ARGS=(--center ${CAM_CENTER:-$CAM} --zoom "${CAM_ZOOM:-26}")
+    echo "==> Camera PINNED (${CAM_CENTER:-$CAM} @ zoom ${CAM_ZOOM:-26}) - no car follow"
+  fi
+fi
+# A ROLE focus beats the coordinate pin: the scenario stages its cast itself,
+# so the car that matters is defined by the state ("the parked one", "the
+# slowest one still rolling"), not by a uid the runner could know up front.
+CAM_ROLE=""
+if [ -n "$TEST_NUMBER" ] && [ "$RUN_GODOT" -eq 1 ]; then
+  CAM_ROLE=$(python3 - "$TEST_NUMBER" "$API" <<'EOF'
+import json, subprocess, sys
+num = int(sys.argv[1])
+rows = json.loads(subprocess.check_output(
+    [sys.executable, "tests/test_turning.py", "--list-json"]))
+key = next((r["key"] for r in rows if r["number"] == num), "")
+# 18: the pass happens AT the parked car - the camera stays on the
+# obstruction, which never moves, so the whole manoeuvre stays in frame.
+# 19: the squeeze is against the crawler - follow the slow car.
+# A NAME beats a predicate: the scenario authored the cast, so the car that
+# matters has a name from the spawn ("parked_car", "slow_car", "oncoming_car").
+# The predicate roles stay as the fallback for casts that were never named.
+print({"park_block_priority": "parked_car",
+       "slow_pass_overtake": "slow_car"}.get(key, ""))
+EOF
+) || CAM_ROLE=""
+  if [ -n "$CAM_ROLE" ]; then
+    GODOT_CAM_ARGS=(--focus "$CAM_ROLE" --zoom "${CAM_ZOOM:-16}")
+    echo "==> Camera FOCUSED on the ${CAM_ROLE} car @ zoom ${CAM_ZOOM:-16} - the window tracks it"
   fi
 fi
 if [ -n "$FOCUS_UID" ] && [ "$RUN_GODOT" -eq 1 ]; then
@@ -278,10 +367,23 @@ if [ "$RUN_GODOT" -eq 1 ]; then
     # The runner closes this window again on exit (clean self-quit via the
     # generation file - never a signal). On failure the C# host stays up,
     # so the scene can be re-opened in a new Godot window.
-    nohup "$GODOT_BIN" --path "$ROOT" -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
+    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in
   fi
+fi
+
+# The run's TAPE (docs/RECORD_PLAYBACK.md): every substep of every car, kept
+# for the whole run, so a failure report can be re-watched frame by frame.
+# Started here - before any scenario stages a car - so the tape covers the run
+# from the first substep.
+echo "==> Starting the substep tape ..."
+TAPE_START=$(curl -sf -X POST "$API/tape" -H "Content-Type: application/json" \
+                 -d '{"map": "basic"}')
+if [ -n "$TAPE_START" ]; then
+  echo "==> Tape on: $(echo "$TAPE_START" | tr -d ' ' | cut -c1-120)"
+else
+  echo "!! tape start failed - the run works, there is just no tape"
 fi
 
 echo "==> Launching test suite via POST /run_test ..."
@@ -327,6 +429,19 @@ else
   echo "==> Suite finished: rc=$TEST_EXIT ❌ (log: $LOG_FILE)"
   # Keep host + window up so the frozen crash can be analysed (visible mode).
   [ "$RUN_GODOT" -eq 1 ] && HOLD_OPEN=1
+fi
+
+# Save the tape NEXT TO the run log: one file per run, same naming, so a
+# report and its frames stay a pair months later.
+TAPE_FILE=$(echo "$LOG_FILE" | sed 's|run_test_|tape_|; s|\.log$|.txt|')
+if [ -n "$TAPE_FILE" ]; then
+  TAPE_SAVE=$(curl -sf -X POST "$API/tape/save" -H "Content-Type: application/json" \
+                 -d "{\"path\": \"$TAPE_FILE\"}")
+  if [ -n "$TAPE_SAVE" ]; then
+    echo "==> Tape saved: $(echo "$TAPE_SAVE" | tr -d ' ' | cut -c1-160)"
+  else
+    echo "!! tape save failed"
+  fi
 fi
 
 echo "==> Stopping host..."

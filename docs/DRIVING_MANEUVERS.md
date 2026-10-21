@@ -59,11 +59,55 @@ bumper position.
   end: at the flag target the front bumper stands at the flag (reference
   point = rear axle, so `FRONT_OVERHANG_M` ahead of it), at a dead end a whole
   car length before the end of the asphalt.
-- `PARK_TRACK_LOOKAHEAD_M` — short look-ahead for tight tracking of the
-  reference line
-- `PARK_ALIGN_GAIN = 1.0` — lateral-offset gain of the Stanley controller in
-  the final section
-- `PARK_ALIGN_LATERAL_M` — lateral tolerance for "on the line"
+- `PARK_TRACK_LOOKAHEAD_M` (2.5 m) — short look-ahead for tight tracking of
+  the reference line in the final pull-over stretch
+- `PARK_ALIGN_GAIN = 1.0` — cross-track gain of the Stanley controller in
+  the final section; `PARK_ALIGN_HDG_GAIN = 3.0` is the heading gain
+  (≈0.45 s time constant at V_C) and the cross term fades to zero over the
+  last `PARK_ALIGN_CROSS_FADE_START_M` 1.0 m → `PARK_ALIGN_CROSS_FADE_END_M`
+  0.4 m so the car cannot counter-steer past parallel at the standstill
+- `PARK_ALIGN_LATERAL_M` (0.35 m) — lateral tolerance for "on the line"
+- **Two kerb clearances, deliberately different** (`Config`): a DRIVING car
+  keeps `KERB_CLEARANCE_M = ROAD_EDGE_TOLERANCE_M` (0.35 m) — the same inset
+  the raceline corridor uses, so a car never spawns nearer the kerb than its
+  own driving line is allowed to go. A PARKED car sits closer:
+  `PARK_KERB_CLEARANCE_M` (0.16 m) — "möglichst nah am rechten Rand";
+  empirically the closest clean park (at ≤0.14 m the reverse-in tuck grows
+  past what the style check allows and the plan falls back to a forward park
+  ~0.6 m out)
+- `MAX_PARK_DRIFT_SLANT_DEG` (15.0°) — cap on the slant of the pull-over
+  drift. The binding constraint on how close to the kerb a car can park is
+  its FRONT CORNER, which swings kerbwards while the body is slanted, so the
+  drift profile (`RefLineMath.ParkEase`) does the lateral work EARLY, where
+  there is still road to spare, and arrives at the kerb almost parallel
+  (a symmetric smoothstep puts the steepest slant exactly halfway to the
+  kerb — the worst place for the front corner)
+- `PARK_LEAD_S` (2.0 s) — indicator lead time at speed (R17: signal BEFORE
+  the maneuver)
+- Reserves when picking how close to the kerb to park: `PARK_LINE_MARGIN_M`
+  0.05 m (line discretisation) and `PARK_TRACKING_MARGIN_M` 0.10 m (the
+  controller's residual tracking error)
+
+### 1b. Reverse-in parking (back-in) — IMPLEMENTED
+
+Code: `BicycleNav.part1` (`DecideParkStyle`, `PlanReverseTuck`),
+`BicycleNav.part3` (`StartReversePark`, `UpdateReversePark`); the suite
+reads it from `GET /state` as `parking.style == "reverse"`.
+
+| Phase | Description |
+|-------|-------------|
+| **Style decision** | Forward vs back-in is decided ONCE per approach, from the tuck the geometry allows. Below `PARK_REVERSE_MIN_TUCK_M` (0.10 m) the maneuver is not worth it — park forwards. |
+| **Stage past the spot** | The car drives PAST the flag and stops several metres beyond it — a real back-in needs the staging room. Crossing the flag while this plan is active is NOT a "drove past" failure (docs/TESTING.md §3); the run only passes once `parking.parked == true`. |
+| **Back in** | Reverse gear, signed speed, feedback parking law `delta = PSI_GAIN·psi − POS_GAIN·e_off` (`PARK_REVERSE_PSI_GAIN` 2.8 ≈ 1.2 s heading damping, `PARK_REVERSE_POS_GAIN` 1.4 ≈ 2.5 s at creep), creep speed `PARK_REVERSE_CREEP_M_S` 0.8 m/s (~3 km/h). Arc steering candidates are tried sharpest-first (`REVERSE_STEER_CANDIDATE_DEGS` 38/30/25/20/16°) — full lock is the shortest back-in. `PARK_REVERSE_TAIL_M` 2.4 m straight run-out after the arcs (must be long enough for heading and cross-track to converge AT speed; `PARK_REVERSE_MIN_TAIL_M` 0.3 m is the minimum that still settles). |
+| **Hard bounds** | The nose swings toward the centreline while backing in and must stay on OUR half: `PARK_CENTRELINE_MARGIN_M` 0.10 — unlike a U-turn (§5), parking may NOT use the oncoming lane. Swept body corners keep `PARK_REVERSE_KERB_MARGIN_M` 0.05 at the kerb. The staging stop may sit `PARK_PLAN_START_MARGIN_M` 0.35 m closer to the centreline than the planned lane offset (a deeper start needs a longer back-in for the same tuck, so plan from the deeper offset). |
+
+Two pitfalls that were measured in this branch: the entry speed is NOT the
+profile (the profile is a limit, not a prediction — from a standstill the
+car only builds up `A_CRUISE` per metre, so planning uses
+`min(profile, build-up)` iteratively over the zone), and on straight routes
+the curvature solver `min_curvature_offsets` must be SKIPPED (it minimises
+the second derivative of the offset profile and stretched a 35 m blend to
+~180 m — a straight line is already optimal).
 
 ### Variant: Dead-end / route end
 
@@ -216,7 +260,17 @@ reads `PendingTurn` from the Driver.
   center line. Deliberately includes reserve for the controller's lag error:
   the corridor constrains the *line*, but the hard rule applies to the *car*.
 - `CURVATURE_WINDOW_M = 1.0` — fixed physical window width of the curvature
-  measurement.
+  measurement
+- `REACHABLE_SPEED_TOLERANCE = 1.15` (`BicycleNav.part1`) — how far over the
+  planned corner speed the car may be and still count as able to make the
+  turn (15 % slack; below it the signalled turn is unreachable and the car
+  slides past)
+- `JUNCTION_ENTRY_SPEED_M = 8.0` (`BicycleNav.part1`) — the speed the car
+  arrives at ANY real junction (degree ≥ 3) at: slow enough that a blinker
+  signalled anywhere inside the approach ramp is still physically reachable
+- `JUNCTION_SUPPRESS_M = 12.0` — half the span around a junction where the
+  wrong-side check is suspended (no centreline exists inside an
+  intersection); this is the `LaneEaseM / 2 = 12 m` easing of §7.
 
 ### Crossing center (the white dot)
 
@@ -295,28 +349,54 @@ until it is turned 180°.
 
 ### Parameters
 
-- `TURN_AROUND_MIN_WIDTH` — minimum road width for a single turn-around (≈
-  turning-circle radius)
-- Speed during the maneuver: ~5–10 km/h (low enough for the tight radius,
-  high enough not to stop)
-- Left blinker active throughout the maneuver
-- LaneGuard is temporarily suppressed during the turn (center-line crossing
-  is intended)
-- Reverse driving: bicycle model with negative `speed` and inverted steering
-  effect
+- `UTURN_SINGLE_SWING_MIN_WIDTH_M` (11.0 m) — minimum road width for a
+  single turn-around (§5a vs §5b threshold, verified); the doc's earlier
+  name `TURN_AROUND_MIN_WIDTH` (≈ turning-circle radius ≈ 11 m) is the same
+  quantity
+- `UTURN_SPEED_MAX` (2.8 m/s ≈ 10 km/h) — the maneuver's own speed cap
+  (the spec's 5–10 km/h), `UTURN_TAIL_LEN_M` 15.0 m straight-out stretch,
+  `UTURN_STEP1_LEN_M` 14.0 m approach blend, `UTURN_HOLD_S` 0.7 s pause at
+  each full stop
+- `UTURN_MAX_ENTRY_SPEED_M` (5.0 m/s ≈ 18 km/h) — above this the request is
+  refused ("brake first, then retry"); a three-point turn cannot be done
+  faster
+- `UTURN_TH2_DEG` 60° / `UTURN_TH3_DEG` 90° — heading targets at the step
+  stops of the three-point turn
+- `UTURN_LINE_MARGIN_M` (0.10 m) minimum corner clearance the generated LINE
+  must guarantee against the pavement edge; `UTURN_BLEND_TRACKING_MARGIN_M`
+  0.30 m planning allowance for the follower's tracking error
+- `UTURN_STALL_ABORT_S` (8.0 s) without progress aborts the maneuver (and
+  the driver flashes the hazard lights)
+- Left blinker active throughout the maneuver; LaneGuard suppressed for the
+  whole turn (crossing the centreline is intended)
 
 ### Implementation status
 
-The **prerequisite** — signed speed (negative = reverse) with a real gear
-model (W brakes / S engages reverse, inverted yaw in reverse) — **is
-implemented** (`Car.cs`; used by the back-in parking maneuver and by
-FREE-mode reverse). What is **not** implemented yet is the scripted U-turn
-maneuver (5a / 5b) as a distinct driver action:
-- Generate the turn reference line: a U-curve back down the road (the current
-  route only builds forward)
-- A LaneGuard suppression flag for the maneuver (center-line crossing is
-  intended)
-- `TURN_AROUND_MIN_WIDTH` / strategy selection (single arc vs. multi-point)
+**IMPLEMENTED** (`BicycleNav.part1` constants, `part3` `GenerateUturn` /
+`StartUturn` / `UpdateUturn` / `FinishUturn`), including the strategy
+choice:
+
+- **§5a single swing** on a wide road (`road width ≥ UTURN_SINGLE_SWING_MIN_WIDTH_M`
+  = 11.0 m, verified), **§5b three-point** on a narrow one
+  (`UTURN_TH2_DEG` 60° heading at the first stop, `UTURN_TH3_DEG` 90° total
+  at the end of the reverse step, `UTURN_STEP1_LEN_M` 14.0 m approach blend,
+  `UTURN_HOLD_S` 0.7 s pause at each full stop).
+- The maneuver owns the car: signed-speed profile
+  (`BuildUturnProfile`, the reverse zone negative BETWEEN the stop points),
+  `UTURN_SPEED_MAX` 2.8 m/s (~10 km/h, the spec's 5–10 km/h), entry only
+  below `UTURN_MAX_ENTRY_SPEED_M` 5.0 m/s (~18 km/h — faster, a three-point
+  turn cannot be performed), `UTURN_STALL_ABORT_S` 8.0 s without progress
+  aborts and the driver flashes the hazard lights.
+- The generated LINE must clear the pavement by `UTURN_LINE_MARGIN_M` 0.10 m
+  for every body corner; if it cannot, the request is REFUSED with a reason
+  (`UturnRejectReason`) rather than executed impossibly.
+- LaneGuard is suppressed for the whole maneuver (crossing the centreline is
+  intended), and the driver keeps the left blinker on until it finishes
+  (`Driver.cs` reading `BicycleNav.UturnActive`).
+
+Still open: the four-point turn for extremely narrow roads (~3 m) has not
+been seen on the test map, and the reverse-direction look-ahead of R21
+(§8) is not implemented yet.
 
 ---
 
@@ -327,8 +407,9 @@ obstacles** on its own. In **FREE mode** avoidance is the player's business;
 there the car sticks to stop-on-contact (`docs/OBSTACLES.md`).
 
 *(Note: **car-to-car** avoidance is a separate, implemented system — speed
-caps + contact resolution in `CarCollisions.cs`; see the Driving Ruleset,
-R2/R6/R7. This section is only about static obstacles.)*
+caps + contact resolution in `CarCollisions.cs`; see the Driving Ruleset
+R2/R6/R7 plus the R8 lateral yield and the R14 crossing-entry gate. This
+section is only about static obstacles.)*
 
 Obstacles are placed on the road via the palette next to the minimap or via
 the REST API and can be saved/loaded as a layout — `docs/OBSTACLES.md`.
@@ -493,9 +574,12 @@ of which lower-tier rule proposed it.
   grip/comfort limit, so a planned line that is too tight is rejected, not
   merely braked for. (Complements R1's geometry with the dynamic limits.)
   *Implemented as a planning limit:* the BicycleNav speed profile caps
-  cornering speed at `v = sqrt(A_LAT_MAX / kappa)` (`BicycleNav.part2/3`),
-  and steering rate is bounded by `A_LAT_MAX / v`. Not yet a post-filter that
-  *rejects* a too-tight planned line — the plan is speed-limited, not refused.
+  cornering speed at `v = sqrt(A_LAT_MAX·A_LAT_PLAN_FRACTION / kappa)`
+  (`BicycleNav.part2/3`), and steering rate is bounded by `A_LAT_MAX / v`.
+  `A_LAT_MAX` is per vehicle class (`Config.VEHICLE_CLASS_SPECS`: car/compact
+  4.5, pickup 4.0, truck 3.5, heavy_truck 3.0 m/s²). Not yet a post-filter
+  that *rejects* a too-tight planned line — the plan is speed-limited, not
+  refused, and the rule is still silent in the decision log.
 - **R25 Speed limit** *(StVO §3(3))* *[implemented via config]* — never
   exceed the road's limit speed; the cap is a hard post-filter on the speed
   output. In the sim this is the per-map / per-vehicle configured maximum
@@ -510,6 +594,21 @@ of which lower-tier rule proposed it.
   (strongest) required brake value** across all of them — the car brakes to
   the worst threat. On an actual contact both cars log it **with their own
   speed at impact** and switch on hazard lights.
+  *Queue wake-up (2026-10-19):* the v2 TTC sweep is deliberately
+  conservative - each car advances at `max(current, plan)` speed, because a
+  car that has the right to enter must be read as if it enters. That
+  conservatism, applied to a lane pair, made a follower sitting at rest with
+  the throttle held read as a projectile reaching the leader "within 1 s",
+  and `GradedCap`'s stageS ≤ 1 s cliff capped it at ZERO while the leader
+  drove away at 22–48 km/h with a 10–20 m gap (measured: cars 43/20/16 held
+  at 0 in seconds-long blocks, the queue waking up seconds late and the delay
+  cascading down the arm). A pair that is PARALLEL and **opening the gap**
+  (`CarCollisions.IsParallelPair` + `OpeningGap`, only while the yielder is
+  already at rest) is therefore handed to R7's route-true corridor, which
+  measures the real gap and the leader's real speed; rolling and oblique
+  pairs keep the v2 cap (widening the hand-over to rolling pairs gridlocked
+  the signed crossing - measured, crash at t=41.6 s). Residual wake delay is
+  now the decision-persistence hold (`ReleaseHoldTicks`, 0.5–1.0 s).
 - **R6 Staged priority response** *(crossing)* *[implemented]* — a priority
   car goes **alert** and observes instead of braking the instant a conflict
   is predicted; it brakes only if the other car fails to yield (TTC stops
@@ -519,8 +618,12 @@ of which lower-tier rule proposed it.
 - **R7 Speed-dependent look-ahead** *[implemented]* — the avoidance
   look-ahead is at least the car's own stopping distance (reaction + braking
   + standstill gap), scaled with speed, so a fast follower stops for a
-  suddenly-stopped leader. (Together with R2: the required brake is the max
-  over all threats.)
+  suddenly-stopped leader. In code: `CarCollisions.LookAheadForSpeed(v)` =
+  `v·ReactionTimeS` + `v²/(2·ComfortBrakingMps2)` + gap, floored at
+  `LookAheadMinM` 40 m and capped at `LookAheadMaxM` 300 m (the broadphase
+  ring covers the largest per-car range: `ceil(300/CellSizeM)+1 = 16` cells
+  of 20 m). (Together with R2: the required brake is the max over all
+  threats.)
 - **R21 Reversing / Wenden — heightened duty (StVO § 9(5))** *[proposed]* —
   While reversing or turning around, the car must behave so no other road
   user is endangered, and move only as far as it can see (else be directed).
@@ -561,9 +664,18 @@ then commitment.
   blocks). For a car already inside, R3 beats R5. **Exit:** R3 ends only
   when the **rear** (not just the nose) has left the box; the next waiting
   car may re-evaluate R4 only after that.
+  *Open (the deadlock in the screenshot of 2026-10-19):* two committed cars
+  can sit **broadside in the box**, each capped at 0 by a predicted conflict
+  with a THIRD car (`[R2] predicted crossing with car 78 in 4.5 s` on both)
+  - a circular wait that R3's "complete the crossing" floor does not cover
+  and that no brake can resolve. The rule that must apply: once a car is
+  committed and its own exit is clear, a predicted conflict whose stageS
+  exceeds its time to leave the box may not cap it at 0; and if two
+  committed cars still block each other, the LATER arriver concedes and
+  retreats (R19). Not implemented.
 - **R14 Blocked-box / no entry into an occupied exit** *(crossing)*
-  *[implemented on `fix/fig8-xing-car-contact`]* — never enter if the crossing's
-  exit is visibly occupied (e.g. a queue on the far side), **even with right-of-way**
+  *[implemented]* — never enter if the crossing's exit is visibly occupied
+  (e.g. a queue on the far side), **even with right-of-way**
   (do not block the intersection — the duty is StVO §1(2): *"Wer am Verkehr
   teilnimmt hat sich so zu verhalten, dass kein Anderer geschädigt, gefährdet
   oder mehr, als nach den Umständen unvermeidbar, behindert oder belästigt
@@ -572,19 +684,135 @@ then commitment.
   here). Independent of R5; distinct from R4 (the *temporal* gap case) — this
   is the *exit blocked by a foreign queue* case. Implemented in `CarCollisions`
   as an **entry gate only**: a car whose nose is still before the crossing line
-  caps to 0 and does not commit when its own exit LANE (a ~2.5 m band on the
-  through axis — the opposite lane of the exit arm is not my exit, which is
-  what froze two diagonals against each other when ignored) or the box holds a
-  body at `StationaryCapMps` or below; priority (Vorfahrt) cars are gated
-  identically, their right of way never buying an entry into an occupied
-  crossing. **Does not** cover a car that is already committed and then stops
-  inside the box — that is the R3/R2 interaction, still open (measured: `fig8_xing`
-  still crashes at t≈3.0 s when a committed yield car parks in the crossing and
-  a priority car brakes too late for it).
-- **R15 Deterministic tie-break** *(crossing)* *[proposed]* — when two cars
+  caps to 0 and does not commit when its own exit LANE (a body-width band right
+  of the through axis — the opposite lane of the exit arm is not my exit, which
+  is what froze two diagonals against each other when ignored) or the box holds
+  a body that is STANDING, CRAWLING or BRAKING (`StationaryCapMps` 2.0 m/s or
+  below, or `IsBraking` — the old test only saw cars already under the cap,
+  which let four cars enter behind a car still braking and wedged the box).
+  Scan range `R14ExitScanM` 25 m (box + a car + its braking distance); priority
+  (Vorfahrt) cars are gated identically, their right of way never buying an
+  entry into an occupied crossing. A blocked car does not brake to rest
+  wherever the rule fired — it creeps up and stops AT the halt line (signed
+  approach) or the crossing MOUTH (unsigned), the cap being the speed that
+  still brings it to rest there (`ApproachCapMps`, reaction + comfort).
+  **Status 2026-10-19:** both 50-car crossing scenarios (signed and
+  right-before-left) survive their 60 s window with zero contact, so the
+  R3/R2 interaction that used to leave a committed yield car parked in the
+  box no longer reproduces.
+- **R15 Deterministic tie-break** *(crossing)* *[implemented]* — when two cars
   cross the stop line / enter in the same frame (exact simultaneous
   conflict), resolve deterministically by arrival timestamp, then car UID —
-  so the tree is reproducible at frame boundaries.
+  so the tree is reproducible at frame boundaries. In code the tie-break is
+  uid-only (lower uid yields) in the right-before-left pair test and in the
+  R26 passage claim (`PassagePriority`); no wall-clock or run randomness is
+  involved anywhere (R20).
+- **R27 Blocked arms are no threat (entry fixed point)** *(crossing)*
+  *[partial]* — independent of R16's patience decay: a yield car must NOT
+  wait for a conflict that cannot materialise. The user rule (2026-10-19):
+  at an un-signed crossing the cycle N→W→S→E→N deadlocks when every arm
+  waits for an arm that can never move - if S has entered and W is itself
+  held (its own exit occupied, or blocked behind another car), then the car
+  at N may enter: its obligation is to the traffic that can actually reach
+  the conflict point while it crosses it, evaluated in TIME (R4's gap
+  acceptance), not to a hypothetical occupant of the arm on its right.
+  *Implemented as:* the gap-acceptance scan skips an approaching car that is
+  at standstill AND is itself capped by a reason that is not about this pair
+  (`ActiveCapKey` does not name me) - such an arm is no imminent threat.
+  **Placement matters:** the skip applies to the APPROACHING (eta) threat
+  only. A car already at/in the crossing is a real blocker whatever reason
+  holds it - skipping it there let a yield car enter an occupied box
+  (measured 2026-10-19: crash at t=41 s on `fig8_xing`). Because caps are
+  recomputed every substep, a chain of blocked arms unwinds over substeps
+  (the fixed point by iteration, not a single solve).
+
+### Liveness & quality (the user's rules of 2026-10-19)
+These are not traffic rules - they are the **invariants the sim must never
+break** and the **measurements that show whether it does**.
+
+- **R28 Never a total lockdown** *[measured]* — the sim must never reach a
+  state where a set of cars mutually wait for each other and none can move;
+  real traffic does not do that, even four cars interlocked like a swastika
+  get out (reverse, or in the worst case drive around off-road). The
+  measurement is GEOMETRIC, not graph-based: at a real crossing node, **>= 2
+  cars with their centre in the box and every car near the node standing for
+  3 s of sim time** is a lockdown, and it is logged with every member's
+  pose, active cap key and last decision, so the cause is read from data
+  instead of guessed (`CarCollisions.LockdownEvents`, served in /state as
+  `lockdowns` / `lockdown_last`). The graph above (R14/R30) only sees cars
+  BEFORE the box - a committed car is not in it - so it missed the wedged
+  box the user showed; the geometric detector does not.
+- **R29 Desperation valve** *[implemented, must never fire]* — if a
+  lockdown persists 6 s, one car is **taken out of the equation** (despawn,
+  highest uid inside the box = the last arriver) so the sim never stands
+  there forever. This is an ERROR: it is logged (`!! R29 DESPERATION VALVE`)
+  and the e2e suite fails on it. It exists so the sim cannot hang, not as
+  an excuse for the other rules.
+- **R30 Keep the crossing resolvable** *[implemented]* — the prevention half:
+  a car may creep onto a crossing only if the chain of standing blockers
+  ahead of it **bottoms out** - `resolves(X)` = X's own exit is free (base
+  case) OR every car blocking X resolves itself, recursed down the
+  blocked-by chain with a cycle detector. A cycle means nobody has a
+  resolution, so the entry that would create it is refused: the swastika is
+  never entered, and the queue case (I follow a car that WILL move off)
+  stays legal - which is what the depth-1 R14 test got wrong.
+- **R31 Standstill error** *[measured]* — a car that moves **less than 1 m
+  within 3 min of WALL time** is probably stuck ("we might adjust these
+  values later", so both are named constants: `StandstillWindowWallS`,
+  `StandstillMinM`). Wall time, so the sim window scales with the warp
+  factor. Per car, non-overlapping windows (`SimEngine._sinceMeters`),
+  served in /state as `standstill_errors` / `standstill_last` and shown in
+  the Godot HUD.
+- **R33 Every centreline crossing is explained** *[implemented]* — crossing the
+  centreline is **not forbidden**: an R32 pass, a U-turn (§5), a turn swing, a
+  signalled merge or a pull-out all legitimately put the car on or left of it.
+  What is forbidden is a crossing **no manoeuvre asked for**. So the lane guard
+  is an invariant, not a detector with exceptions: `LaneGuard.LateralIntent(car)`
+  names the reason from state the driver model already owns
+  (`UturnActive`, `InTurnBlendZone`, `OvertakeShiftM`, `LaneChangeSignal`,
+  `PullOutFrames`), and a side change with no reason is an **error** — same class
+  as R29/R31, because the `Raceline` corridor is supposed to make it unreachable.
+  Explained crossings stay a quality metric (`centreline_crossings`, a pass out
+  and back = 2); unexplained ones count in `unexplained_crossings` per car and
+  surface in /state as `lane_guard_errors` / `lane_guard_last`, log a
+  `[R33]` decision on the car and print `!!`. Reverse-in parking is deliberately
+  NOT an excuse: §1 makes `PARK_CENTRELINE_MARGIN_M` a hard bound, so a park
+  swing may never use the oncoming lane.
+  The guard now owns the whole decision — `SimEngine` no longer pre-skips turns
+  and U-turns before calling it, and the guard no longer carries a second, older
+  skip for R32 passes. One owner, one question.
+- **R36 The oncoming lane is used for the minimum** *[new — binding user
+  decision, 2026-10-21]* — borrowing the opposite lane is a **manoeuvre with a
+  beginning and an end**, not a lane a car may drive in. The window is the
+  shortest stretch on which the pass physically fits:
+  - **in** at `obstruction − laneChangeM(v)`, the latest point from which the
+    lateral shift can still be completed before reaching the obstruction. The
+    length is the repo's own speed-dependent lane-change figure
+    (`v · LANE_CHANGE_TIME_S`, clamped to `MERGE_LEN_MIN_M`/`MERGE_LEN_MAX_M`)
+    — the same one R17 uses for a merge, not a new constant.
+  - **out** at `obstruction + (own length + obstruction length)/2 + clearance`,
+    the first point where the car's body has actually cleared it.
+  Outside that window the car belongs to its own lane, and the nav must **blend
+  the shift in and out over the window** rather than lay it down from wherever
+  the request first fired. The lane guard counts **metres driven left of the
+  centreline outside the window** as a violation — the same class of error as
+  R33's unexplained crossing, because a commitment that says "I intend to pass"
+  says nothing about how long the borrow lasts.
+  Measured on `park_block_overtake` before the rule: the car crossed the centreline
+  **48 m before** the parked car and stayed left for **230 m and counting** —
+  roughly a hundred times the borrow the manoeuvre needs — while the guard called
+  the run clean. The suite is green because none of its checks measure the borrow.
+- **Q1 Fleet flow (quality metric)** *[measured]* — the metres every car
+  drives, summed, divided by sim time. **Only meaningful for a multi-car
+  run** (a single car's flow is just its own speed), and what is compared is
+  **per car**: the fleet total over the number of cars involved. A high
+  number means fluid traffic, a low one a stuck fleet; unlike the "cars
+  moving" count it also punishes creeping at 2 km/h, and unlike a per-frame
+  speed average it counts real progress (a rolled-back pair contributes only
+  the metres it kept). Measured at the substep start for EVERY car on every
+  path (`SimEngine._flowMeters`), served as `flow_m_total` / `flow_m_per_s`;
+  the Godot HUD shows `flow/car 6.8 m/s · 410 m per car (50 cars)` and hides
+  the line for single-car runs.
 
 ### Tier 3 — Predictability & courtesy (toward other vehicles)
 - **R9 Unambiguous intent (no creeping)** *[proposed]* — a stopped or slow
@@ -598,9 +826,17 @@ then commitment.
   always output when a car brakes (visible, measurable intent). Pure
   telemetry — not a behavior rule. *Current state:* the car's brake is still
   a boolean (`Car.IsBraking` / `ControlInput.Brake`), not a continuous value.
+  What IS continuous is the applied **speed cap** (`CarCollisions` decel-limits
+  to `ComfortBrakingMps2` / `CAR_BRAKING` as needed) and it is logged as an
+  event (`avoid#<uid>` / `sign#<node>#<uid>` cap keys), not as a value.
 - **R11 Gentle braking by default** *[partial]* — normally brake gently (the
   car behind may brake less well and needs reaction time); brake harder only
-  when it becomes necessary.
+  when it becomes necessary. *Implemented:* the DRIVER MODEL demands the
+  comfort rate (`ComfortBrakingMps2` 5.0 m/s² ≈ 0.5 g plus a 1.0 s reaction
+  interval, `ApproachCapMps`) while `CAR_BRAKING` 10 m/s² stays the physical
+  maximum the sim APPLIES; the brake light comes on whenever the cap is
+  actively holding the car down (steady, because the cap is a smooth function
+  of gap). The jerk of the brake value itself is still unbounded (R18).
 - **R12 Voluntary yield (courtesy)** *(crossing)* *[proposed]* — a priority
   car may give up its right-of-way to let a long queue on the cross street
   pass. *(Optional.)*
@@ -636,21 +872,83 @@ then commitment.
   out **and** before re-merging; keep adequate lateral distance (≥ 1.5 m
   inner / 2 m outer); re-merge right as soon as possible; do not impede the
   overtaken car. The **overtaken** car must not increase its speed.
-- **R8 Lateral avoidance** *(last resort)* *[proposed]* — steer slightly to
+- **R8 Lateral avoidance** *(last resort)* *[partial]* — steer slightly to
   the side to get around a blocker, instead of requiring the other car to
   move first.
+  **Implemented for car-to-car frontal conflicts** (user rule: two cars on a
+  head-on line do not solve it by braking alone — each pulls right as far as
+  the road allows, never leaving it): `CarCollisions` measures the requested
+  shift into `Car.YieldRightM` (only against a threat on my left or dead
+  ahead, only by the room my own kerb side has left, `FrontalClearM` 0.4 m
+  body clearance asked for) and `BicycleNav.part2` applies it on top of the
+  nominal lane line, clamped to `Config.KerbOffsetM(minWidth)` of the
+  narrowest route segment — so the road can never be left from either side,
+  and the shift unwinds slowly (`YieldDecayMps` 0.005 m/substep) rather than
+  snapping back. **Not** implemented for static obstacles (§6) — there the
+  corridor bound would have to take the obstacle footprint, still a proposal.
   **Exit:** return to the lane as soon as a free path exists. **Subject to
   R1/R2:** no avoidance that creates a new collision or violates the minimum
-  turning radius.
+  turning radius. Still silent in the decision log (R20).
 - **R19 Retreat / stop** *[proposed]* — if lateral avoidance (R8) is
   physically impossible, retreat / stop is the second last-resort path (back
   to a clear space, or hold and wait).
+  **Becomes the active half of R26 (2026-10-19):** when two cars already
+  hold a single-file stretch against each other, the CONCEDER of the pair
+  must reverse back to the mouth it came from (a real narrow-road manoeuvre,
+  signed speed + the existing reverse gear), because neither can pass and
+  neither may interpenetrate. Not yet implemented: the nav needs a
+  "reverse straight back along the arm" line (the parking/U-turn reverse
+  lines are the only ones built today).
+- **R26 Passage negotiation (single-file stretches)** *(new, 2026-10-19)*
+  *[partial]* — a stretch of road that is too narrow for a pair to pass
+  (`roadWidth < wA + wB + MinPassClearanceM`) is a **single-file resource**:
+  two cars meeting head-on inside it cannot both use it, and braking alone
+  deadlocks them (measured on `fig8_xing_plain`: a mixer and a tractor,
+  both on segment 224 of a 7 m arm, 10 m apart - v1's corridor capped BOTH
+  at 0 with `[R7] car N ahead (gap -6.1 m)`, the pair wedged in the crossing
+  box and the fleet's flow fell to 20/50).
+  The drivers negotiate a claim, deterministically:
+  1. **Claim** - a car that enters such a stretch claims it; the claim is
+     per car (the segment + how far it has progressed along its own travel
+     direction), so a replay claims identically (R20).
+  2. **Who keeps it** - the car that has progressed FURTHER into the stretch
+     (entered first) holds the passage; the other is the CONCEDER. A tie
+     (both entered side by side) goes to the lower uid.
+  3. **Concession, escalating** - all steps stay physically legal:
+     (a) *do not enter*: the conceder holds at the stretch's mouth while the
+     other clears (the best case, and what prevents most wedges);
+     (b) *make room laterally*: R8 pulls both to their own right as far as
+     their kerb side allows;
+     (c) *retreat*: if the conceder is already inside and still cannot pass,
+     R19 applies - stop, reverse to the mouth, hand the passage over.
+  4. **The negotiation is visible** - the decision log names the pair and
+     the role (`[R26] single-file passage: car N holds it - waiting` on the
+     conceder), and the conceder flashes its hazard lights, the sim
+     equivalent of a driver signalling intent to the other.
+  **The same rule also decides the pair that CAN pass**: an anti-parallel
+  pair on one carriageway that DOES fit both bodies plus the clearance is
+  never a corridor threat at all - both go, each hugging its own right kerb
+  (StVO §4: pass each other on the left). Capping such a pair at 0 is what
+  produced the wedge above; the corridor test must ask "can they pass?"
+  before "are they touching?".
+  *Implemented:* the claim, the priority test, the cap hand-over
+  (`SingleFilePair` + `PassagePriority` in the v1 corridor) and the
+  "they can pass - not a threat" release. *Not yet:* step (c), the scripted
+  reverse retreat.
 
 ### Meta — system (not a traffic rule)
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
   does this); required for explainability of the tree, especially at Tier-2
-  equal-rank. *Currently logging:* R1 (`PhysicsValidator`), R2/R3/R4/R5/R6/R7
-  (`CarCollisions`), R17 and R25 (nav / `Car`). Still silent: R13 (planned
-  but not logged) and the not-yet-implemented rules (R8–R16, R18–R19,
-  R21–R24).
+  equal-rank. A logged condition must name a REAL participant: the v1
+  corridor's "touching -> stop" branch used to break out without naming the
+  blocker, so every standstill logged
+  `"[R7] car -1 ahead (gap 0.0 m)"` - a phantom that made a 35 s hold look
+  unexplainable. Fixed by naming the car before the break (2026-10-19). *Currently logging:* R1 (`PhysicsValidator`), R2/R3/R4/R5/R6/R7
+  and R14 (`CarCollisions`), R17 (nav / `LaneChangeSignal`), R25 (nav / `Car`).
+  Still silent: R8 (the lateral yield fires but logs nothing), R13 (planned
+  but not logged) and the not-yet-implemented rules (R9–R12, R16, R18–R19,
+  R21–R24). R15, R26 and R27 are implemented and log their trigger; R8 fires
+  silently. Deterministic tie-breaks are uid-based (no wall-clock or run
+  randomness); per-car jitter (e.g. `ReleaseHoldTicks`) is a pure function of
+  the uid, so a replay stays reproducible.

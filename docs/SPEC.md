@@ -1,26 +1,39 @@
 # Car Game — Specification
 
+> **Status 2026-10-19 (code-verified):** this is the master spec of the game.
+> The engine is now **C# / Godot 4.7**, not pygame: the simulator is
+> `DrivingGame.Sim` (+ `DrivingGame.Api`, `DrivingGame.Server`), the client is
+> `MapRenderer.cs`, and the Python original (`/Users/hauke/prj/car`) is
+> retired history. Sections that describe the pygame frontend (Visual Layout,
+> HUD, Minimap, Controls Summary, Game Loop, Debug Features, the Python
+> `config.py` listing) are kept as history - the Godot client is specified in
+> [GODOT_FRONTEND.md](GODOT_FRONTEND.md), the behaviour in
+> [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md), the interface in
+> [REST_API.md](REST_API.md), the workflow in [TESTING.md](TESTING.md), and
+> the units rule in [UNITS.md](UNITS.md). Where this document and the code
+> disagree, the code (esp. `DrivingGame.Sim/Config.cs`) wins.
+
 ## Overview
 
-A 2D top-down driving game rendered with **Pygame**, where the playable world is built from **real road network data extracted from OpenStreetMap (OSM)**. The player drives a car along actual streets in **Kleinmachnow** (south of Berlin).
-
-## Core Concept
-
-- Load the road network from the **OSM-Wars PostgreSQL database** (PostGIS, `road_geometry` table)
-- Parse the data into a graph of **nodes** (intersections/points) and **segments** (road pieces)
-- Render roads as **2D polygons** with real-world widths (no simple lines)
-- Two driving modes: **FREE** (manual steering) and **BICYCLE** (intent-based AI executed by the kinematic bicycle model). How the car executes each maneuver (parking, turning, U-turn, ...) is specified in [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md)
+A 2D top-down driving game where the playable world is built from **real road
+network data extracted from OpenStreetMap (OSM)**. The player drives a car
+along actual streets in **Kleinmachnow** (south of Berlin), or on the
+synthetic `basic` test map that carries one deliberate road situation per tile.
 
 ## Technical Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Game engine | **Pygame 2.6.1** |
-| Road geometry | **Shapely** (line merging, corner rounding, buffering into paved-area polygons - shared by rendering AND on-road physics checks) |
-| OSM data source | **OSM-Wars PostgreSQL DB** (PostGIS, `road_geometry` table, Brandenburg schema) |
-| DB access | **psycopg3** |
-| Language | **Python 3.14** |
+| Simulation | **C# / .NET 9** (`DrivingGame.Sim`), fixed 60 Hz timestep on its own thread |
+| Geometry | **NetTopologySuite** (JTS: buffer/erosion, `unary_union`, `LineMerger`, prepared geometries) + hand-written centripetal Catmull-Rom (`SmoothGeometry`) |
+| Client | **Godot 4.7 (.NET)** — `MapRenderer.cs` (layer-3 presentation), `SimHost.cs` (embedded mode) |
+| Interface | **ASP.NET Core (Kestrel)** REST on `127.0.0.1:5001` (`DrivingGame.Api`) |
+| OSM data | `data/osm_cache/` JSON cache (primary); Npgsql refresh optional/later |
 | Region | **Kleinmachnow** (south of Berlin) |
+| Tests | C# xunit (`DrivingGame.Sim.Tests`) + Python e2e (`tests/test_turning.py`) |
+
+Historical (Python original, retired): Pygame 2.6.1, Shapely, psycopg3,
+Python 3.14.
 
 ## Architecture
 
@@ -129,10 +142,27 @@ bicycle model (`src/bicycle_nav.py`: reference line + speed profile + pure pursu
 ## Physics
 
 ### Speed & Acceleration
-- **Max speed**: 180 km/h (50 m/s)
-- **Acceleration**: 2.8 m/s² (0–100 km/h in ~10 seconds, normal car)
-- **Braking**: 10 m/s² (full ABS braking, ~1g)
-- **Cruise control**: W-release maintains speed (no automatic deceleration)
+
+Current values live in `DrivingGame.Sim/Config.cs` (the single source of
+truth); the numbers below are the sedan class.
+
+- **Max speed**: 200 km/h (`CAR_SPEED = 55.6` m/s) for a car; per-class
+  limits are lower (truck/heavy_truck 80 km/h) - see
+  `Config.VEHICLE_CLASS_SPECS`
+- **Acceleration**: 2.8 m/s² (0–100 km/h in ~10 s, normal car)
+- **Braking**: 10 m/s² (full ABS braking, ~1 g) - the physical maximum the
+  car can still EXECUTE. The DRIVER model demands less (see
+  `CarCollisions.ComfortBrakingMps2 = 5.0` m/s² + `ReactionTimeS = 1.0` s,
+  docs/Human Factor Model.md)
+- **Coasting (implemented)**: with the throttle off a car no longer holds
+  its speed - it sails. Coasting deceleration is
+  `Config.CoastDecel(v) = COAST_ROLL_DECEL + COAST_AERO_COEF·v²`
+  (0.5 m/s² + 0.004·v², i.e. ~1.5 m/s² at 50 km/h); the driver only touches
+  the brake pedal when the speed excess over the target is above
+  `SAIL_BAND_MPS` (1.5 m/s ≈ 5 km/h) or coasting cannot shed it
+  (`BicycleNav.part3.cs`)
+- **Reverse**: top speed `REVERSE_MAX_SPEED_M` = 30 km/h, signed speed in
+  FREE mode and in the reverse-in park / three-point turn
 
 ### Automatic Braking (BICYCLE mode)
 
@@ -531,8 +561,16 @@ Only roads with these highway types are loaded:
 ## Car Visual
 
 ### Body
-- **Size**: 4.5 m × 2.0 m (length × width)
-- **Color**: Red (#B41E1E body, #D73C3C front strip)
+- **Size**: 4.4 m × 1.8 m (length × width) for the sedan
+  (`Config.CAR_LENGTH_M`, `CAR_WIDTH_M`); every vehicle model has its own
+  footprint in `Config.VEHICLE_SIZES` (single source of truth for renderer
+  AND collision math)
+- **Reference point**: `Car.x/y` is the **rear axle** (the bicycle model's
+  pivot), not the body centre - `Car.BodyCenter()` shifts it forward for
+  anything that draws or measures the body
+- **Color**: the classic red sprite was DROPPED (user decision 2026-09-08,
+  style mismatch); cars render as one of seven photo-derived vehicle sprites
+  (`Config.CAR_COLORS`)
 - **Rotation**: Smooth heading (0° = north/up)
 
 ### Lights
@@ -626,6 +664,11 @@ BG_COLOR = (34, 34, 34)
 
 ### Car Physics
 ```python
+# HISTORICAL (Python config.py). The live values are in
+# DrivingGame.Sim/Config.cs - see the "Physics" section above for the
+# current sedan numbers (CAR_SPEED 55.6 m/s = 200 km/h, CAR_LENGTH_M 4.4,
+# CAR_WIDTH_M 1.8, plus the coasting/sailing constants and the per-class
+# VEHICLE_CLASS_SPECS / VEHICLE_SIZES tables).
 CAR_SPEED = 50          # m/s = 180 km/h
 CAR_ACCELERATION = 2.8  # m/s² (0-100 in ~10s)
 CAR_BRAKING = 10.0      # m/s² (ABS braking)
@@ -645,9 +688,19 @@ MINIMAP_CAR_COLOR = (100, 150, 255)
 
 ### Road Geometry
 ```python
-JUNCTION_WIDENING_M = 4.0      # curb-radius flare added at real (degree 3+) junctions
-ROAD_CORNER_RADIUS_M = 6.0     # visible curb-style rounding radius at road bends
-ROAD_EDGE_TOLERANCE_M = 0.5    # shared slack between planned-arc validation and live on-road checks
+# HISTORICAL. Current C# constants (DrivingGame.Sim/Config.cs):
+#   ROAD_EDGE_TOLERANCE_M     = 0.35  (was 0.5)
+#   LANE_CENTRE_MARGIN_M      = 0.50  (corridor's inner bound)
+#   ROAD_CORNER_RADIUS_M      = 6.0   (fillet at a REAL corner only -
+#                                      gentle bends are splined through,
+#                                      see RoadNetworkGeometry.SmoothChain)
+#   JUNCTION_CORNER_RADIUS_M  = 4.0   (Eckausrundung of the grass corner at
+#                                      degree>=3 nodes, SmoothGeometry)
+#   WIDTH_TAPER_RATIO         = 3.0   (width-change taper, ~1:3 verge)
+#   WIDTH_TAPER_OVERLAP_M     = 10.0  (wide ribbon continues past the node
+#                                      along the narrow neighbour)
+#   CURVATURE_WINDOW_M        = 1.0   (fixed physical window)
+#   JUNCTION_WIDENING_M       = 4.0   (junction-node paint radius)
 ```
 
 ### Bounding Box (Kleinmachnow)
@@ -662,25 +715,39 @@ BOUNDING_BOX = {
 
 ## Project Structure
 
+### Current (C# sim + Godot client)
+
+```
+driving-game/                    one Godot 4.7 (.NET) project at the root
+├── project.godot, Main.tscn     the client scene (MapRenderer + SimHost nodes)
+├── MapRenderer.cs               layer-3 presentation only (roads, markings,
+│                                signs, cars, lights, minimap, HUD, camera)
+├── SimHost.cs                   embedded mode: sim in-process on its own
+│                                60 Hz thread + embedded REST API
+├── DrivingGame.Sim/             the world simulator (physics + world rules)
+│   ├── Config.cs                ALL constants (single source of truth)
+│   ├── RoadNetwork(.Geometry), SmoothGeometry, Raceline, RefLine
+│   ├── BicycleNav.part1-3, Car, Driver, SimEngine
+│   ├── CarCollisions, Obstacles, LaneGuard, PhysicsValidator, TestMaps
+│   └── CrashDumper, RunTag, OsmLoader, MathAndNtsCompat
+├── DrivingGame.Api/             GameApi.cs + MapPayload.cs (shared by both
+│                                hosts: console + Godot-embedded)
+├── DrivingGame.Server/          console host (headless REST on :5001)
+├── DrivingGame.Sim.Tests/       xunit suite (91 pass / 2 skip)
+├── tests/test_turning.py        the e2e suite (drives the live API)
+├── scripts/run_e2e.sh           the canonical e2e runner
+├── data/osm_cache/, data/raceline_reference/, data/obstacles/
+└── logs/                        crash forensics (RunTag-prefixed)
+```
+
+### Historical (Python original, `/Users/hauke/prj/car` — retired)
+
 ```
 car/
-├── docs/
-│   └── SPEC.md              # This file
-├── src/
-│   ├── __init__.py
-│   ├── main.py              # Entry point, game loop
-│   ├── config.py            # Settings & constants
-│   ├── osm_loader.py        # PostgreSQL data fetcher
-│   ├── road_network.py      # Graph + spatial queries
-│   ├── renderer.py          # Pygame drawing (roads, HUD, minimap)
-│   ├── car.py               # Car physics & modes
-│   └── camera.py            # Camera / viewport logic
-├── tests/
-│   ├── __init__.py
-│   └── test_road_network.py  # 10 unit tests (projection, spatial)
-├── requirements.txt
-├── .gitignore
-└── README.md
+├── src/  main.py, config.py, osm_loader.py, road_network.py,
+│         renderer.py (pygame), car.py, camera.py, bicycle_nav.py,
+│         raceline.py, rest_api.py, ...
+└── tests/ test_turning.py, test_obstacles.py, test_road_network.py
 ```
 
 ## Implementation Status
@@ -749,22 +816,32 @@ car/
   - `tests/test_obstacles.py` (36 headless tests) +
     `scripts/verify_obstacles_live.py` (live REST verification)
 
-### 🚧 In Progress
-- [ ] **Realistic turning physics** (circular arc with validation)
-  - Speed-dependent turning radius ✅ (implemented)
-  - Arc geometry calculation ✅ (implemented)
-  - Generous junction buffer ✅ (implemented)
-  - **Issue**: Arcs planned but instant snaps still occur
-  - **Test status**: 5/6 pass, 1/6 fail (118.4° snap)
-  - Need to debug why arc execution isn't happening
+### ✅ Turning physics — DONE (C# engine, 2026-10-19)
 
-### 🐛 Known Issues
-- **Instant heading snaps**: Detected by tests (>30° in one frame)
-  - Occurs at segment transitions
-  - Arc system exists but not being used consistently
-  - Test suite successfully detects violations
-- **Pygame font module broken**: Worked around with PIL text rendering
-- **Pygame PNG support missing**: Worked around with PIL image loading
+The circular-arc planner above was replaced by the raceline optimisation
+(`docs/DRIVING_MANEUVERS.md` §4, `docs/TURN_REWORK_PLAN.md` §14) and the
+kinematic bicycle model. Current e2e state (run 2026-10-19, `--warp 4`,
+`scripts/run_e2e.sh`):
+
+- **23/23 scenarios pass** (1 skipped: `fig8_stress`, spawn placement under
+  review) - 0 off-road, 0 instant heading snaps, 0 teleports, 0 wrong-side,
+  0 wrong end segment, 0 timeouts
+- both multi-car crossing scenarios (`fig8_xing` signed, `fig8_xing_plain`
+  right-before-left) survive their full 60 s window with 50 cars and keep
+  flowing (26-50 of 50 cars moving at the 10 s reports)
+- C# unit tests: **91 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`)
+  - skipped: `CrossingStress_NoContact_Within_15s` (the crossing bug in
+    unit-test form) and `RebaselineReferenceFile` (manual tool)
+
+### 🐛 Known Issues (current)
+- **Multi-car spawn placement** (`fig8_stress`): the 51-car figure-8 phase
+  fails on off-road/wrong-side before any crash; scenario is skipped from
+  the numbered suite (raw `--only fig8_stress ...` still runs it).
+- **Per-vehicle driving geometry** is still sedan-sized (see the roadmap
+  section below): trucks get real masses/footprints but plan and steer with
+  a sedan envelope.
+- Pygame-era workarounds (PIL fonts, PIL PNG loading) are gone with the
+  pygame frontend - history only.
 
 ### 🔮 Future Enhancements
 - Obstacle system Part 2+: movable obstacles (other cars, pedestrians) and
@@ -810,29 +887,99 @@ Implemented in `DrivingGame.Sim/CarCollisions.cs`, run per physics substep in
 [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8. Two layers:
 
 1. **Avoidance (speed cap).** Every car gets a cap = the fastest speed from
-   which `CAR_BRAKING` still stops behind the nearest car ahead (plus a
-   standstill gap), applied as decel-limited braking AFTER the driver's own
+   which it can still stop behind the nearest car ahead (plus a standstill
+   gap), applied as decel-limited braking AFTER the driver's own
    longitudinal logic — so it works for every driver (BICYCLE and FREE,
    incl. U-turn/reverse) without touching their code.
-   - **v1** — geometric forward corridor (±1.8 m of own axis, 40 m look-ahead,
-     3 m gap); cap = `v_ahead·axis + sqrt(2·CAR_BRAKING·max(gap−3 m, 0))`.
-     Broadphase = uniform 20 m grid. Handles smooth car-following.
+   - **v1** — route-true forward corridor: a car counts as "ahead of me"
+     while its centre is laterally within the pair's **body sum**
+     `(my WidthM + its WidthM)/2` of my axis (measured: a fixed 1.8 m band
+     dropped a tractor/mixer pair 2.9 m apart and they never braked), walked
+     along the ROAD (`CarCollisions.BuildRoadAhead`, cached per car every
+     `RouteRebuildS` of sim time) rather than along the heading ray or the
+     nav line; look-ahead is **speed-dependent**
+     (`LookAheadForSpeed`: reaction distance + comfort braking distance +
+     gap, floor `LookAheadMinM` 40 m, cap `LookAheadMaxM` 300 m), standstill
+     gap 3 m. Broadphase = uniform 20 m grid (`CellSizeM`).
+   - **Driver model (R7 + R11)** — the demanded stop uses
+     `ApproachCapMps`: reaction interval (`ReactionTimeS` 1.0 s) plus
+     comfort braking (`ComfortBrakingMps2` 5.0 m/s² ≈ 0.5 g), measured to the
+     leader's **final rest position**; a leader that is already braking
+     counts as that wall. `CAR_BRAKING` (10 m/s²) stays the physical maximum
+     the sim APPLIES, not what the driver demands.
    - **v2** — time-window pair prediction for oblique/crossing conflicts:
      each car's future path is swept every 0.1 s up to 5 s (along the
-     `BicycleNav.Ref` refline when routed, else linear), earliest body-box
-     overlap classified into graded TTC bands (≤1 s → stop, ≤3 s → cap,
-     else mild anticipation). Prediction boxes are length-padded (+2 m/end).
-     **Right-before-left**: the car seeing the other come from its right
-     yields (world-frame dot-product closing test; lower-uid tie-break).
+     `BicycleNav.Ref` refline when routed, else linear, with a
+     `MinSweepSpeedMps` 1.6 m/s floor so a cap cannot "clear itself"),
+     earliest body-box overlap classified into graded TTC bands
+     (`GradedCap`). **Right-before-left**: the car seeing the other come
+     from its right yields (world-frame closing test; lower-uid tie-break).
+   - **R14 entry gate** — a car never enters a crossing whose EXIT is
+     occupied: the box and my own exit LANE (a ~body-width band right of the
+     through axis, not the whole arm) are scanned out to `R14ExitScanM` 25 m
+     for any body that is standing, crawling or braking; if blocked, the car
+     holds AT the painted halt line (signed approach) or the crossing MOUTH
+     (unsigned) with a reaction+comfort cap - independent of right-of-way,
+     a Vorfahrt car holds too.
+   - **R8 lateral yield (partial)** — against a head-on conflict a car pulls
+     RIGHT as far as its own road allows (`Car.YieldRightM`, set by
+     `CarCollisions`, clamped by the nav to the kerb line of the narrowest
+     route segment, decaying back to the lane line at 0.005 m/substep),
+     instead of trusting a brake alone.
 2. **Response (contact resolution).** If two body boxes overlap after the
    step, both cars roll back to their pre-step pose and stop — no
-   interpenetration, no teleport.
+   interpenetration, no teleport. `BodyForResolve` shrinks the boxes ~5 cm
+   so two bodies merely TOUCHING are not rolled back every tick forever.
+   Each contact is one **crash episode** (`Car.CrashEpisodes`, monotonic):
+   `InContact` is transient and a 0.1 s poll can miss the whole episode, so
+   the suite watches the counter, not the flag.
 
 Per-class footprints are used throughout collision math (per-pair bumper gap
 in v1, per-car prediction boxes in v2, real body corners in `Resolve`).
-Verified by `DrivingGame.Sim.Tests/CollisionTests.cs` and the mixed-fleet
-fig8 regression; 96/96 sim tests green. `CollisionsEnabled` flag +
+Verified by `DrivingGame.Sim.Tests/CollisionTests.cs`,
+`CrossingStressFlutterTests` and the mixed-fleet crossings; unit suite
+**91 passed / 2 skipped** (2026-10-19). `CollisionsEnabled` flag +
 `--no-collisions` CLI arg exist for isolation.
+
+### Road signs, halt lines & the crossing box — DONE
+
+The synthetic map can now carry real right-of-way furniture:
+
+- `RoadNetwork.Signs` maps `(segmentIdx, nodeId)` → `SignType {Yield,
+  Priority}`; `TestMaps`/`MapBuilder.Sign()` places them (the signed fig-8
+  crossing gives the SE-NW diagonal Priority, the SW-NE diagonal Yield).
+  `GET /map` exports them (`signs`) and the Godot client draws the artwork
+  from `assets/signs/` (`vorfahrt_gewaehren.svg`, `vorfahrtsstrasse.svg`).
+- A yield-signed approach gets a painted **halt line** across the yielding
+  lane only (`RoadNetwork.GetStopLines()`, `STOP_LINE_WIDTH_M` 0.5 m,
+  `STOP_LINE_EDGE_GAP_M` 0.5 m from the right kerb, may touch the centreline)
+  and the same line is what the driver model stops AT
+  (`CarCollisions.YieldStopNoseGapM` 6.0 m nose gap - measured so every
+  vehicle class clears the priority lane).
+- Centreline paint stops at each arm's own **mouth line**
+  (`CENTERLINE_JUNCTION_GAP_M` 0.5) and is **solid** for
+  `CENTERLINE_SOLID_BEFORE_JUNCTION_M` 6.0 m before a junction; a small
+  white disc (`CROSSING_MARKER_DIAMETER_M` 0.3) marks true degree≥4 crossings
+  (user-requested marker, not a German rule).
+
+### Crash forensics & the per-car decision log — DONE
+
+- **Decision log** (`Car.Decisions`, cap 100): one entry per CHANGE in the
+  reason a car is held back, tagged with the firing rule
+  (`[R1]`, `[R2]`, `[R3]`, `[R4]`, `[R5]`, `[R6]`, `[R7]`, `[R14]`, `[R17]`,
+  `[R25]`). Served by `GET /car/{uid}/decisions`; the Godot client shows it
+  in a click-to-inspect window under the minimap (newest first), so a stuck
+  car always answers "why am I stopped?".
+- **Crash dumps** (`CrashDumper.cs`): on a fresh contact the sim writes both
+  cars' decision logs + poses to `logs/<tag>_crash_<t>_carNN_carMM.json`
+  (impact speeds from the pre-rollback pose).
+- **Run tag** (`RunTag.cs`): every `POST /run_test` gets `T_001`, `T_002`,
+  … persisted in `logs/run_counter`, so the suite log and every crash dump
+  of that run share the prefix (`T_000` = no run: unit tests, manual drives).
+- **Cap persistence** (docs/Human Factor Model.md §3/§5): a brake decision is
+  held for `ReleaseHoldTicks` = 0.5 s + deterministic per-uid jitter (0…0.5 s)
+  before it may release, so boundary situations brake to rest instead of
+  flickering on/off every few substeps.
 
 ### Flat crossing maps & right-of-way stress — DONE
 
@@ -840,9 +987,19 @@ fig8 regression; 96/96 sim tests green. `CollisionsEnabled` flag +
 `basic` map — tile (2,3) "Right-of-way figure-8" (WITH Vorfahrt signs) and
 tile (3,3) "un-signed figure-8" (right-before-left) — so the two branches
 truly interact at grade. e2e scenarios `fig8_xing` (signed) and
-`fig8_xing_plain` (no signs) run 50 cars (25/direction) for up to 300 s of
-sim time or until the first crash. (The older single-branch density probe
-`fig8_stress` is currently skipped pending a spawn-placement fix.)
+`fig8_xing_plain` (no signs) run 50 cars (25/direction, all seven vehicle
+classes, alternating direction) for up to **60 s of sim time** (user
+decision 2026-10-19: surviving one minute = success; the old 300 s window
+ran "forever" on the wall clock) or until the first crash. Both pass.
+(The older single-branch density probe `fig8_stress` is currently skipped
+pending a spawn-placement fix.)
+
+**Spawn discipline** (user rule, implemented in the suite): the fleet must
+not move at all while it is being placed - the runner FREEZES the sim,
+places every car at rest (`POST /teleport` with `speed: 0`), then releases
+the brake and hands out the throttle. A rolling start put the first cars at
+speed before the last one existed, so the whole fleet arrived at the crossing
+at once and locked it.
 
 ### Driver profiles (Cautious / Normal / Sporty) — PLANNED
 
@@ -924,6 +1081,10 @@ demands it, with an explicit shared-state audit and a determinism re-check.
 - **Memory**: ~50 MB for full network
 
 ## Testing
+
+> **Current workflow lives in [TESTING.md](TESTING.md)** (C# host + Godot
+> client + `scripts/run_e2e.sh`). The commands below are the retired Python
+> era, kept for the record:
 
 ### Unit Tests (headless, no game process needed)
 ```bash
@@ -1228,8 +1389,15 @@ python -m src.main --dump  # Saves frame 30 to /tmp/car_frame.bmp
 
 ---
 
-**Last Updated**: 2026-08-25  
-**Status**: ✅ Actively maintained - road corner rendering + on-road physics unified and calibrated against real-world turning behavior  
-**Version**: 0.96 (fully playable, comprehensive test suite, professional sprite, REST API, Shapely-based road geometry)  
-**Test Results**: `corner_right_entry` right-turn test passing (smooth arc, stays on road, realistic ~15 km/h corner speed)  
-**Lines of Code**: ~6000+ lines (including test infrastructure)
+**Last Updated**: 2026-10-19 (code-verified against `DrivingGame.Sim/**`,
+`DrivingGame.Api/**`, `MapRenderer.cs`, `tests/test_turning.py`)
+**Status**: ✅ C# engine + Godot client live; pygame retired; the Python
+reference repo is history
+**Version**: 1.0 (kinematic bicycle model, raceline optimisation, smoothed
+chain geometry, multi-vehicle classes, car-to-car collision & avoidance,
+road signs + halt lines, crash forensics, embedded/HTTP dual pipeline)
+**Test Results**: e2e **23/23** at `--warp 4` (1 skipped: `fig8_stress`);
+C# unit suite **91 passed / 2 skipped**; both 50-car crossing scenarios
+survive their 60 s window clean
+**Lines of Code**: ~19.5k lines C# (sim + API + client + tests), ~3.9k lines
+Python (e2e suite + QA scripts)

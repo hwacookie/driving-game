@@ -172,6 +172,26 @@ public partial class MapRenderer : Node2D
     /// crashed car, so a failed crossing run can be re-watched on the impact
     /// instead of the map-wide default view.</summary>
     private long _focusUid = 0L;
+    // The COURTESY flash (docs/RIGHT_OF_WAY_NEGOTIATION.md §6, the user's
+    // word bitteschön): drawn by the car that CONCEDES a right-of-way
+    // resource, aimed at the car whose passage it grants. A cone in the
+    // WORLD layer, not a child of the car - the car node rotates with the
+    // heading and the flash must point at the OTHER car, not at the nose.
+    private readonly Dictionary<long, Polygon2D> _courtesy = new();
+    // --focus also names a ROLE, resolved every frame from the live state:
+    // "parked" = the car parked in the lane (an obstruction never moves, so
+    // pinning on it is what the pass under test is about), "slow" = the
+    // slowest car still rolling (the crawler the pass must squeeze past).
+    // The staged uid is not knowable before the run, so a number cannot be
+    // used for a scenario that stages its cast itself.
+    private string _focusRole = "";
+    // A NAME is stronger than a predicate: the scenario authored the cast,
+    // so "parked_car" IS that car - no relative-speed rule, no latch
+    // ambiguity. Resolved from the per-car hud_label the spawn carries.
+    private string _focusName = "";
+    private bool _focusAnnounced;
+    private long _focusAnnouncedUid;
+    private int _focusFrames;
     private long? _selectedUid;    // click-selected car (info window under the minimap)
     // Decision log for the selected car (info window): polled from
     // GET /car/{uid}/decisions (sim side: Car.Decisions - one event per
@@ -205,6 +225,10 @@ public partial class MapRenderer : Node2D
     private Label _speedLabel;
     private string _lastSpeedText = "";
     private Label _testLabel;          // "5/21" from POST /label (via /state)
+    private Label _flowLabel;          // fleet flow: m/s + absolute metres
+    private double _flowRate = -1.0;   // m/s over the whole run (-1 = n/a)
+    private double _flowTotal = -1.0;  // metres driven since sim start
+    private int _standstillN = 0;      // R31: cars stuck < 1 m in the window
     private Panel _infoPanel;          // click-to-inspect car info window
     private Label _infoSpeed;          // live speed row (updated per frame)
     private TextEdit _infoText;        // selectable/scrollable/copyable log
@@ -240,6 +264,8 @@ public partial class MapRenderer : Node2D
         public string Color = "blue";
         public string Driver = "BICYCLE";   // driver class (BICYCLE/FREE), from /state
         public bool BlinkL, BlinkR, Hazard, Braking, HeadlightsOn, TaillightsOn;
+        public long CourtesyFor = 0L;
+        public string CourtesyKind = "";
         public (float X, float Y, float Hdg)? FlagGreen, FlagRed;
         public string HudLabel;
         // Collision footprint (the box used for crash detection), in metres,
@@ -379,7 +405,10 @@ public partial class MapRenderer : Node2D
             }
             else if (args[i] == "--focus" && i + 1 < args.Length)
             {
-                _focusUid = long.Parse(args[i + 1]);
+                var fa = args[i + 1];
+                if (fa == "parked" || fa == "slow") _focusRole = fa;
+                else if (long.TryParse(fa, out var uidv)) _focusUid = uidv;
+                else _focusName = fa;   // a NAME the scenario gave the car
                 // The focus car also decides the scale: the crash, close up.
                 _overrideZoom = CrashZoom;
             }
@@ -399,6 +428,36 @@ public partial class MapRenderer : Node2D
                 _embeddedMapName = args[i + 1];
             else if (args[i] == "--port" && i + 1 < args.Length)
                 _embeddedPort = int.Parse(args[i + 1]);
+            else if (args[i] == "--review-name" && i + 1 < args.Length)
+            {
+                _reviewName = args[i + 1];
+                i += 1;
+            }
+            else if (args[i] == "--review-at" && i + 1 < args.Length)
+            {
+                _reviewAt = int.Parse(args[i + 1]);
+                i += 1;
+            }
+            else if (args[i] == "--review")
+            {
+                // The Simulationsreviewer (docs/SIMULATIONS_REVIEWER.md): a
+                // SECOND WINDOW of this client that draws a TAPE frame instead
+                // of the live sim. Optional path - without one the newest tape
+                // in tests/ is used.
+                _review = true;
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                {
+                    _reviewPath = args[i + 1];
+                    i += 1;
+                }
+                if (args[i] == "--review-at" && i + 1 < args.Length)
+                {
+                    // Start the cursor somewhere inside the run - a review
+                    // screenshot of a known moment needs it.
+                    _reviewAt = int.Parse(args[i + 1]);
+                    i += 1;
+                }
+            }
         }
 
         // Phase 7: pick the communication method. Embedded mode creates the
@@ -414,6 +473,36 @@ public partial class MapRenderer : Node2D
         }
         else
             GD.Print("Source: HTTP (external server on :5001)");
+
+        // Review mode: load the tape BEFORE anything is fetched, and build its
+        // HUD (the two-line readout + the scrub bar with the fluidity curve).
+        if (_review)
+        {
+            string tape = _reviewPath;
+            if (tape.Length == 0)
+                tape = NewestTape();
+            if (tape.Length > 0 && LoadTape(tape))
+            {
+                // Index the tape ONCE - every per-frame scan of the whole
+                // run is what put the review window at ~2 fps.
+                BuildTapeIndex();
+                GD.Print($"REVIEW of {TapeNameOf(tape)}: {_tape.Count} substeps, " +
+                         $"dt {_tapeDt:F6} s, map {_tapeMap} #{_tapeHash}");
+            }
+            else
+            {
+                _review = false;
+                GD.Print("!! review: no tape readable - falling back to the live view");
+            }
+            BuildReviewHud();
+            BuildReviewSlots();
+            BuildRunPicker();
+            // A review window draws the TAPE, so a live sim beside it is
+            // irrelevant to the picture - and the live surface (speed label,
+            // flow, test runner) is hidden per frame. ⏹ stop is what freezes
+            // the host, and only when the user presses it (docs/
+            // SIMULATIONS_REVIEWER.md).
+        }
 
         // The window title carries the REST port: two windows of this
         // project differ ONLY by the server they talk to - the e2e host and
@@ -475,19 +564,24 @@ public partial class MapRenderer : Node2D
             _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
                 OnStateResponse(code, body, _stateHttpA);
             RequestState(_stateHttpA);
-            _decHttp = new HttpRequest { UseThreads = true, Timeout = 1.0 };
-            AddChild(_decHttp);
-            _decHttp.RequestCompleted += (id, code, hdr, body) =>
-                OnDecisionsResponse(code, body);
         }
 
         // Test-runner UI + its own HTTP node (the map/state nodes are busy
         // with their pipelines).
+        // The decision fetch belongs to the CLIENT, not to the REST-source
+        // branch: embedded mode has a REST API too (in-process, on
+        // --port), and clicking a car used to dereference a null _decHttp
+        // there. One node, the port the client actually talks to.
+        _decHttp = new HttpRequest { UseThreads = true, Timeout = 1.0 };
+        AddChild(_decHttp);
+        _decHttp.RequestCompleted += (id, code, hdr, body) =>
+            OnDecisionsResponse(code, body);
+
         _cmdHttp = new HttpRequest { UseThreads = true, Timeout = 5.0 };
         AddChild(_cmdHttp);
         _cmdHttp.RequestCompleted += (id, code, hdr, body) =>
             OnCmdResponse(code, body);
-        BuildRunTestUi();
+        if (!_review) BuildRunTestUi();   // the reviewer has its own surface
 
         // --run-test <N>: fill the field and fire the same code path as a
         // button click, a moment after the UI is built.
@@ -817,6 +911,20 @@ public partial class MapRenderer : Node2D
             _zoomLabel.Position = new Vector2(8, 8); // pygame: (8, 8)
             layer.AddChild(_zoomLabel);
 
+            // Fleet flow (the quality metric of 2026-10-19): the metres the
+            // WHOLE fleet drives per second of sim time, plus the absolute
+            // total. High = fluid traffic, low = the fleet is stuck - see
+            // docs/DRIVING_MANEUVERS.md §8 R28.
+            _flowLabel = new Label();
+            _flowLabel.AddThemeStyleboxOverride("normal", sb);
+            _flowLabel.AddThemeColorOverride("font_color",
+                new Color(180 / 255f, 220 / 255f, 180 / 255f));
+            _flowLabel.AddThemeFontSizeOverride("font_size", 20);
+            _flowLabel.Position = new Vector2(8, 34);
+            _flowLabel.Text = "";
+            _flowLabel.Visible = false;   // until the first /state frame
+            layer.AddChild(_flowLabel);
+
             // Speed readout under the minimap: bound car (or first car).
             _speedLabel = new Label();
             _speedLabel.AddThemeStyleboxOverride("normal", sb);
@@ -1002,6 +1110,52 @@ public partial class MapRenderer : Node2D
 
     /// <summary>The port a REST URL names ("http://127.0.0.1:5001/map" ->
     /// 5001); 0 when it does not name one.</summary>
+    /// <summary>The ONE name matcher both clients use: the live path feeds
+    /// the cast it reads from /state, the reviewer feeds the tape header's
+    /// names= map. Two sources, one rule - "the parked car" means the same
+    /// car in the window and in the review of the same run.</summary>
+    private static long MatchName(string name, Dictionary<long, string> cast)
+    {
+        foreach (var kv in cast)
+            if (kv.Value == name) return kv.Key;
+        return 0L;
+    }
+
+    /// <summary>One warm cone from the conceder toward the car it grants
+    /// passage to. Length scales with the gap (capped), so the gesture reads
+    /// as "after you" in the direction of the OTHER car rather than as a
+    /// headlight beam.</summary>
+    private void DrawCourtesy(long uid, Node2D node, CarMeta meta)
+    {
+        if (!_courtesy.TryGetValue(uid, out var cone))
+        {
+            cone = new Polygon2D();
+            _world.AddChild(cone);
+            _courtesy[uid] = cone;
+        }
+        if (meta.CourtesyFor == 0L || !_carNodes.TryGetValue(meta.CourtesyFor, out var target))
+        {
+            cone.Visible = false;
+            return;
+        }
+        var to = target.GlobalPosition - node.GlobalPosition;
+        var dM = to.Length() / _cam.Zoom.X;
+        if (dM < 0.2) { cone.Visible = false; return; }
+        var dir = to.Normalized();
+        var len = Mathf.Clamp((float)dM * 0.45f, 0.6f, 2.6f);
+        var side = len * 0.22f;
+        cone.Polygon = new Vector2[]
+        {
+            Vector2.Zero,
+            dir * len + new Vector2(-dir.Y, dir.X) * side,
+            dir * len - new Vector2(-dir.Y, dir.X) * side,
+        };
+        cone.GlobalPosition = node.GlobalPosition + dir * 0.35f * len;
+        cone.Color = new Color(1f, 0.85f, 0.45f, 0.38f);
+        cone.Visible = true;
+        cone.ZIndex = 40;
+    }
+
     private static int PortOfUrl(string url)
     {
         var at = url.LastIndexOf(':');
@@ -1149,6 +1303,7 @@ public partial class MapRenderer : Node2D
 
     public override void _Input(InputEvent e)
     {
+        if (_review) ReviewInput(e);
         if (e is InputEventKey k)
         {
             // NOTE: Key.A.ToString() is "A", not "KeyA" — match on the enum.
@@ -1271,13 +1426,39 @@ public partial class MapRenderer : Node2D
         // (serialize + parse keeps state application single-sourced; the cost
         // is negligible vs an HTTP round trip - profiled at G5 via the EMBED
         // motionlog line).
-        if (_simHost != null)
+        if (_review)
+        {
+            ReviewTick(delta);
+        }
+        else if (_simHost != null)
         {
             long t0 = (long)Time.GetTicksUsec();
             IngestState(JsonSerializer.SerializeToUtf8Bytes(
                 _simHost.Engine.StateSnapshot()), "embedded /state");
             if (_motionLog != null)
                 _motionLog.WriteLine($"EMBED {(long)Time.GetTicksUsec() - t0}us");
+        }
+
+        // Fleet flow readout: updated in _Process (NOT in UpdateCars) so it
+        // shows even before a car exists - the numbers are a property of the
+        // sim, not of the cars on screen. Hidden in review mode: those numbers
+        // describe the LIVE sim, and the review window's own readout already
+        // carries the tape's fluidity.
+        // Fleet flow readout. The numbers only mean anything for a MULTI-car
+        // run (a single car's flow is just its own speed), so the line is
+        // hidden otherwise - and what is shown is PER CAR: the fleet total
+        // divided by the number of cars involved.
+        if (_flowLabel != null && !_review)
+        {
+            int nCars = _carBuf.Count;
+            bool show = _flowRate >= 0.0 && nCars > 1;
+            _flowLabel.Visible = show;
+            if (show)
+                _flowLabel.Text = $"flow/car {_flowRate / nCars:F1} m/s  " +
+                                  $"{_flowTotal / nCars:F0} m per car " +
+                                  $"({nCars} cars)" +
+                                  (_standstillN > 0
+                                      ? $"  !! stuck: {_standstillN}" : "");
         }
 
         var dir = Vector2.Zero;
@@ -1472,15 +1653,18 @@ public partial class MapRenderer : Node2D
             {
                 bool anyNewCar = false;
                 long newestUid = 0;
+                long roleParked = 0, roleSlowest = 0, roleNamed = 0;
+                var liveCast = new Dictionary<long, string>();
+                double slowestKmh = 1e9, fastestKmh = 0.0;
                 foreach (var c in cars.EnumerateArray())
                 {
                     long uid = c.GetProperty("car_uid").GetInt64();
                     if (!_carBuf.ContainsKey(uid)) anyNewCar = true;
                     if (uid > newestUid) newestUid = uid;
+                    double kmh = c.GetProperty("speed_kmh").GetSingle();
                     Add(uid,
                         c.GetProperty("x").GetSingle(), c.GetProperty("y").GetSingle(),
-                        c.GetProperty("heading").GetSingle(),
-                        c.GetProperty("speed_kmh").GetSingle(),
+                        c.GetProperty("heading").GetSingle(), (float)kmh,
                         c.GetProperty("level").GetInt32());
                     // Per-car display state: color, lights, OWN flags/label.
                     if (!_carMeta.TryGetValue(uid, out var m))
@@ -1495,7 +1679,36 @@ public partial class MapRenderer : Node2D
                     m.BlinkR = c.TryGetProperty("blinker_right", out var br) && br.GetBoolean();
                     m.Hazard = c.TryGetProperty("hazard", out var hz) && hz.GetBoolean();
                     m.Braking = c.TryGetProperty("braking", out var bk2) && bk2.GetBoolean();
+                    if (_focusRole.Length > 0 || _focusName.Length > 0)
+                    {
+                        if (c.TryGetProperty("parking", out var pkv) &&
+                            pkv.ValueKind == JsonValueKind.Object &&
+                            pkv.TryGetProperty("parked", out var pkb) &&
+                            pkb.ValueKind == JsonValueKind.True)
+                            roleParked = uid;
+                        // "slow" must not pick a stopped car - the crawler is
+                        // rolling; a standstill is a different story.
+                        if (_focusName.Length > 0 &&
+                            c.TryGetProperty("hud_label", out var hdl) &&
+                            hdl.ValueKind == JsonValueKind.String)
+                            liveCast[uid] = hdl.GetString();
+                        if (kmh > 1.8)
+                        {
+                            if (kmh < slowestKmh)
+                            {
+                                slowestKmh = kmh;
+                                roleSlowest = uid;
+                            }
+                            if (kmh > fastestKmh) fastestKmh = kmh;
+                        }
+                    }
                     m.HeadlightsOn = c.TryGetProperty("headlights_on", out var lo1) && lo1.GetBoolean();
+                    m.CourtesyFor = c.TryGetProperty("courtesy_for", out var cfu) &&
+                                    cfu.ValueKind == JsonValueKind.Number
+                        ? cfu.GetInt64() : 0L;
+                    m.CourtesyKind = c.TryGetProperty("courtesy_kind", out var cfk) &&
+                                     cfk.ValueKind == JsonValueKind.String
+                        ? cfk.GetString() : "";
                     m.TaillightsOn = c.TryGetProperty("taillights_on", out var lo2) && lo2.GetBoolean();
                     m.FlagGreen = ParseFlag(c, "green");
                     m.FlagRed = ParseFlag(c, "red");
@@ -1537,6 +1750,47 @@ public partial class MapRenderer : Node2D
                 // LAST teleported car. Skipped after F (follow released) or
                 // while no new car arrived (TAB stays in effect), and once
                 // the crash camera has latched - the impact outranks a spawn.
+                // A role focus re-resolves every frame: the staged uid is
+                // unknown before the run, and the car that answers "the
+                // parked one" or "the slow one" is defined by the state, not
+                // by a number the scenario happens to hand out.
+                // A role names ONE car for the whole run: once the window has
+                // latched onto it, it stays - re-picking the per-frame minimum
+                // made the camera flap between the crawler and the primary
+                // every time the crawler stopped for a pass.
+                if (_focusName.Length > 0) roleNamed = MatchName(_focusName, liveCast);
+                long rolePick = _focusName.Length > 0 ? roleNamed
+                               : _focusRole == "parked" ? roleParked
+                               : _focusRole == "slow" ? roleSlowest : 0;
+                // "the slow car" must be slow RELATIVE to the traffic, not
+                // merely the minimum: at staging time only the primary rolls,
+                // and calling it the slow car latched the camera onto the
+                // wrong car for the whole run.
+                if (_focusName.Length == 0 && _focusRole == "slow" &&
+                    !(fastestKmh > 0.0 && slowestKmh <= 0.6 * fastestKmh))
+                    rolePick = 0;   // a NAME needs no relative-speed guard
+                if (rolePick != 0 && _focusUid == 0)
+                {
+                    _focusUid = rolePick;
+                    // The role re-resolves every frame, so the window follows
+                    // the car that ANSWERS the role - in slow_pass_overtake
+                    // that is the crawler, which only exists after staging, so
+                    // the binding has to move once it does.
+                    if (_focusUid != _focusAnnouncedUid)
+                    {
+                        _focusAnnouncedUid = _focusUid;
+                        GD.Print($"CAM-FOCUS {(_focusName.Length > 0 ? "name=" + _focusName
+                                                           : "role=" + _focusRole)} -> uid {_focusUid}");
+                    }
+                }
+                else if ((_focusRole.Length > 0 || _focusName.Length > 0) &&
+                          _focusUid == 0 && !_focusAnnounced && ++_focusFrames > 900)
+                {
+                    _focusAnnounced = true;
+                    GD.Print($"CAM-FOCUS {(_focusName.Length > 0 ? _focusName : _focusRole)} " +
+                             $"UNRESOLVED after {_focusFrames} frames");
+                }
+
                 if (_autoFollow && anyNewCar && newestUid > 0 && _crashFocusUid == 0L)
                     _followUid = newestUid;
             }
@@ -1570,6 +1824,20 @@ public partial class MapRenderer : Node2D
             if (root.TryGetProperty("hud_label", out var hl))
                 _lastTestText = hl.ValueKind == JsonValueKind.String
                     ? hl.GetString() : null;
+
+            // Fleet flow (the quality metric of 2026-10-19): metres driven by
+            // the whole fleet per second of sim time, and the absolute total
+            // since the sim started (see docs §8 R28 / SimEngine _flowMeters).
+            if (root.TryGetProperty("flow_m_per_s", out var fr28) &&
+                fr28.ValueKind == JsonValueKind.Number)
+                _flowRate = fr28.GetDouble();
+            if (root.TryGetProperty("flow_m_total", out var ft28) &&
+                ft28.ValueKind == JsonValueKind.Number)
+                _flowTotal = ft28.GetDouble();
+            // R31 standstill errors: cars that moved < 1 m within the window.
+            if (root.TryGetProperty("standstill_errors", out var se28) &&
+                se28.ValueKind == JsonValueKind.Number)
+                _standstillN = se28.GetInt32();
 
             // Test flags: legacy single-car sim puts them at the root; the
             // multi-car shape carries them per car (parsed above), so skip
@@ -1845,6 +2113,10 @@ public partial class MapRenderer : Node2D
             // Above its own deck, below any higher level (M2 occlusion).
             node.ZIndex = 10 + 20 * level;
 
+            // bitteschön: the conceder signals TOWARD the car it lets through.
+            if (_carMeta.TryGetValue(kv.Key, out var metaC))
+                DrawCourtesy(kv.Key, node, metaC);
+
             // Blinker corner lights: pygame's 0.5 s period, radius clamped.
             if (_carMeta.TryGetValue(kv.Key, out var meta))
             {
@@ -1934,8 +2206,9 @@ public partial class MapRenderer : Node2D
                 _testLabel.Text = _lastTestText;
         }
 
-        // Speed readout under the minimap: bound car (or first car).
-        if (_speedLabel != null)
+        // Speed readout under the minimap: bound car (or first car). Hidden in
+        // review mode - it describes the live sim, not the tape under the cursor.
+        if (_speedLabel != null && !_review)
         {
             long? pick = _followUid ?? firstUid;
             bool show = pick.HasValue;
@@ -1969,7 +2242,8 @@ public partial class MapRenderer : Node2D
                     _decBusy = true;
                     _decLastMs = nowMs;
                     if (uid != _decUidFor) _decLines = new() { "(loading...)" };
-                    _decHttp.Request($"http://127.0.0.1:5001/car/{uid}/decisions");
+                    _decHttp.Request(
+                        $"http://127.0.0.1:{_embeddedPort}/car/{uid}/decisions");
                 }
                 var mSel = _carMeta.GetValueOrDefault(uid);
                 string color = mSel?.Color ?? "blue";
@@ -2082,6 +2356,10 @@ public partial class MapRenderer : Node2D
     /// wherever the user panned it.</summary>
     void FollowCamera()
     {
+        // Review mode owns its camera: the view belongs to the TAPE frame under
+        // the cursor (or to an explicit --center), never to whichever car the
+        // live sim happens to have bound.
+        if (_review) return;
         // --focus <uid>: the view belongs to the requested car (the runner
         // passes the last crashed uid), so it outranks the auto-crash latch.
         if (_focusUid != 0L && _carNodes.ContainsKey(_focusUid))

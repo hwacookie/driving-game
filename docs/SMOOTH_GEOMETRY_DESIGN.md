@@ -28,6 +28,32 @@
 > `junction_fillets` entries now carry `corner` + `arc` (+ seg_a/seg_b,
 > radius_px) instead of t1/t2; consumers: `_build_smoothed_junction_fillets`
 > (paved fill) and `obstacles.py` (parked-car alignment along the arc).
+>
+> **Addendum 2026-10-19 — the route line follows the same chain, and the
+> 6 m fillet only applies at REAL corners:** `RoadNetworkGeometry.SmoothChain`
+> replaced the fixed-radius fillet for gentle bends. A chain is splined
+> (centripetal Catmull-Rom, resampled at 0.5 m) through its shape points
+> UNLESS a bend is sharper than 30° (`RoadNetworkGeometry.SmoothChain`'s
+> `maxCurveTurnRad`; the doc comment above it calls the rule
+> `MAX_CURVE_TURN_DEG`) — then it is a
+> real corner and keeps the `ROAD_CORNER_RADIUS_M` (6 m) circular fillet
+> (`SmoothGeometry.CornerFillet`). Why: a pure spline through a sampled
+> curve (a figure-8 lobe, 30 m chords, 22° per node) kinked 0.12 m at every
+> node instead of curving at its own ~115 m radius, while a pure spline at a
+> genuine 90° corner with 250 m legs interpolated with tangents blended 45°
+> off the legs and swung 18.5 m OUTSIDE the test map's corner (the
+> `RightTurn_FollowsCornerAndLimitsSpeed` unit test caught it). Rule of
+> thumb: **many small bends = recover the curve, one big bend = fillet the
+> corner.** Closed chains (a loop) continue past the seam through the loop's
+> own nodes and cut back where it closes — but only when the seam is itself
+> a gentle bend (a roundabout ring); a seam that is a real corner (a figure-8
+> lobe closing at its crossing node, ~86°) stays sharp, otherwise the crossing
+> reads as a pinch with asymmetric arms.
+>
+> `BicycleNav` no longer fillets its reference line at a fixed radius either
+> (the `CORNER_RADIUS_M` the 2026-08-31 addendum above still mentions is gone
+> from the nav): it builds the route from the SAME smoothed chain the pavement
+> is built from, so nav and pavement agree by construction.
 
 ## One curve, all consumers
 
@@ -115,6 +141,13 @@ the wall.
 
 ## What changed where
 
+> Historical (the Python files of the retired `car/` repo). The C# equivalents
+> are `DrivingGame.Sim/SmoothGeometry.cs` (`SmoothCurve`, `ResampleCurve`,
+> `CornerFillet`, `SmoothedNetwork` with per-segment sub-curve refs and
+> `JunctionFillets`), `RoadNetworkGeometry.cs` (`MergeAndRoundLines`,
+> `SmoothChain`, width-varying ribbons, markings, endpoint snapping) and
+> `BicycleNav.part1-3.cs` (the route line built from the same chain).
+
 - `src/smooth_geometry.py` (NEW): `SmoothCurve` (kap table removed,
   duplicate samples removed, geometry-based `curvature_at`),
   `resample_curve`, `corner_fillet` (extracted from
@@ -142,3 +175,10 @@ the wall.
   middles / spike-at-kinks.
 - Same-curve proof: renderer, on-road check and driving all consume
   `SmoothedNetwork` (single cached instance per `RoadNetwork`).
+
+**Current (2026-10-19):** the numbered e2e suite is 23/23 and the C# unit
+suite 91/91 (2 skipped), which re-validates all of the above on the new
+`SmoothChain` geometry; the same-curve proof is now structural —
+`RoadNetworkGeometry` builds pavement, markings and the nav's route line from
+`SmoothChain`, and `SmoothGeometry.For(network)` caches one
+`SmoothedNetwork` per network (segment → sub-curve refs, junction fillets).

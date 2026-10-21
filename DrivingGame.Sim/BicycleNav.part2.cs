@@ -104,7 +104,15 @@ public sealed partial class BicycleNav
     {
         var car = _car;
         string turn = IntendedTurn();
-        var key = (car.SegIdx, turn, pullingOver, pullingOut);
+        // The committed pass (R32) is part of the line's identity: the raceline
+        // is solved ONCE per (segment, intent) and the lateral request is only
+        // read at that solve. Measured on park_block_overtake - the nav built
+        // the line at spawn with shift=0.000 and never rebuilt it, so the car
+        // asked for 2.25 m left, signalled left, and stayed on +1.75 m until
+        // it stopped behind the parked car. A pass that changes the line must
+        // rebuild it, like a turn change or a pull-over does.
+        bool pass = CarCollisions.PassCommitted(car, _network);
+        var key = (car.SegIdx, turn, pullingOver, pullingOut, pass);
         if (_ref is not null)
         {
             if (_routeKey == key)
@@ -130,6 +138,7 @@ public sealed partial class BicycleNav
                      _routeKey.Value.Turn == turn &&
                      _routeKey.Value.PullingOver == pullingOver &&
                      _routeKey.Value.PullingOut == pullingOut &&
+                     _routeKey.Value.Pass == pass &&
                      RouteSegSet.Contains(car.SegIdx))
             {
                 // We advanced to a segment that is part of the current route
@@ -179,9 +188,29 @@ public sealed partial class BicycleNav
             : 7.0;
         double maxOffset = Config.KerbOffsetM(minWidth);
         double baseOffset = LaneBaseOffset(maxOffset);
+        // R8 lateral avoidance (user rule): a car that sees a frontal
+        // conflict pulls to the right as far as the road allows instead of
+        // trusting a head-on brake. CarCollisions owns WHEN (it sees the
+        // pairs); the nav owns HOW FAR - the kerb clamp here is what keeps
+        // the car on the road, so a requested shift can only ever be
+        // applied partially.
+        if (_car.YieldRightM > 0.0)
+            baseOffset = Math.Min(baseOffset + _car.YieldRightM, maxOffset);
+        // R32 overtake (docs §8): the driver model saw an obstruction in my
+        // lane and asks to borrow the OTHER lane. Clamped to the far kerb -
+        // the request can only ever be applied partially, so a narrow road
+        // that cannot fit the pass keeps the car in its own lane (where the
+        // speed rules make it wait behind instead).
+        if (_car.OvertakeShiftM > 0.0)
+            baseOffset = Math.Max(baseOffset - _car.OvertakeShiftM, -maxOffset);
         // A spawn lateral override pins the scalar line instead - the parking
-        // scenarios must hold their initial line exactly.
-        bool autoBase = _car.LaneOffsetOverrideM is null;
+        // scenarios must hold their initial line exactly. The same scalar
+        // line is what an R8 yield or an R32 overtake asks for: with autoBase
+        // the raceline picks its own nominal lane per segment and a requested
+        // shift would be DISCARDED (measured: the R32 shift was asked for and
+        // the car never left its lane), so a nudge forces the scalar mode.
+        bool autoBase = _car.LaneOffsetOverrideM is null &&
+                        _car.YieldRightM <= 0.0 && _car.OvertakeShiftM <= 0.0;
 
         // Pass 1 - provisional line WITHOUT the merge blend: the speed profile
         // below must belong to THIS route, because the merge length is speed
@@ -190,8 +219,17 @@ public sealed partial class BicycleNav
         // the change to the 90 m cap.
         var sol = Raceline.SolveLine(_network, rounded, RouteSegments().ToList(),
                                      baseOffset: autoBase ? null : baseOffset,
-                                     autoBase: autoBase);
-        var lane = ApplyEndBlends(sol.Points, sol.Normals, sol.Offsets, sol.Cum,
+                                     autoBase: autoBase,
+                                     // PROBE (step 5 of docs/RIGHT_OF_WAY_NEGOTIATION.md):
+                                     // the committed pass widens the corridor to the
+                                     // left. Stand-in for the real award - the
+                                     // negotiation does not exist yet, so the
+                                     // existing lateral request is the commitment.
+                                     leftReliefM: _car.OvertakeShiftM);
+        double borrowShiftM = _car.OvertakeShiftM;
+        var ramped = RampPassBorrow(sol.Points, sol.Normals, sol.Offsets, sol.Cum,
+                                    baseOffset, baseOffset + borrowShiftM);
+        var lane = ApplyEndBlends(ramped, sol.Normals, sol.Offsets, sol.Cum,
                                   edgeOffset: maxOffset,
                                   pullingOver: pullingOver, pullingOut: pullingOut);
         if (_dest is not null)
@@ -221,7 +259,7 @@ public sealed partial class BicycleNav
             _turnSignalTarget = _routeExitNode;
             // Keep the key consistent with the re-armed intent, or every
             // following frame would see a "turn change" and rebuild.
-            key = (car.SegIdx, _routeExitDir, pullingOver, pullingOut);
+            key = (car.SegIdx, _routeExitDir, pullingOver, pullingOut, pass);
         }
         string? pending = d?.PendingTurn;
         // A fresh signal (API/keyboard, not the re-arm above): remember WHICH
@@ -286,7 +324,8 @@ public sealed partial class BicycleNav
                                      baseOffset: autoBase ? null : baseOffset,
                                      autoBase: autoBase,
                                      mergeFromM: mv.FromM,
-                                     mergeS0: mv.S0, mergeS1: mv.S1);
+                                     mergeS0: mv.S0, mergeS1: mv.S1,
+                                     leftReliefM: _car.OvertakeShiftM);
             lane = ApplyEndBlends(sol.Points, sol.Normals, sol.Offsets, sol.Cum,
                                   edgeOffset: maxOffset,
                                   pullingOver: pullingOver, pullingOut: pullingOut);
@@ -347,7 +386,8 @@ public sealed partial class BicycleNav
                                      autoBase: autoBase,
                                      mergeFromM: merge?.FromM,
                                      mergeS0: merge?.S0 ?? 0.0,
-                                     mergeS1: merge?.S1 ?? 0.0);
+                                     mergeS1: merge?.S1 ?? 0.0,
+                                     leftReliefM: _car.OvertakeShiftM);
         var lane = ApplyEndBlends(sol.Points, sol.Normals, sol.Offsets, sol.Cum,
                                   edgeOffset: Config.KerbOffsetM(minWidth),
                                   pullingOver: pullingOver, pullingOut: pullingOut);
@@ -420,6 +460,61 @@ public sealed partial class BicycleNav
     ///   pullingOut  - the mirror image, leaving the kerb at the start.
     /// Also records where the route passes through real junctions, which is
     /// the only place LaneGuard has to be suppressed (see InTurnBlendZone).</summary>
+    /// <summary>R36 (binding user decision 2026-10-21): the passing car returns
+    /// to its own lane AS SOON AS POSSIBLE. The solve hands back ONE lateral
+    /// offset for the whole route, which makes the borrow a step: the car leaves
+    /// its lane where the line was built and comes back only where the NEXT
+    /// solve happens - measured: back 68 m past the obstruction, 79 m of the
+    /// other lane. The offsets are therefore re-written ALONG THE LINE:
+    ///   out   over laneChangeM(v) BEFORE the obstruction (the latest point from
+    ///         which the shift can still be completed),
+    ///   held  while the bodies still overlap lengthwise,
+    ///   back  over laneChangeM(v) starting at the FIRST point where the return
+    ///         is physically possible - the car's rear clear of the obstruction's
+    ///         front. "As soon as possible" is that point, not a constant.
+    /// Points are rebuilt from the centreline (centre = point - normal*offset),
+    /// so this is one pass over the line and no second solve. laneChangeM is the
+    /// repo's own speed-dependent lane-change length (v · LANE_CHANGE_TIME_S
+    /// clamped to MERGE_LEN_MIN_M/MERGE_LEN_MAX_M) - the one R17 uses for a merge.
+    /// </summary>
+    private List<(double X, double Y)> RampPassBorrow(
+        List<(double X, double Y)> P, List<(double X, double Y)> N,
+        double[] offs, double[] cum, double shiftedM, double nominalM)
+    {
+        var c = _car;
+        if (c.PassUid < 0 || _network is null || P.Count < 2 || cum.Length != P.Count)
+            return P;
+        double oX = c.PassX, oY = c.PassY;   // the world point, no segment seam
+        int bestI = 0; double bestD2 = double.PositiveInfinity;
+        for (int i = 0; i < P.Count; i++)
+        {
+            double dx = P[i].X - oX, dy = P[i].Y - oY;
+            double d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; bestI = i; }
+        }
+        double sObs = cum[bestI];
+        double laneM = Math.Clamp(c.Speed * LANE_CHANGE_TIME_S,
+                                  MERGE_LEN_MIN_M, MERGE_LEN_MAX_M);
+        double holdM = (c.LengthM + c.PassLengthM) * 0.5
+                       + CarCollisions.SideClearM(c.Speed);
+        double sIn = sObs - laneM, sBack = sObs + holdM, sOut = sBack + laneM;
+        if (shiftedM >= nominalM) return P;      // nothing to the left to borrow
+        var pts = new List<(double X, double Y)>(P.Count);
+        for (int i = 0; i < P.Count; i++)
+        {
+            double s = cum[i];
+            double o;
+            if (s <= sIn) o = nominalM;
+            else if (s < sObs) o = nominalM + (shiftedM - nominalM) * (s - sIn) / (sObs - sIn);
+            else if (s <= sBack) o = shiftedM;
+            else if (s < sOut) o = shiftedM + (nominalM - shiftedM) * (s - sBack) / (sOut - sBack);
+            else o = nominalM;
+            double cx = P[i].X - N[i].X * offs[i], cy = P[i].Y - N[i].Y * offs[i];
+            pts.Add((cx + N[i].X * o, cy + N[i].Y * o));
+        }
+        return pts;
+    }
+
     private List<(double X, double Y)> ApplyEndBlends(
         List<(double X, double Y)> P, List<(double X, double Y)> N,
         double[] offsets, double[] cum,

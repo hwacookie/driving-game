@@ -1,11 +1,23 @@
 # Turn-Planning Rework — Plan
 
-> **TL;DR (2026-08-22):** The rail model is retired and removed; one
-> kinematic **bicycle model** is the physics for everything (§8). The
-> driving line is now the solution to a **constrained optimisation**
-> (`src/raceline.py`, §14) rather than a fixed lane offset — the racing
-> line emerges from it rather than being coded. **16/18** deterministic
-> tests pass; the two failures are both `sliver_approach` turns.
+> **HISTORY (2026-10-19):** this document records why the rail model was
+> deleted and the bicycle model adopted, and the reasoning behind the raceline
+> optimisation. Its status lines and work orders are **superseded** - do not
+> implement from here. Current state lives in `SPEC.md` (roadmap + status),
+> `DRIVING_MANEUVERS.md` (behaviour + the Driving Ruleset),
+> `SMOOTH_GEOMETRY_DESIGN.md` (the geometry pipeline, incl. the 2026-10-19
+> addendum: `SmoothChain` splines gentle bends and keeps the 6 m fillet only
+> at real corners, so §10's "circular fillet at every junction" and the
+> `BicycleNav.CORNER_RADIUS_M` route fillet are gone), and `TESTING.md`
+> (23/23 e2e, 91/91 unit tests). Hard rule unchanged: `AGENTS.md` — never do
+> physically impossible things.
+>
+> TL;DR (2026-08-22, kept for the record): The rail model is retired and
+> removed; one kinematic **bicycle model** is the physics for everything (§8).
+> The driving line is the solution to a **constrained optimisation**
+> (`src/raceline.py`, §14) rather than a fixed lane offset — the racing line
+> emerges from it rather than being coded. **16/18** deterministic tests
+> pass; the two failures are both `sliver_approach` turns.
 > **Next task: finish §10 — make `RefLine` a spline (see §0b).** First run on
 > real OSM data shows the car crawling at 12–18 km/h because every node of a
 > polyline reference line is a corner; the synthetic map's long clean

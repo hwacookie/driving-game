@@ -92,12 +92,43 @@ public static class GameApi
             var s = net.Segments[idx];
             return Results.Json(new Dictionary<string, object?>
             {
-                ["idx"] = idx,
+                ["idx"] = idx, ["name"] = s.Name,
                 ["x1"] = s.X1, ["y1"] = s.Y1, ["x2"] = s.X2, ["y2"] = s.Y2,
                 ["length"] = s.Length, ["width"] = s.Width, ["oneway"] = s.Oneway,
-                ["start_node"] = s.StartNode, ["end_node"] = s.EndNode,
+                ["lanes"] = s.Lanes, ["start_node"] = s.StartNode, ["end_node"] = s.EndNode,
             });
         });
+
+        // Symbolic segment anchors (docs/DRIVING_MANEUVERS.md §8 "Segment
+        // names"): a test that anchors to "straight_n→straight_s" says WHAT it
+        // drives, not where that road happens to sit in the segment list - so
+        // adding or deleting a track can never silently move an anchor.
+        // An ambiguous name (same node pair twice) answers 400 with the
+        // candidates instead of picking one.
+        app.MapGet("/segment/by/{name}", (string name) =>
+        {
+            var net = engine.Network;
+            if (net.SegmentNameAmbiguous.TryGetValue(name, out var amb))
+                return Json(new Dictionary<string, object?>
+                {
+                    ["error"] = "ambiguous segment name",
+                    ["candidates"] = amb.Select(i => net.Segments[i].Name).ToList(),
+                }, 400);
+            if (!net.SegmentByName.TryGetValue(name, out var idx))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "unknown segment name" }, 404);
+            var s2 = net.Segments[idx];
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["idx"] = idx, ["name"] = s2.Name,
+                ["x1"] = s2.X1, ["y1"] = s2.Y1, ["x2"] = s2.X2, ["y2"] = s2.Y2,
+                ["length"] = s2.Length, ["width"] = s2.Width, ["oneway"] = s2.Oneway,
+                ["lanes"] = s2.Lanes, ["start_node"] = s2.StartNode, ["end_node"] = s2.EndNode,
+            });
+        });
+
+        app.MapGet("/segment_names", () =>
+            Results.Json(engine.Network.SegmentByName));
 
         // --- per-car driver decision log (car detail window) ---------------------
         // EVENTS, not samples: one entry per change of braking reason, e.g.
@@ -151,6 +182,43 @@ public static class GameApi
             });
         });
 
+        // Park a car WHERE IT STANDS (docs §8 'Parked car'): engine off, no
+        // route, it stays put and is an obstruction the other cars must pass
+        // (R32). Two-step on purpose - the scenario teleports the car into a
+        // lane first, then parks it; commands apply in arrival order.
+        app.MapPost("/park", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            if (!data.TryGetProperty("uid", out var u))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "usage: {'uid': N}" }, 400);
+            var uid = u.GetInt32();
+            if (!engine.Cars.TryGetValue(uid, out var car))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = $"unknown car {uid}" }, 404);
+            engine.EnqueueCommand(new ParkCommand(uid));
+            return Results.Json(new Dictionary<string, object?>
+                { ["ok"] = true, ["parked"] = uid });
+        });
+
+        // Re-point the PRIMARY (followed) car: /state's top level and the
+        // cockpit describe it, and every teleport moves it to the newest
+        // car - a multi-car scenario must say which car it monitors.
+        app.MapPost("/follow", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            if (!data.TryGetProperty("uid", out var u))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "usage: {'uid': N}" }, 400);
+            var uid = u.GetInt32();
+            if (!engine.Cars.TryGetValue(uid, out var car))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = $"unknown car {uid}" }, 404);
+            engine.EnqueueCommand(new FollowCommand(uid));
+            return Results.Json(new Dictionary<string, object?>
+                { ["ok"] = true, ["follow"] = uid });
+        });
+
         // --- one-shot commands (queued, applied in arrival order) ------------------
 
         app.MapPost("/teleport", async (HttpRequest req) =>
@@ -164,7 +232,28 @@ public static class GameApi
             if (data.TryGetProperty("start_point", out var sp) && sp.ValueKind == JsonValueKind.String)
                 startPoint = sp.GetString();
             if (data.TryGetProperty("segment", out var sg))
-                segment = sg.GetInt32();
+            {
+                if (sg.ValueKind == JsonValueKind.String)
+                {
+                    // Symbolic anchor (see RoadSegment.Name): "start→end".
+                    // An unknown or ambiguous name is a 400, never a silent
+                    // fallback - a test must not spawn somewhere else.
+                    var nm = sg.GetString();
+                    var netT = engine.Network;
+                    if (netT.SegmentNameAmbiguous.TryGetValue(nm, out var ambT))
+                        return Json(new Dictionary<string, object?>
+                        {
+                            ["error"] = $"ambiguous segment name '{nm}'",
+                            ["candidates"] = ambT,
+                        }, 400);
+                    if (!netT.SegmentByName.TryGetValue(nm, out var idxT))
+                        return Json(new Dictionary<string, object?>
+                            { ["error"] = $"unknown segment name '{nm}'" }, 400);
+                    segment = idxT;
+                }
+                else
+                    segment = sg.GetInt32();
+            }
             if (data.TryGetProperty("progress", out var pr))
                 progress = pr.GetDouble();
             if (data.TryGetProperty("add", out var ad))
@@ -178,6 +267,21 @@ public static class GameApi
             if (data.TryGetProperty("color", out var cd) && cd.ValueKind == JsonValueKind.String
                 && !string.IsNullOrEmpty(cd.GetString()))
                 color = cd.GetString();
+            // A slow vehicle: the km/h this car chooses to drive at (its class
+            // ceiling still applies). Staging real slow traffic - R32 passes a
+            // crawler, it does not pass a queue lead.
+            double? cruiseKmh = null;
+            if (data.TryGetProperty("cruise_kmh", out var ck) && ck.ValueKind != JsonValueKind.Null)
+                cruiseKmh = ck.GetDouble();
+            // The car's NAME (docs/TESTING.md): carried from the spawn, so
+            // the scenario's role ("slow_car", "oncoming_car", "parked_car")
+            // is on the car before its first tick, and the client can address
+            // it by what it IS rather than by what it looks like.
+            string? name = null;
+            if (data.TryGetProperty("name", out var nmv) &&
+                nmv.ValueKind == JsonValueKind.String)
+                name = nmv.GetString();
+
             if (color is not null && !Config.CAR_COLORS.Contains(color))
                 return Json(new Dictionary<string, object?>
                 {
@@ -186,7 +290,8 @@ public static class GameApi
                 }, 400);
 
             engine.EnqueueCommand(
-                new TeleportCommand(startPoint, segment, progress, add, speed, color, reverse));
+                new TeleportCommand(startPoint, segment, progress, add, speed, color,
+                                    reverse, cruiseKmh, name));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
@@ -278,6 +383,122 @@ public static class GameApi
             {
                 ["ok"] = true,
                 ["command"] = "freeze",
+            });
+        });
+
+        // --- the tape (docs/RECORD_PLAYBACK.md) ---------------------------------
+        // Recording is a RUN property, not a per-scenario one: the e2e runner
+        // starts it once after the host is up and saves it when the suite
+        // finishes, so a failure report can be re-watched frame by frame later.
+        app.MapPost("/tape", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            string? mapName = data.TryGetProperty("map", out var mp) ? mp.GetString() : null;
+            RunTape.Start(mapName ?? "", SimEngine.DtFixed,
+                          RoadNetwork.MapFingerprint(engine.Network));
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true,
+                ["command"] = "tape",
+                ["tape"] = RunTape.StatusPayload(),
+            });
+        });
+
+        app.MapPost("/tape/clear", () =>
+        {
+            RunTape.Clear();
+            return Results.Json(new Dictionary<string, object?>
+                { ["ok"] = true, ["command"] = "tape/clear" });
+        });
+
+        // One recorded substep (-1 = the last one). Null when the tape does not
+        // reach that far - a caller must not invent a frame.
+        app.MapPost("/tape/frame", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            long step = data.TryGetProperty("step", out var st) ? (long)st.GetDouble() : -1L;
+            var f = RunTape.FrameAt(step);
+            if (f is null)
+                return Results.Json(new Dictionary<string, object?>
+                    { ["ok"] = false, ["error"] = $"no tape frame at step {step}" });
+            var cars = new List<object?>(f.Cars.Count);
+            foreach (var cf in f.Cars)
+                cars.Add(new Dictionary<string, object?>
+                {
+                    ["uid"] = cf.Uid, ["x"] = cf.X, ["y"] = cf.Y,
+                    ["heading"] = cf.HeadingDeg, ["speed"] = cf.SpeedMps,
+                    ["blinkers"] = cf.Blinkers, ["braking"] = cf.Brake,
+                    ["wrong_side"] = cf.WrongSide, ["crashes"] = cf.CrashEpisodes,
+                    ["cap_key"] = cf.CapKey,
+                });
+            var evs = new List<object?>(f.Events.Count);
+            foreach (var ev in f.Events)
+                evs.Add(new Dictionary<string, object?>
+                    { ["uid"] = ev.Uid, ["decision"] = ev.Msg });
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true, ["step"] = f.Step,
+                ["fluidity_mps_per_car"] = f.FluidityMpsPerCar,
+                ["moving_share"] = f.MovingShare,
+                ["events"] = evs,
+                ["units"] = "meters", ["cars"] = cars,
+            });
+        });
+
+        // The recorded runs on disk - a review client picks one of these and
+        // loads it, so an old run can be re-watched without re-running the
+        // scenario.
+        app.MapGet("/tape/list", () =>
+            Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true,
+                ["dir"] = RunTape.DefaultDir(),
+                ["runs"] = RunTape.List(),
+            }));
+
+        // Load a recorded run into memory for scrubbing. Recording stays OFF:
+        // the loaded tape is under review, the running sim keeps its own.
+        app.MapPost("/tape/load", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            string path = data.TryGetProperty("path", out var p) ? p.GetString() : "";
+            if (string.IsNullOrEmpty(path))
+                return Results.Json(new Dictionary<string, object?>
+                    { ["ok"] = false, ["error"] = "path required" });
+            var loaded = RunTape.Load(path);
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = loaded,
+                ["path"] = path,
+                ["tape"] = RunTape.StatusPayload(),
+            });
+        });
+
+        // Where the tape is and which substeps carry an event - what makes
+        // "jump to the next decision/crash" cheap.
+        app.MapGet("/tape/index", () =>
+            Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true,
+                ["tape"] = RunTape.StatusPayload(),
+                ["event_steps"] = RunTape.EventSteps(),
+            }));
+
+        // Write the whole tape next to the run log (best-effort: a disk error
+        // answers, it never breaks the sim).
+        app.MapPost("/tape/save", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            string path = data.TryGetProperty("path", out var p) ? p.GetString() : "";
+            if (string.IsNullOrEmpty(path))
+                return Results.Json(new Dictionary<string, object?>
+                    { ["ok"] = false, ["error"] = "path required" });
+            var written = RunTape.Save(path);
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = written is not null,
+                ["path"] = written,
+                ["tape"] = RunTape.StatusPayload(),
             });
         });
 

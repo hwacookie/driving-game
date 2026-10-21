@@ -172,6 +172,46 @@ suite). Two things stay honest at 4x: the capacity probe (`fig8_stress`) is
 skipped by design, and a warped run is not a bit-identical replay of the
 real-time one (control commands land at different points in the sim).
 
+**"I want to watch it" means `--realtime`.** When the user says they want to
+watch a run (any wording to that effect), run it at real time — the 4x default
+exists to save wall-clock time in CI-like loops, not to make a spectacle faster
+than the eye can follow. Same for a maximized window: `--maximized` fills the
+screen, `--zoom <px/m>` and `--center <x> <y>` (metres) aim it.
+
+## Two clients — never conflate them (binding user decision, 2026-10-21)
+
+**Simulationsviewer** = the Godot window we have (`MapRenderer`), always the
+live sim. **Simulationsreviewer** = a separate client, its own window, showing a
+tape frame at a cursor. Independent and long-lived: a new run is a new tape,
+a dead host is a connection state (overlay + backoff re-acquire), and only a
+renderer change forces a rebuild. The reviewer caches its loaded tape client-side
+so a run under review survives the host dying.
+
+Full specification: `docs/SIMULATIONS_REVIEWER.md` (status: specified, not
+implemented). The tape and its endpoints it reads are built: `docs/RECORD_PLAYBACK.md`.
+
+## Two run modes — never mix them (binding user decision, 2026-10-21)
+
+**"review" / "watch" mode** — the user wants to SEE the manoeuvre:
+1. start the client **fullscreen** (`--maximized`),
+2. load the map, **focus the camera on the named hotspot** (`--center`/`--zoom`
+   on the obstruction or junction, or `--focus-car <uid>` on a named car),
+3. **freeze the sim clock** (`POST /freeze {"frozen": true}`),
+4. spawn every car while frozen — at their real starting speeds
+   (`/teleport` with `speed`, `cruise_kmh` for a slow vehicle),
+5. only once ALL cars exist, unfreeze and run at the requested pace.
+
+Why the freeze matters: without it the sim is already ticking while the
+scenario is still staging, so the first seconds of the action happen before
+the eye finds the cars — "I'll lose half the action".
+
+**"run the e2e tests"** — the opposite: a **smaller window**, `--warp 4`, and
+get through the named scenarios as fast as possible. Nobody is watching;
+verdicts matter.
+
+**If it is unclear which mode a request means, ASK before running.** Do not
+guess: one loses the spectacle, the other wastes four minutes.
+
 When the user asks to run the e2e tests:
 
 0. **Restart the game first.** The runner kills any running game process

@@ -239,7 +239,7 @@ public sealed partial class BicycleNav
     /// callers clamp the sample to <c>min(S + d, Total)</c>.</summary>
     public RefLine? Ref => _ref;
     private List<string> _route = new();
-    private (int SegIdx, string Turn, bool PullingOver, bool PullingOut)? _routeKey;
+    private (int SegIdx, string Turn, bool PullingOver, bool PullingOut, bool Pass)? _routeKey;
     public HashSet<int> RouteSegSet { get; private set; } = new();
 
     /// <summary>The current node route (ordered) — Python's nav._route.
@@ -355,9 +355,11 @@ public sealed partial class BicycleNav
         _car = car;
         _network = network;
         A_CRUISE = car.AccelMps2;
-        V_MAX = car.TopSpeedMps;
+        // The driver's cruise choice (a slow vehicle) is what the nav plans
+        // against - the class top speed stays the physical ceiling only.
+        V_MAX = car.EffectiveTopMps;
         A_LAT_MAX = car.LatAccelMax;
-        _cruise = car.TopSpeedMps;
+        _cruise = car.EffectiveTopMps;
     }
 
     // ====================================================================

@@ -279,12 +279,26 @@ public static class TestMaps
         static (double X, double Y) Origin(int col, int row) => (col * TILE, row * TILE);
 
         // --- Tile (0,0): Straight road (north-south) ---
+        // Split into TWO segments (2026-10-19): the obstruction tests (R32
+        // overtake + single-file priority) need a car to start on one stretch
+        // and pass an obstruction on the NEXT one, so arrival can be judged
+        // by segment - on a single 300 m segment "reached the end segment"
+        // would be true at the spawn.
         var (ox, oy) = Origin(0, 0);
         b.Node("straight_n", ox + 100, oy + 350);   // north (large y)
+        b.Node("straight_m", ox + 100, oy + 200);   // mid node (splits the road)
         b.Node("straight_s", ox + 100, oy + 50);    // south (small y)
-        b.Road("straight_n", "straight_s");
+        b.Road("straight_n", "straight_m");
+        b.Road("straight_m", "straight_s");
         b.Start("straight", "straight_n");           // spawn at north, heading south
         b.Start("straight_reverse", "straight_s");   // spawn at south, heading north
+        // The R32 obstruction scenarios start here (same north end, heading
+        // south); they get their OWN names so the suite can select them by
+        // name and keep their results apart from the plain straight run.
+        b.Start("park_block_overtake", "straight_n");
+        b.Start("park_block_priority", "straight_n");
+        b.Start("slow_pass_overtake", "straight_n");
+        b.Start("slow_pass_priority", "straight_n");
 
         // --- Tile (4,0): Widths road - four 50 m sections, one width each ---
         // Straight dead-end street, north to south: 13 m, 9 m, 7 m, 4 m.
@@ -422,15 +436,12 @@ public static class TestMaps
         b.Start("hairpin_entry", "hair_a");
         b.Start("hairpin_exit", "hair_b");
 
-        // --- Tile (2,2): Wide sweeping curve (gentle single bend, ~30 deg) ---
-        (ox, oy) = Origin(2, 2);
-        b.Node("sweep_a", ox + 100, oy + 350);
-        b.Node("sweep_mid", ox + 150, oy + 150);
-        b.Node("sweep_b", ox + 300, oy + 50);
-        b.Road("sweep_a", "sweep_mid");
-        b.Road("sweep_mid", "sweep_b");
-        b.Start("sweeping_curve", "sweep_a");
-        b.Start("sweeping_curve_reverse", "sweep_b");
+        // --- Tile (2,2): EMPTY (2026-10-19) ---
+        // The wide sweeping-curve track was deleted with its test (#15): the
+        // scenarios that need a bend now run on the hairpin and the S-curve,
+        // and the two-lane obstruction tests run on the straight road. The
+        // tile stays empty so nothing shifts; segment indices are irrelevant
+        // anyway now that tests anchor on segment NAMES.
 
         // --- Tile (3,2): Roundabout (one-way ring, 4 two-way spokes) ---
         (ox, oy) = Origin(3, 2);
@@ -537,31 +548,10 @@ public static class TestMaps
         b.Start("fig8_deck", "fig8_n36", facing: "fig8_n37");
         b.Start("fig8_bridge", "fig8_n12", facing: "fig8_n13");
 
-        // --- Tile (5,0): WWW zig-zag (sharp corners -> smoothed by Catmull-Rom)
-        // A W-shaped zig-zag road: right-down, left-down, right-down.
-        // With §10 smoothed geometry the sharp kinks at B/C/D become
-        // slightly rounded curves instead of hard 90° corners.
-        // NOTE: offsets must be POSITIVE and inside 0..TILE. Written as
-        // `ox - 250` these landed at x=1750, which is exactly the T-junction
-        // tile's stem - the zig-zag was drawn straight through tile (3,0),
-        // silently wrecking every tjunction_* scenario.
-        // MOVED to its OWN tile (5,0) 2026-09-11 (was crammed into (4,0) with
-        // the Widths road, whose paved area it overlapped by ~178 m² - two
-        // logically separate tracks drawn as one connected blob).
-        (ox, oy) = Origin(5, 0);
-        b.Node("www_a", ox + 50, oy + 350);    // start, top-left
-        b.Node("www_b", ox + 130, oy + 60);    // V bottom
-        b.Node("www_c", ox + 210, oy + 350);   // peak
-        b.Node("www_d", ox + 290, oy + 60);    // V bottom
-        b.Node("www_e", ox + 370, oy + 350);   // peak
-        b.Node("www_f", ox + 450, oy + 60);    // end, bottom-right
-        b.Road("www_a", "www_b");
-        b.Road("www_b", "www_c");
-        b.Road("www_c", "www_d");
-        b.Road("www_d", "www_e");
-        b.Road("www_e", "www_f");
-        b.Start("www_entry", "www_a");
-        b.Start("www_exit", "www_f");
+        // --- Tile (5,0): EMPTY (2026-10-19) ---
+        // The WWW zig-zag track is deleted: its sharp kinks are covered by the
+        // corners and the hairpin, and the smoothed-geometry claim they were
+        // meant to show has the S-curve and the sweeping bends elsewhere.
 
         // --- Tile (4,1): Parking avenue (2 driving + 1 parking lane per side) ---
         // 300 m straight two-way street, 19.4 m wide: per direction two 3.5 m

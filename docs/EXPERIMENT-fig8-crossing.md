@@ -1,5 +1,20 @@
 # Experiment — Fig-8 Crossing Deadlock / Collision Fix
 
+> **Update (2026-10-19, branch `fix/fig8-xing-car-contact`):** the criterion
+> below was changed by user decision — a crossing run now counts as SUCCESS
+> once **no car crashes within 60 s of sim time** (`CROSSING_MAX_SIM_SECONDS`
+> 300 → 60); the 300 s window ran "forever" on the wall clock without adding
+> signal. With the changes on that branch (route-true corridor with a
+> body-sum band, R8 lateral yield, R14 exit gate widened to 25 m with a
+> standing/crawling/braking test, stop-line discipline at signed and
+> un-signed crossings, spawn discipline in the runner) BOTH crossings now
+> survive their window: signed `moving` 43→34→29→35→40 of 50 at t=10…50 s,
+> un-signed 50→47→43→35→26, zero contact. The unit suite is **91 passed /
+> 2 skipped**, so the two out-of-scope `RacelineReferenceTests` reds below
+> are gone (the reference dump was re-baselined) and
+> `CollisionTests.StationaryLeadCar_FollowerBrakesAndStopsBehind` is green.
+> Everything below is the ORIGINAL baseline, kept for the record.
+
 > Created on `main` (commit baseline below) so BOTH experiment branches
 > (`fix/fig8-crossing-opus48`, `fix/fig8-crossing-qwen38`) start from an
 > identical state and success criterion. This document is the shared
@@ -31,15 +46,19 @@ shared crossing still produce contact and/or standstill.
 `scripts/run_e2e.sh --tests <23|24>`:
 
 - **Test 23 — `fig8_xing`**: signed crossing (Vorfahrt), 50 cars,
-  25/direction, interleaved, all vehicle classes, accelerator held.
+  25/direction, interleaved, all vehicle classes, accelerator held, run
+  for up to 60 s of sim time or until the first crash.
 - **Test 24 — `fig8_xing_plain`**: un-signed crossing (right-before-left),
   same fleet setup.
 
 Run mechanics (`run_crossing_stress_test`): spawn 50 cars evenly around the
-48-segment crossing loop (alternating direction), hold the throttle on every
-car, then poll `GET /state` and run for **up to 300 s of sim time** or until
-the **FIRST crash** (any car reporting `in_contact`). Every 10 sim-s it logs
-`moving X/N` (cars faster than 3.6 km/h) — the gridlock indicator.
+48-segment crossing loop (alternating direction, all seven vehicle classes,
+placed while the sim is FROZEN — see the spawn discipline), hold the throttle
+on every car, then poll `GET /state` and run for **up to 60 s of sim time**
+(user decision 2026-10-19; was 300 s) or until the **FIRST crash** (any car
+reporting a new `crash_episodes` count — the transient `in_contact` flag can
+clear inside one poll). Every 10 sim-s it logs `moving X/N` (cars faster than
+3.6 km/h) — the gridlock indicator.
 
 ## 3. Success criterion ("the bug is fixed")
 
@@ -47,7 +66,8 @@ A fix is accepted only when BOTH of the following hold, for BOTH test 23 and
 test 24:
 
 1. **No crash for the full window.** The fleet drives the entire
-   300 s of sim time with **zero** `in_contact` events (the scenario's own
+   window — **60 s of sim time since the 2026-10-19 criterion change
+   (was 300 s)** — with **zero** `in_contact` events (the scenario's own
    pass condition: `passed == true`, no `Resolve` rollback). This is the
    hard, test-enforced criterion.
 2. **No sustained gridlock.** Traffic keeps flowing through the crossing —

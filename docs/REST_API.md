@@ -11,15 +11,48 @@ The game includes an optional REST API for remote control and automated testing.
 
 ## Starting the API
 
-Run the game with the `--api` flag:
+The API is **always on** in both hosts - there is no `--api` flag any more:
 
 ```bash
-python -m src.main --api
+DrivingGame.Server --map basic          # console host, REST on 127.0.0.1:5001
+DrivingGame.Server --port 5007          # a free port (e.g. for a screenshot run)
+
+# or embedded in the Godot client (one process, sim in-process):
+"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
+      --source embedded --map basic --port 5001
 ```
 
-The API server will start on `http://localhost:5001`
+The API listens on `127.0.0.1:<port>` (localhost only, no auth). Port 5000 is
+deliberately unused - macOS AirPlay Receiver squats there. A squatted port is
+reported (`embedded REST API FAILED … Address already in use`) and does NOT
+kill the game, but external test injection is then unavailable in that process.
 
 ## Endpoints
+
+Overview (implemented once in `DrivingGame.Api/GameApi.cs`, wired by both
+hosts):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | liveness |
+| GET | `/state` | full state of all cars + sim clock + pacing |
+| GET | `/map` | layer-2 geometry export (see the payload below) |
+| GET | `/start_points` | named start points (test maps) |
+| GET | `/segment/{idx}` | one segment's endpoints/length/width/oneway/nodes |
+| GET | `/car/{uid}/decisions` | that car's rule log (events, newest last) |
+| POST | `/control` | sustained keys + one-shot `hazard` |
+| POST | `/reset` | all control inputs false |
+| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `color`, `reverse`) |
+| POST | `/cars` | `clear` / `remove` by uid |
+| POST | `/flags` | per-car green/red test pennants (`red_nav`) |
+| POST | `/label` | per-car HUD text |
+| POST | `/toggle` | breadcrumbs / validator / mode / headlights / taillights / clear_blinker |
+| POST | `/freeze` | pause / resume the simulation |
+| POST | `/wait` | block until a condition holds or timeout |
+| GET | `/tests` | the numbered scenario list (shells out to the runner) |
+| POST | `/run_test` | launch the external test runner |
+| GET | `/run_test` | status of the running/last test |
+| GET/POST/DELETE | `/obstacles` | list / place / remove static obstacles |
 
 ### Health Check
 ```bash
@@ -63,9 +96,28 @@ Returns current game state:
   },
   "trail_enabled": false,
   "validator_enabled": true,
-  "time_warp": 1.0
+  "time_warp": 1.0,
+  "flow_m_total": 20520.4,
+  "flow_m_per_s": 342.0,
+  "lockdowns": 0,
+  "lockdown_last": "",
+  "standstill_errors": 0,
+  "standstill_last": ""
 }
 ```
+
+**Quality metrics (docs/DRIVING_MANEUVERS.md §8 "Liveness & quality").**
+`flow_m_total` is the metres every car in the fleet has driven since the sim
+started, `flow_m_per_s` the same over sim time - a high number means fluid
+traffic, a low one a stuck fleet (it punishes creeping, unlike a "cars
+moving" count). `lockdowns` counts total lockdowns the sim had to report
+(R28 - prevention must keep it at 0, the e2e suite fails when it grows), and
+`standstill_errors` counts cars that moved < 1 m within 3 min of WALL time
+(R31). The `*_last` fields carry the full event text (poses, cap keys,
+last decisions) so a failure can be read from data instead of guessed. The
+Godot HUD shows the flow **per car** (`flow/car 6.8 m/s · 410 m per car
+(50 cars)`) plus `!! stuck: N` when R31 fires, and hides the line for
+single-car runs - a lone car's flow is just its own speed.
 
 **Units.** Every coordinate anywhere in this API - `x`, `y`, the `body_corners`
 of a car, the `flags` positions, `GET /map`, `GET /segment/{idx}`, `GET /start_points`,
@@ -103,16 +155,33 @@ when no car is on the map); the Godot frontend prefers that array:
   {"car_uid": 1, "x": ..., "y": ..., "heading": ..., "speed_kmh": ...,
    "level": 0, "segment": 42, "progress": 0.65, "on_road": true,
    "wrong_side": false, "blinker_left": false, "blinker_right": true,
-   "hazard": false, "color": "red",
+   "hazard": false, "color": "blue",
+   "in_contact": false, "crash_episodes": 0, "contact_with": 0,
+   "body_corners": [[x, y], [x, y], [x, y], [x, y]],
+   "driver": "BICYCLE",
    "flags": {"green": [x, y, h] | null, "red": [x, y, h] | null},
-   "hud_label": "1/21" | null}
+   "hud_label": "1/24" | null}
 ]
 ```
 `color` names the car's vehicle sprite: `blue`, `silver`, `police`,
 `tan`, `tractor` (Sattelschlepper engine unit), `pickup`, `mixer` -
 assigned deterministically as
 `CAR_COLORS[(uid-1) % 7]` (see `docs/MULTI_CAR_PLAN.md`, sprite section).
-Each car carries its OWN test flags and HUD label.
+
+Other per-car fields worth knowing:
+
+- `in_contact` is TRUE only while a pair is pinned by collision resolution
+  (a crash) - it is TRANSIENT and can clear inside one poll. `crash_episodes`
+  is the monotonic count of crash episodes that car took part in; a test that
+  must catch the FIRST crash reads the counter, not the flag.
+- `body_corners` is the exact box used for crash detection: four `[x, y]`
+  **metre** corners (front-right, front-left, rear-left, rear-right) of that
+  car's per-class body. The client uses it as the car's click/hit area.
+- `level` is the vertical level of the current segment (0 = ground, 1 =
+  bridge): the renderer z-orders the car above its own deck but below any
+  higher level, and cars on different levels never collide.
+- `driver` names the Driver class (`BICYCLE` / `FREE`) for the client's
+  click-to-inspect window.
 
 ### Send Control Inputs
 ```bash
@@ -154,9 +223,16 @@ Content-Type: application/json
 # existing cars instead of replacing them (parallel test runs):
 {"start_point": "www_entry", "progress": 0.5, "speed": 8.3, "add": true}
 
-# Arbitrary segment (stress tests / dev): chord placement along the
-# segment's centreline, offset to the right-lane centre:
+# Arbitrary segment (stress tests / dev): placement follows the corner-
+# rounded PATH the pavement is built from, not the segment's chord - a
+# chord pose near a sharp corner sits metres off the pavement and points
+# ~10 deg off the road's real direction:
 {"segment": 128, "progress": 0.5, "speed": 8.3, "add": true}
+
+# Face the OTHER way along the same two-way road (two-way traffic in the
+# crossing stress runs; the lane offset is applied relative to the actual
+# heading, so the car still starts in its own right-hand lane):
+{"segment": 128, "progress": 0.5, "reverse": true, "add": true}
 
 # Choose the vehicle sprite (validated against Config.CAR_COLORS; 400 on
 # an unknown name):
@@ -224,12 +300,20 @@ POST /toggle
 Content-Type: application/json
 
 {
-  "uid": 2,            # optional; omit = primary car (breadcrumbs/mode only)
+  "uid": 2,             # optional; omit = primary car
+                        # ("validator" stays GLOBAL, the rest are per-car)
   "breadcrumbs": true,
   "validator": false,
-  "mode": "bicycle"  # or "free"
+  "mode": "bicycle",    # or "free"
+  "headlights": true,   # white front-corner lights (test/QA only)
+  "taillights": true,   # dark red rear-corner lights (test/QA only)
+  "clear_blinker": true # clear BOTH turn indicators once (one-shot)
 }
 ```
+`headlights_on` / `taillights_on` are exposed per car on `/state`. Brake
+lights piggyback on `Car.IsBraking` (no new sim state) and show bright red at
+the rear corners regardless of `taillights_on` - a real brake light works with
+the lights off.
 
 ### Freeze / Resume
 ```bash
@@ -285,6 +369,58 @@ Blocks until condition is met or timeout. For
 `"position_reached"`, `value` is `{"x": …, "y": …, "threshold": …}` in
 **metres** (the same unit `GET /state` reports); `threshold` defaults to
 5 m.
+
+### Per-car decision log
+```bash
+GET /car/7/decisions
+```
+Returns that car's rule log - EVENTS, not per-frame samples:
+
+```json
+{"uid": 7,
+ "decisions": [{"t": 12.34, "msg": "[R5] yield sign: car 26 at the crossing (19 m out)"},
+               {"t": 13.10, "msg": "[R3] entered crossing - committed, continuing"}]}
+```
+
+One entry each time the REASON a car is held back changes (new threat,
+threat gone, rule fired), tagged with the Driving-Ruleset number (see
+`docs/DRIVING_MANEUVERS.md` §8). The newest (last) entry is why the car
+behaves as it does now; the Godot client shows the tail of the list in a
+click-to-inspect window, so a stuck car always answers "why am I stopped?".
+The log holds at most 100 entries per car (`Car.MaxDecisions`).
+
+### Map export (GET /map)
+
+The layer-2 geometry contract, served once per map load - this is what the
+client renders and what an external planner would plan on. Payload keys
+(`DrivingGame.Api/MapPayload.cs`):
+
+```json
+{
+  "units": "meters",
+  "bounds": [x0, y0, x1, y1],
+  "road_color": [r,g,b], "bg_color": [r,g,b],
+  "road_strips":  [{"left": [[x,y]…], "right": [[x,y]…]}],   // road as its own ribbon
+  "road_polygons": [{"color": [r,g,b], "rings": [{"exterior": …, "holes": …}]}],
+  "segments": [[x1,y1,x2,y2,width,oneway,…]],
+  "paved_edge_rings": …,          // the paved polygon's edges (off-road check)
+  "centerlines": …, "lane_markings": [{"style": …, "width_m": …, "pts": …}],
+  "stop_lines": [[x1,y1,x2,y2]],  // halt lines at yield-signed mouths
+  "crossing_markers": [[x,y,r]],  // the white centre disc at degree>=4 crossings
+  "oneway_arrows": …, "parking_marks": …,
+  "signs": [{"x": …, "y": …, "heading_deg": …, "type": "yield|priority"}],
+  "elevated_roads": …, "elevated_roadways": …, "elevated_edge_lines": …,
+  "elevated_centerlines": …,
+  "marking_style": {"center_dash_m": 3, "center_gap_m": 3, "lane_dash_m": 2,
+                    "lane_gap_m": 4, "park_dash_m": 1, "park_gap_m": 1,
+                    "stop_line_width_m": 0.5},
+  "start_points": {name: [x, y, heading_deg, seg, forward, lateral_offset_m]}
+}
+```
+
+Every coordinate is in metres (x east, y north, origin at the map's south-west
+corner); dash patterns are declared in metres so an external renderer draws the
+same paint from one source of truth.
 
 ### Obstacles (docs/OBSTACLES.md)
 
@@ -383,20 +519,10 @@ curl -X POST http://localhost:5001/freeze \
 
 ## Automated Testing
 
-See `tests/test_api.py` for examples of automated tests:
-
-```bash
-# Terminal 1: Start game with API
-python -m src.main --api
-
-# Terminal 2: Run tests
-python tests/test_api.py
-```
-
-The test script demonstrates:
-- Basic driving (accelerate, brake, coast)
-- Turn monitoring (detect off-road)
-- Screenshot capture
+The e2e suite is `tests/test_turning.py` in THIS repo; run it through
+`scripts/run_e2e.sh` (see docs/TESTING.md). The old Python `tests/test_api.py`
+smoke tests lived in the retired `car/` repo; endpoint parity here is covered
+by the C# xunit suite plus the live suite.
 
 ## Use Cases
 
@@ -441,15 +567,25 @@ flags) instead of pixels.
 
 ## Architecture
 
-The API runs in a **separate thread** from the game loop:
-- **Thread-safe** state sharing via `threading.Lock`
-- **Non-blocking** - game continues at 60 FPS (headless, self-paced)
+The API is one `DrivingGame.Api` project wired by BOTH hosts - the console
+host (`DrivingGame.Server/Program.cs`) and the Godot app (`SimHost.cs`,
+`--source embedded`).
 
-Game loop flow:
-1. Handle API commands (teleport, toggle, freeze, flags, label)
-2. Update car physics (fixed timestep, accumulator)
-3. Update camera
-4. Update API state
+- The sim runs on a **dedicated background thread** with its own 60 Hz pacing
+  (sleep + 4 ms spin window), independent of render hitches; "in one app" does
+  NOT mean same thread.
+- `GET /state` serves `SimEngine.StateSnapshot()` - a consistent copy of the
+  last payload under a lock; the sim thread mutates it at 60 Hz while HTTP
+  threads read it.
+- All one-shot commands (`/teleport`, `/cars`, `/flags`, `/label`, `/toggle`,
+  `/freeze`, hazard) go into ONE global FIFO of `SimCommand` records, applied
+  in strict arrival order per frame batch. Sustained keys (`/control`) live in
+  per-uid control buckets; a missing uid means the "unaddressed" bucket, which
+  applies to the PRIMARY (followed) car only.
+- Game loop per frame: drain the command queue → per-car control merge
+  (driver + API) → fixed-timestep substeps (two-pass collision: advance + cap
+  + obstacle contact, then `Resolve` rollback, then validator + lane guard on
+  the FINAL state) → resolve pending red flags → export state.
 
 ## Security Note
 
