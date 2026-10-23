@@ -1,8 +1,11 @@
 # Simulationsreviewer — the review client
 
-Status: **specified 2026-10-21, not implemented.** Every decision below is a
-binding user decision; the code does not exist yet. The tape, the endpoints and
-the per-substep fluidity it reads are already built — see
+Status: **built and in use.** Specified 2026-10-21, implemented in
+`MapRenderer.review.cs` (a second window of the same client), and revised on
+2026-10-22 against an on-screen review list — see *Review-list fixes*
+below. Every decision in this document is a binding user decision; where the
+code has since diverged, the divergence is recorded there. The tape, the
+endpoints and the per-substep fluidity it reads are built — see
 [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
 
 ## Two clients, one window each
@@ -62,7 +65,9 @@ there. **Step mode never smooths**, at any ramp speed.
 | **single click ◀ / ▶** | exactly **one frame** |
 | **hold ◀ / ▶** | the rate ramps while held and ramps back on release: `0.0 s → 1`, `0.3 s → 6`, `0.8 s → 20`, `1.5 s → 60`, cap `120` frames/s. Same curve both directions |
 | **`,` and `.`** | one substep back / forward — the two keys **right of M** on a German layout. Bound by **physical position** (Godot `keycode`, not `unicode`), so the gesture survives other layouts |
-| guards | the cursor never passes the **tape head** (that would invent), never below step 0 |
+| **bar click** | a click or a **drag on the scrub bar IS a seek**: x maps linearly onto the tape's substeps, so the moment you aim at is the moment you get. It **pauses** ▶ play — a lerp one frame past your click is not that frame (`ReviewScrubZone` → `ReviewSeek`) |
+| **playback rate box** | an `OptionButton` (0.5x … 8x). Choosing a rate sets the rate **only** — the old row of five buttons each did `_playRate = r; _playing = true`, so asking "what does 4x look like" started the tape running. ▶ is what plays |
+| **guards** | the cursor never passes the **tape head** (that would invent), never below step 0 |
 
 ## Scrub bar and the chart above it
 
@@ -230,16 +235,80 @@ exactly — the screenshot picks the view, the tape supplies the truth.
 5. the whole-window **screenshot** button, named against the tape and the frame
 6. the viewer's connection overlay (same layer)
 
+## Review-list fixes (2026-10-22)
+
+The user reviewed a screenshot of `tape_T_240` and named what was wrong. Five
+items plus the marker lane, all fixed, each verified on a screenshot:
+
+| # | what was wrong | the cause | the fix |
+|---|---|---|---|
+| 1 | the top of the screen: two areas overlapping, unreadable | **two** `Label`s with their own translucent boxes — the wrapped three-liner at y=12 and the camera line at y=34, so the second sat ON the first (measured (21,43,25) over (29,63,29) over grass) and the box height was a guess (4 × font + 14) | ONE `Label`, THREE fixed lines, ONE box sized from the laid-out text; the font shrinks only as far as the **widest line** needs to end before the map window — measured with `Font.GetStringSize`, after a 0.50 em/char estimate proved ~15 % optimistic |
+| 2 | the map inset did not fill its window | `MinimapNode` was a `Node2D` that drew a fixed 360 px square at `(vp.X − 360 − 15, 15)` of the viewport it rendered in — inside its own window that left a 43 px empty band and stretched a 2470 × 1950 m world into a square (two different axis scales) | `MinimapNode` is a `Control` that draws into **its own rect**, and the window is sized **from the map's aspect** (`MmBoxFor`: `BoxSize` on the long side). The view marker now measures the MAIN window (`GetTree().Root`), not the subwindow's 390 px viewport — the old reading made the rect ~7× too small, so it always fell through to the crosshair |
+| 3 | the scrub bar was read-only — no way to jump to a position | the curve had no input surface at all: only the buttons and `,`/`.` moved the cursor | `ReviewScrubZone` (`MouseFilter.Stop`) over the curve band, below the button row: click seeks, drag scrubs. Verified with `--test-seek 0.25`, which pushes a real `InputEventMouseButton` through the viewport: `REVIEW-SEEK click frac=0.250 -> frame 1439/5752` |
+| 4 | buttons of five different sizes; "open a tape" in words; the speed buttons started playback | font 38 / 38 / 24 / 28 and three different box heights in one row; `Text = "open a tape"` (the eject glyph is not in the font); each rate button did `_playing = true` | one row, one box (66 × 58 × `hudS`), one font (32 × `hudS`), `📂` with a tooltip, and an `OptionButton` for the rate that only calls `SetPlayRate`. `FocusMode = None` on the transport buttons, so a click does not steal the scrub keys |
+| 5 | the car-info box was not a real window | the slots were `Panel`s — and the earlier attempt at windows had placed their children in MAIN-window coordinates *inside* the subwindow's viewport, which is why they "came out scattered" and "opened empty" | three real `Window`s, title bar naming the car (`#9 slow_car · compact · 3.14 × 1.71 m`), each closable (its × stops that slot until a new car is picked), draggable, resizable — the text reflows because it is anchored inside the window and sized from `Window.GetVisibleRect()` |
+| 8 | the marker lane floated mid-screen, over the map | `ReviewMarkers` cached on the **selection** alone, so after a maximize the quads kept the `barBase` of the 900 px window the run started in (measured at y≈832 of 1558) | the cache key carries the viewport size; and the whole HUD is rebuilt when the window changes size (`RebuildReviewHud`, logged: `REVIEW-HUD rebuilt for (2400, 1300) (hudS 1.59)`), which also fixes the stale `_hudS` that made a maximized window print 12 px text |
+
+Still open from that review (NOT fixed):
+
+| # | defect |
+|---|---|
+| 6 | the picture is not the frame the readout claims: at 8x the blue car was drawn 822 substeps stale while the label said `frame 5752` — the display-truth promise broken at the head |
+| 7 | `_selected` is sticky: when the selected uid despawns, nothing re-seeds it, so a slot reads `#1 (not on this frame)` for the rest of the run while cars are on screen — and nothing shows WHICH car is selected |
+
+Two things the same pass surfaced and fixed because they sat in the code the
+items above touch:
+
+- **`--review` without a path loaded nothing.** `NewestTape`/`ListRuns` returned
+  `res://tests/…` and `LoadTape` reads with `System.IO.File`, which does not
+  know Godot's prefix → "no tape readable", and every entry of the run picker
+  was a click that loaded nothing. Both now return `GlobalizePath` paths.
+- **the map window did not follow a resize** — its `Position` is absolute, so
+  after a resize it sat in the middle of the top edge, on top of the readout it
+  must not cover. `PinMapWindow` re-pins the corner on a size change (and only
+  then: a window dragged sideways keeps its spot at a size that does not change).
+- **the labels stacked under the inset were placed outside their own window**
+  (`LayoutUnderMinimap` asked the MAIN viewport for its width while the labels
+  are children of the map window), so whatever they had to say never reached
+  the screen. Coordinates are window-local now, hanging under the caption row.
+
+## One fixed HUD size (binding user decision, 2026-10-22)
+
+**The reviewer draws its HUD at ONE size, whatever the window is.** No
+`hudS` any more: the review client has no scale factor read off the window
+height, and every HUD number is a named constant (`ReadoutFontPx` 28,
+`AxisFontPx` 20, `ButtonFontPx` 32 + a 66 × 58 box, `PickerFontPx` 23,
+`SlotFontPx` 26). A maximized window shows the same readable text as the
+900 px one, sitting in the corners instead of filling the screen.
+
+The rows above that mention `× hudS` are history — they describe the build
+that introduced the scale, which this decision supersedes.
+
+The one number that may still vary is the **readout font, and it may only
+shrink**: its three lines do not wrap (`AutowrapMode.Off`), so in a window
+narrow enough that the widest line would run under the map window the font
+gives in until the box ends before that frame. Growth is capped at
+`ReadoutFontPx`, never beyond it — it is a collision guard, not a scale
+(logged as `REVIEW-FONT size=… want=28 fixed`).
+
+Dev hooks added on the way: `--resize <w> <h>` (grow the window a moment after
+start — the only scripted way to reproduce "HUD after maximize") and
+`--test-seek <frac>` (push a click into the bar), both in the family of the
+existing `--test-pan`.
+
+
 ## Implementation status (2026-10-21)
 
-Built and verified on screen in `MapRenderer.review.cs`:
+Built and verified on screen in `MapRenderer.review.cs` (as of 2026-10-22 the
+rows marked ⚠ describe the state at that date — the *Review-list fixes* table
+above says what replaced them):
 
 | feature | evidence |
 |---|---|
 | scrub bar + six buttons ▶ ⏸ ⏹ ● ◀ ▶▶ | inside the bar, dark strip |
-| playback-rate buttons ½× 1× 2× 4× 8× | on the bar (rate was keyboard-only before) |
-| two-line readout | tape · frame [cursor/len] · SIM time · map + hash · fluidity · mode / cam x y zoom · view · units |
-| three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail |
+| ⚠ playback-rate buttons ½× 1× 2× 4× 8× | on the bar (rate was keyboard-only before) — replaced by the rate dropdown 2026-10-22 |
+| ⚠ two-line readout | tape · frame [cursor/len] · SIM time · map + hash · fluidity · mode / cam x y zoom · view · units — three lines in ONE box since 2026-10-22 |
+| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it) |
 | decision trail | count **plus the last two texts** with their frame numbers, clipped to the panel |
 | chart | cyan fleet curve, **yellow standstill blocks** (fleet-level band + per-car lane), **decision hairlines** under the curve, white cursor tick |
 | run picker | six newest tapes listed under the minimap; clicking one reloads that tape, rewinds, re-points the camera |

@@ -68,12 +68,19 @@ public partial class MapRenderer : Node2D
     private readonly HashSet<Key> _keys = new();
     private string _screenshotPath;
     private float _shotDelay = 0.5f;
+    private Vector2I _resizeTo;        // --resize <w> <h>: grow the window after start
+    private double _testSeek = -1.0;   // --test-seek <frac>: click the scrub bar
+    private Vector2 _testMmPan;        // --test-minimap-pan <fx> <fy>: drive the view box
+    private double _testScrubDrag = -1.0;  // --test-scrub-drag <frac>: drag in the bar
     // Dev hook: --motionlog <file> writes "ms x y" per car per frame so
     // rendering smoothness can be measured (delta variance = stutter).
     private string _motionLogPath;
     private int _autoRunTest = -1;   // --run-test <N>: auto-click Run Test
     private StreamWriter _motionLog;
     private bool _testPan;
+    private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
+    private bool _testSlotButtons;   // --test-slot-buttons: click a slot's two corner buttons
+    private bool _testWindowOut;     // --test-window-out: park a window illegally, let the guard answer
     // --quit-on-test-done: exit IN-APP (GetTree().Quit) once a polled test
     // run finishes. Used by scripts/run_e2e.sh so the window never has to
     // be killed from outside - any kill signal (SIGTERM -> .NET abort,
@@ -101,7 +108,27 @@ public partial class MapRenderer : Node2D
     // (project settings) anti-aliases the sub-pixel edges instead of hiding
     // them behind a fade.
     private MinimapNode _minimap;
-    private Label _zoomLabel;
+    private Window _mmWin;         // the minimap's embedded window
+    private int _mmDbg;            // the first camera moves the inset asked for, logged
+    private int _clampDbg;         // the first times a hand hit the pan limit, logged
+    // How far off the network the view may be parked (binding user decision
+    // 2026-10-22: "limit panning to the area where tracks exist, plus maybe
+    // 100 m left right up down") - metres.
+    private const float PanBeyondMapM = 100f;
+    // Every window this client owns keeps these (binding user decision
+    // 2026-10-22: "windows cannot be dragged out of the main window, not even
+    // partially; always keep a margin of 5 pixels from each other"). The
+    // chrome numbers are Godot's own, measured on a 1600 px run: the map
+    // window's client area sat at node position (1240,64) while its title
+    // bar painted from y=32 and its frame reached x=1232 and 5 px below the
+    // client's bottom - so a window is only inside once its CHROME is.
+    private const int WinGapPx = 5;          // the belt every window keeps
+    private const int WinTitleBarPx = 32;    // chrome above the client area
+    private const int WinFrameSidePx = 8;    // chrome left and right of it
+    private const int WinFrameBottomPx = 5;  // chrome below it
+    private readonly List<Window> _windows = new();   // every window, guarded
+    private CanvasLayer _mmHud;   // main-window readouts stacked UNDER the map window
+    private Vector2 _mmPinVp;      // window size the map window was pinned for
     private Vector2 _lastCamPos = new(float.NaN, float.NaN);
     private float _lastCamZoom = float.NaN;
     // Minimap road network: raw segments in sim coords (x east, y north)
@@ -172,6 +199,20 @@ public partial class MapRenderer : Node2D
     /// crashed car, so a failed crossing run can be re-watched on the impact
     /// instead of the map-wide default view.</summary>
     private long _focusUid = 0L;
+    // A pan the operator applied INSIDE the review: the pin is the default
+    // view, the pan is what they add to it, and both survive a scrub because
+    // the pin is recomputed from the tape every substep.
+    private Vector2 _reviewPan;
+    /// <summary>The spot the hand pinned the view on through the minimap's
+    /// inset (Godot world, metres). The review camera re-derives its pin from
+    /// the tape EVERY substep, so writing such a hand move straight to the
+    /// camera loses it on the next frame (measured: MINIMAP-PIN put the view
+    /// at (1399.7,-837.8) and the following substep pulled it back to the
+    /// centroid (775.9,-101.5)). The ask is kept as an absolute map point
+    /// instead, and the pin defers to it - the hand named a place on the map,
+    /// not an offset against a car that drives on.</summary>
+    private Vector2? _mmAsk;
+    private Vector2 _dragStartPan;
     // The COURTESY flash (docs/RIGHT_OF_WAY_NEGOTIATION.md §6, the user's
     // word bitteschön): drawn by the car that CONCEDES a right-of-way
     // resource, aimed at the car whose passage it grants. A cone in the
@@ -416,6 +457,60 @@ public partial class MapRenderer : Node2D
                 _overrideZoom = float.Parse(args[i + 1]);
             else if (args[i] == "--test-pan")
                 _testPan = true;
+            else if (args[i] == "--test-seek" && i + 1 < args.Length)
+            {
+                // Dev hook (same family as --test-pan): push a real mouse
+                // click into the scrub bar's seek band at a fraction of the
+                // tape, so "can a click move the cursor?" is a question a
+                // scripted run can answer instead of a hand on the mouse.
+                _testSeek = float.Parse(args[i + 1]);
+                i += 1;
+            }
+            else if (args[i] == "--test-scrub-drag" && i + 1 < args.Length)
+            {
+                // Dev hook (same family as --test-seek): push a real DRAG into
+                // the scrub bar's seek band - press, move, release - so the
+                // question "does a bar drag also pan the map?" is answered by
+                // the input path itself, not by reading the handler.
+                _testScrubDrag = float.Parse(args[i + 1]);
+                i += 1;
+            }
+            else if (args[i] == "--test-bar-point" && i + 2 < args.Length)
+            {
+                // Dev hook (same family as --test-seek): pin the pointer for
+                // the scrub bar's idle decision at a fixed main-window point,
+                // so "does the bar fade away when the hand is elsewhere" is a
+                // scripted question and not one that depends on where the OS
+                // pointer happens to rest while the run is recorded.
+                _testBarPoint = new Vector2(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
+                i += 2;
+            }
+            else if (args[i] == "--test-slot-buttons")
+                _testSlotButtons = true;
+            else if (args[i] == "--test-jog")
+                _testJog = true;
+            else if (args[i] == "--test-window-out")
+                _testWindowOut = true;
+            else if (args[i] == "--test-minimap-pan" && i + 2 < args.Length)
+            {
+                // Dev hook (same family as --test-seek and --test-scrub-drag):
+                // push a REAL press -> move -> release into the minimap's
+                // inset at fractions of its rect, then a wheel over it, so
+                // "does the inset move and size the view box?" is answered by
+                // the input path itself and not by a hand on the mouse.
+                _testMmPan = new Vector2(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
+                i += 2;
+            }
+            else if (args[i] == "--resize" && i + 2 < args.Length)
+            {
+                // Change the window size a moment after start. A HUD that
+                // measures itself against the viewport can only be trusted if
+                // it survives a resize - and a resize is otherwise something
+                // only a hand on the window border can do, i.e. something no
+                // scripted screenshot run can test.
+                _resizeTo = new Vector2I(int.Parse(args[i + 1]), int.Parse(args[i + 2]));
+                i += 2;
+            }
             else if (args[i] == "--quit-on-test-done")
                 _quitOnTestDone = true;
             else if (args[i] == "--motionlog" && i + 1 < args.Length)
@@ -611,6 +706,310 @@ public partial class MapRenderer : Node2D
             GetTree().CreateTimer(2.0).Timeout += () => _keys.Add(Key.D);
             GetTree().CreateTimer(3.5).Timeout += () => _keys.Remove(Key.D);
             GetTree().CreateTimer(4.0).Timeout += () => SaveShot(_screenshotPath);
+        }
+
+        if (_testJog)
+        {
+            // Dev hook (same family as --test-seek): push a REAL held '.' -
+            // press, hold, release - through the viewport and read the cursor
+            // over time, so "a held '.' or ',' moves slow forward/backward and
+            // stops when the finger comes up" is measured rather than assumed.
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                GD.Print($"TEST-JOG start cursor={_cursor} dt={_tapeDt:F6} s -> {JogStepsPerSecond:F0} substeps/s is {JogStepsPerSecond * _tapeDt:F2} s of tape per wall second");
+                // The HELD state, not a pushed key: this build's bindings
+                // deliver mouse events through PushInput but a pushed key
+                // never reaches _Input (measured: the tap step did not move
+                // the cursor), so the hook sets exactly what a held '.' would
+                // have set - and the release below is what a finger coming
+                // up would set.
+                _jogDir = 1.0;      // what holding '.' sets: forward
+                GetTree().CreateTimer(0.6).Timeout += () => GD.Print($"TEST-JOG +0.6s cursor={_cursor} dir={_jogDir} acc={_jogAcc:F2} playing={_playing} tape={_tape.Count} dt={_tapeDt:F6}");
+                GetTree().CreateTimer(1.2).Timeout += () => GD.Print($"TEST-JOG +1.2s cursor={_cursor}");
+                GetTree().CreateTimer(1.8).Timeout += () => GD.Print($"TEST-JOG +1.8s cursor={_cursor}");
+                GetTree().CreateTimer(2.4).Timeout += () =>
+                {
+                    _jogDir = 0.0;              // the finger came up
+                    GD.Print($"TEST-JOG release set at cursor={_cursor}");
+                };
+                GetTree().CreateTimer(3.2).Timeout += () => GD.Print($"TEST-JOG +1.2s after release cursor={_cursor}");
+                GetTree().CreateTimer(4.0).Timeout += () =>
+                {
+                    GD.Print($"TEST-JOG +2.0s after release cursor={_cursor}");
+                    if (_screenshotPath != null) SaveShot(_screenshotPath);
+                };
+            };
+        }
+
+        if (_testSlotButtons)
+        {
+            // Dev hook (same family as --test-seek / --test-window-out): drive
+            // the two corner buttons of slot 1 through the real input path -
+            // pick a car, toggle follow, centre, toggle back - and read the
+            // camera and the toggles back after each, so the decision is
+            // measured, not assumed.
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                var vpS = GetTree().Root.GetVisibleRect().Size;
+                // Two picks, a hand's width apart, so two slot windows own a
+                // car and the "one car followed" rule has something to enforce.
+                foreach (var at in new[] { vpS / 2f, vpS / 2f + new Vector2(120f, 0f) })
+                {
+                    GetViewport().PushInput(new InputEventMouseButton
+                    {
+                        Position = at, GlobalPosition = at,
+                        ButtonIndex = MouseButton.Left, Pressed = true,
+                    });
+                    GetViewport().PushInput(new InputEventMouseButton
+                    {
+                        Position = at, GlobalPosition = at,
+                        ButtonIndex = MouseButton.Left, Pressed = false,
+                    });
+                }
+                GetTree().CreateTimer(0.6).Timeout += () =>
+                {
+                    if (_slots.Count == 0) return;
+                    var s = _slots[0];
+                    GD.Print($"SLOT-TEST after pick: uid={s.UidShown} visible={s.Win.Visible} " +
+                             $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2})");
+                    GetTree().CreateTimer(0.4).Timeout += () =>
+                    {
+                        // Click slot 1's FOLLOW button, in the window's lower-right
+                        // corner: the window's client origin plus the control's
+                        // own rect, which is window-local.
+                        var fr = s.FollowBtn.GetGlobalRect();
+                        var c = new Vector2(s.Win.Position.X + fr.Position.X + fr.Size.X / 2f,
+                                            s.Win.Position.Y + fr.Position.Y + fr.Size.Y / 2f);
+                        GetViewport().PushInput(new InputEventMouseButton
+                        {
+                            Position = c, GlobalPosition = c,
+                            ButtonIndex = MouseButton.Left, Pressed = true,
+                        });
+                        GetViewport().PushInput(new InputEventMouseButton
+                        {
+                            Position = c, GlobalPosition = c,
+                            ButtonIndex = MouseButton.Left, Pressed = false,
+                        });
+                        GetTree().CreateTimer(0.5).Timeout += () =>
+                        {
+                            GD.Print($"SLOT-TEST follow click: slot0 following={s.Following} " +
+                                     $"followed uid={SlotFollowUid()} button='{s.FollowBtn.Text}' " +
+                                     $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2})");
+                            // Then the CENTRE button - momentary.
+                            var cr = s.CenterBtn.GetGlobalRect();
+                            var c2 = new Vector2(s.Win.Position.X + cr.Position.X + cr.Size.X / 2f,
+                                                 s.Win.Position.Y + cr.Position.Y + cr.Size.Y / 2f);
+                            GetViewport().PushInput(new InputEventMouseButton
+                            {
+                                Position = c2, GlobalPosition = c2,
+                                ButtonIndex = MouseButton.Left, Pressed = true,
+                            });
+                            GetViewport().PushInput(new InputEventMouseButton
+                            {
+                                Position = c2, GlobalPosition = c2,
+                                ButtonIndex = MouseButton.Left, Pressed = false,
+                            });
+                            GetTree().CreateTimer(0.5).Timeout += () =>
+                            {
+                                GD.Print($"SLOT-TEST centre click: cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
+                                         $"mmAsk={_mmAsk != null} following={s.Following}");
+                                // And follow again - the toggle must switch OFF.
+                                GetViewport().PushInput(new InputEventMouseButton
+                                {
+                                    Position = c, GlobalPosition = c,
+                                    ButtonIndex = MouseButton.Left, Pressed = true,
+                                });
+                                GetViewport().PushInput(new InputEventMouseButton
+                                {
+                                    Position = c, GlobalPosition = c,
+                                    ButtonIndex = MouseButton.Left, Pressed = false,
+                                });
+                                GetTree().CreateTimer(0.5).Timeout += () =>
+                                {
+                                    GD.Print($"SLOT-TEST follow twice: slot0 following={s.Following} " +
+                                             $"followed uid={SlotFollowUid()} button='{s.FollowBtn.Text}'");
+                                    // Now the SECOND slot's follow - it must take
+                                    // the camera and switch the first back off.
+                                    if (_slots.Count < 2 || _slots[1].UidShown <= 0L)
+                                    {
+                                        if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                        return;
+                                    }
+                                    var s2 = _slots[1];
+                                    var fr2 = s2.FollowBtn.GetGlobalRect();
+                                    var c3 = new Vector2(s2.Win.Position.X + fr2.Position.X + fr2.Size.X / 2f,
+                                                         s2.Win.Position.Y + fr2.Position.Y + fr2.Size.Y / 2f);
+                                    GetViewport().PushInput(new InputEventMouseButton
+                                    {
+                                        Position = c3, GlobalPosition = c3,
+                                        ButtonIndex = MouseButton.Left, Pressed = true,
+                                    });
+                                    GetViewport().PushInput(new InputEventMouseButton
+                                    {
+                                        Position = c3, GlobalPosition = c3,
+                                        ButtonIndex = MouseButton.Left, Pressed = false,
+                                    });
+                                    GetTree().CreateTimer(0.5).Timeout += () =>
+                                    {
+                                        GD.Print($"SLOT-TEST second follow: slot1 following={_slots[1].Following} " +
+                                                 $"slot0 following={s.Following} followed uid={SlotFollowUid()}");
+                                        // Turn the FIRST one on again while the
+                                        // second holds the camera - the rule
+                                        // "switching one on switches the others
+                                        // off" has to be measured, not assumed.
+                                        GetViewport().PushInput(new InputEventMouseButton
+                                        {
+                                            Position = c, GlobalPosition = c,
+                                            ButtonIndex = MouseButton.Left, Pressed = true,
+                                        });
+                                        GetViewport().PushInput(new InputEventMouseButton
+                                        {
+                                            Position = c, GlobalPosition = c,
+                                            ButtonIndex = MouseButton.Left, Pressed = false,
+                                        });
+                                        GetTree().CreateTimer(0.5).Timeout += () =>
+                                        {
+                                            GD.Print($"SLOT-TEST third follow: slot0 following={s.Following} " +
+                                                     $"slot1 following={_slots[1].Following} followed uid={SlotFollowUid()}");
+                                            if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        }
+
+        if (_testWindowOut)
+        {
+            // Dev hook (same family as --test-pan): put windows somewhere a
+            // hand is not allowed to leave them - partly out of the main
+            // window, and on top of each other - and read back where the
+            // guard settled them, so "windows cannot be dragged out, and they
+            // keep 5 px from each other" is a measured answer rather than a
+            // claim.
+            // After --resize when one is asked for: the point of the test is
+            // the size the windows have to share, so the resize comes first.
+            var whenWin = _resizeTo.X > 0 ? Mathf.Max(2.0, _shotDelay - 0.8) : 1.5;
+            GetTree().CreateTimer(whenWin).Timeout += () =>
+            {
+                var asked = "";
+                foreach (var w in _windows) asked += $" {w.Title}@({w.Position.X},{w.Position.Y})";
+                GD.Print($"TEST-WINDOW ask:{asked}");
+                for (var i = 0; i < _windows.Count; i++)
+                    // All outside the same corner, all overlapping each other.
+                    _windows[i].Position = new Vector2I(-200 + 30 * i, -200 + 20 * i);
+                GetTree().CreateTimer(0.3).Timeout += () =>
+                {
+                    var got = "";
+                    foreach (var w in _windows) got += $" {w.Title}@({w.Position.X},{w.Position.Y}) {w.Size.X}x{w.Size.Y}";
+                    GD.Print($"TEST-WINDOW enforced:{got}");
+                    // The gap that is actually left between the outer rects of
+                    // neighbours, in px - the number the decision asks for is
+                    // 5.
+                    for (var i = 0; i < _windows.Count; i++)
+                    {
+                        for (var j = i + 1; j < _windows.Count; j++)
+                        {
+                            var a = OuterRect(_windows[i]);
+                            var b = OuterRect(_windows[j]);
+                            var gx = Mathf.Max(b.Position.X - a.End.X, a.Position.X - b.End.X);
+                            var gy = Mathf.Max(b.Position.Y - a.End.Y, a.Position.Y - b.End.Y);
+                            GD.Print($"TEST-WINDOW gap {_windows[i].Title} vs {_windows[j].Title} = " +
+                                     $"{Mathf.Max(gx, gy):F0} px clear (want {WinGapPx})");
+                        }
+                    }
+                };
+            };
+        }
+
+        if (_testMmPan.X != 0f || _testMmPan.Y != 0f)
+        {
+            GetTree().CreateTimer(1.5).Timeout += () =>
+            {
+                if (_minimap == null || _mmWin == null) return;
+                var r = new Rect2(_mmWin.Position, _minimap.Size);
+                float x = r.Position.X + r.Size.X * _testMmPan.X;
+                float y = r.Position.Y + r.Size.Y * _testMmPan.Y;
+                var vpT = GetViewport().GetVisibleRect().Size;
+                GD.Print($"TEST-MM-PAN inset={r} press=({x:F0},{y:F0}) " +
+                         $"cam before=({_cam.GlobalPosition.X:F1},{_cam.GlobalPosition.Y:F1})");
+                GetViewport().PushInput(new InputEventMouseButton
+                {
+                    Position = new Vector2(x, y), GlobalPosition = new Vector2(x, y),
+                    ButtonIndex = MouseButton.Left, Pressed = true,
+                });
+                GetTree().CreateTimer(0.2).Timeout += () =>
+                {
+                    // The hand walks inside the inset - the box has to follow
+                    // with the CURSOR centred in it.
+                    GetViewport().PushInput(new InputEventMouseMotion
+                    {
+                        Position = new Vector2(x + 60f, y + 20f),
+                        GlobalPosition = new Vector2(x + 60f, y + 20f),
+                        Relative = new Vector2(60f, 20f),
+                    });
+                    GetTree().CreateTimer(0.2).Timeout += () =>
+                    {
+                        GetViewport().PushInput(new InputEventMouseButton
+                        {
+                            Position = new Vector2(x + 60f, y + 20f),
+                            GlobalPosition = new Vector2(x + 60f, y + 20f),
+                            ButtonIndex = MouseButton.Left, Pressed = false,
+                        });
+                        GetTree().CreateTimer(0.2).Timeout += () =>
+                        {
+                            float z = _cam.Zoom.X;
+                            GD.Print($"TEST-MM-PAN after drag cam=({_cam.GlobalPosition.X:F1},{_cam.GlobalPosition.Y:F1}) " +
+                                     $"hand moved (+60,+20) mm px -> " +
+                                     $"world {60f / (r.Size.X / _bounds.Size.X):F1} m expected · zoom {z:F3} px/m " +
+                                     $"view {vpT.X / z:F0} m box {(vpT.X / z) * (r.Size.X / _bounds.Size.X):F0} px");
+                            for (int notch = 0; notch < 3; notch++)
+                                GetViewport().PushInput(new InputEventMouseButton
+                                {
+                                    Position = new Vector2(x + 60f, y + 20f),
+                                    GlobalPosition = new Vector2(x + 60f, y + 20f),
+                                    ButtonIndex = MouseButton.WheelUp, Pressed = true,
+                                });
+                            GetTree().CreateTimer(0.2).Timeout += () =>
+                            {
+                                // And zoom OUT: the box must stop at the
+                                // inset's own size = the map's extent.
+                                for (int notch = 0; notch < 30; notch++)
+                                    GetViewport().PushInput(new InputEventMouseButton
+                                    {
+                                        Position = new Vector2(x + 60f, y + 20f),
+                                        GlobalPosition = new Vector2(x + 60f, y + 20f),
+                                        ButtonIndex = MouseButton.WheelDown, Pressed = true,
+                                    });
+                                GetTree().CreateTimer(0.25).Timeout += () =>
+                                {
+                                    var zOut = _cam.Zoom.X;
+                                    var vpO = GetViewport().GetVisibleRect().Size;
+                                    GD.Print($"TEST-MM-WHEEL out 30 notches -> zoom {zOut:F3} px/m " +
+                                             $"view {vpO.X / zOut:F0} m · box {(vpO.X / zOut) * (_minimap.Size.X / _bounds.Size.X):F0} px " +
+                                             $"of the inset's {_minimap.Size.X:F0} px · cap asked " +
+                                             $"{Mathf.Max(ZoomMin, MinZoomOverMap()):F3} px/m = {_bounds.Size.X:F0} m wide");
+                                    float cx = r.Position.X + r.Size.X * 0.99f;
+                                    float cy = r.Position.Y + r.Size.Y * 0.01f;
+                                    GetViewport().PushInput(new InputEventMouseButton
+                                    {
+                                        Position = new Vector2(cx, cy),
+                                        GlobalPosition = new Vector2(cx, cy),
+                                        ButtonIndex = MouseButton.Left, Pressed = true,
+                                    });
+                                    GetTree().CreateTimer(0.2).Timeout += () =>
+                                        GD.Print($"TEST-MM-CLAMP corner press -> cam=({_cam.GlobalPosition.X:F1},{_cam.GlobalPosition.Y:F1}) " +
+                                                 $"allowed x<= {_bounds.End.X + PanBeyondMapM:F0} " +
+                                                 $"godot y>= {-( _bounds.End.Y + PanBeyondMapM):F0}");
+                                };
+                            };
+                        };
+                    };
+                };
+            };
         }
     }
 
@@ -890,12 +1289,46 @@ public partial class MapRenderer : Node2D
         RebuildMarkings();
 
         // Screen-space overlays: minimap (top right) + zoom readout.
+        // The inset's shape comes FROM THE MAP (see MmBoxFor), so the drawing
+        // fills the window it lives in instead of leaving empty frame around a
+        // fixed square.
+        var mmBox = MmBoxFor(_bounds);
         if (_minimap == null)
         {
+            // The minimap lives in an EMBEDDED window (Godot's Window node,
+            // default gui_embed_subwindows = true): it gets a title bar and a
+            // close button, so the map inset can be told apart from - and
+            // closed off - the rest of the screen. MinimapNode is a Control
+            // that draws into its OWN rect, so the window can be sized to the
+            // inset and nothing is left over.
+            _mmWin = new Window {
+                Title = "map",
+                Transient = true,
+                Unresizable = true,
+                // Below the readout's box - at the very top edge the title
+                // bar hid behind the review label and the window read as an
+                // anonymous frame.
+                Position = new Vector2I(
+                    (int)(GetViewport().GetVisibleRect().Size.X
+                          - mmBox.X - 2 * MinimapNode.Margin), 64),
+                // Frame = inset + the caption row under it, nothing more: a
+                // window taller than its content shows an empty band.
+                Size = MmWindowSize(mmBox),
+            };
+            AddChild(_mmWin);
+            _mmWin.CloseRequested += () => _mmWin.Hide();
             var layer = new CanvasLayer { Layer = 10 };
-            AddChild(layer);
+            _mmWin.AddChild(layer);
             _minimap = new MinimapNode();
+            _minimap.Position = new Vector2(MinimapNode.Margin, MinimapNode.Margin);
             layer.AddChild(_minimap);
+            // The window is the inset and nothing else (user decision 2026-10-22:
+            // "make the minimap content fit in the window"), so the readouts do
+            // not live in it - they hang under it, in the MAIN window's frame,
+            // where main-window coordinates are the right ones.
+            _mmHud = new CanvasLayer { Layer = 10 };
+            AddChild(_mmHud);
+            RegisterWindow(_mmWin);
 
             var sb = new StyleBoxFlat
             {
@@ -903,14 +1336,6 @@ public partial class MapRenderer : Node2D
                 ContentMarginLeft = 7, ContentMarginRight = 7,
                 ContentMarginTop = 6, ContentMarginBottom = 6,
             };
-            _zoomLabel = new Label();
-            _zoomLabel.AddThemeStyleboxOverride("normal", sb);
-            _zoomLabel.AddThemeColorOverride("font_color",
-                new Color(220 / 255f, 220 / 255f, 220 / 255f));
-            _zoomLabel.AddThemeFontSizeOverride("font_size", 20);
-            _zoomLabel.Position = new Vector2(8, 8); // pygame: (8, 8)
-            layer.AddChild(_zoomLabel);
-
             // Fleet flow (the quality metric of 2026-10-19): the metres the
             // WHOLE fleet drives per second of sim time, plus the absolute
             // total. High = fluid traffic, low = the fleet is stuck - see
@@ -920,10 +1345,9 @@ public partial class MapRenderer : Node2D
             _flowLabel.AddThemeColorOverride("font_color",
                 new Color(180 / 255f, 220 / 255f, 180 / 255f));
             _flowLabel.AddThemeFontSizeOverride("font_size", 20);
-            _flowLabel.Position = new Vector2(8, 34);
             _flowLabel.Text = "";
             _flowLabel.Visible = false;   // until the first /state frame
-            layer.AddChild(_flowLabel);
+            _mmHud.AddChild(_flowLabel);
 
             // Speed readout under the minimap: bound car (or first car).
             _speedLabel = new Label();
@@ -932,7 +1356,7 @@ public partial class MapRenderer : Node2D
                 new Color(220 / 255f, 220 / 255f, 220 / 255f));
             _speedLabel.AddThemeFontSizeOverride("font_size", 20);
             _speedLabel.Visible = false;
-            layer.AddChild(_speedLabel);
+            _mmHud.AddChild(_speedLabel);
 
             // Test number label: yellow text on a dark panel under the
             // minimap, set by the e2e suite via POST /label.
@@ -942,7 +1366,7 @@ public partial class MapRenderer : Node2D
                 new Color(1f, 1f, 0f));
             _testLabel.AddThemeFontSizeOverride("font_size", 24);
             _testLabel.Visible = false;
-            layer.AddChild(_testLabel);
+            _mmHud.AddChild(_testLabel);
 
             // Car info window: click a car in the map to select it. Static
             // position under the minimap, same background as the minimap.
@@ -997,19 +1421,98 @@ public partial class MapRenderer : Node2D
                 _copyFlashUntil = Time.GetTicksMsec() + 1200;
             };
             _infoPanel.AddChild(_infoCopyBtn);
-            layer.AddChild(_infoPanel);
+            _mmHud.AddChild(_infoPanel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
+        // The inset doubles as the VIEW HANDLE (binding user decision 2026-10-22):
+        // press inside it, and the yellow box that names the main window's view
+        // SPRINGS to the hand with the cursor dead centre in it; holding and
+        // dragging walks it; the wheel over it sizes it. Godot routes events
+        // inside an embedded window to that window's own nodes - a press pushed
+        // at (1384,206), inside the inset's rect (1240,64)+(360,284.2), never
+        // reached the main window's _Input at all - so the gesture is read by
+        // MinimapNode in the inset's pixels and arrives here as the WORLD point
+        // the hand named. The camera stays the host's: the box and the view are
+        // joined through one scale, so they cannot drift apart.
+        _minimap.PinView = world =>
+        {
+            var want = ClampViewCentre(world, "minimap handle");
+            if (_review)
+                // The review pin re-derives itself every substep, so the
+                // hand's absolute point is remembered and applied by
+                // ReviewCamera - writing it to the camera here loses it one
+                // frame later (measured: (1399.7,-837.8) -> (775.9,-101.5)).
+                _mmAsk = want;
+            else
+                _cam.GlobalPosition = want;
+            _lastManualMs = Time.GetTicksMsec();    // the hand owns the view
+            _minimap.QueueRedraw();
+            if (_mmDbg < 6)
+            {
+                _mmDbg++;
+                var vp = GetViewport().GetVisibleRect().Size;
+                GD.Print($"MINIMAP-PIN cam=({_cam.GlobalPosition.X:F1},{_cam.GlobalPosition.Y:F1}) " +
+                         $"hand named=({world.X:F1},{world.Y:F1}) m · view {vp.X / _cam.Zoom.X:F0} m " +
+                         $"box {(vp.X / _cam.Zoom.X) * (_minimap.Size.X / _bounds.Size.X):F0} px " +
+                         $"· clamp [{_bounds.Position.X - PanBeyondMapM:F0},{_bounds.End.X + PanBeyondMapM:F0}] m");
+            }
+        };
+        _minimap.ZoomView = (world, dir) =>
+        {
+            ZoomBy(dir > 0 ? ZoomStep : 1f / ZoomStep, ScreenOfWorld(world));
+            if (_mmDbg < 12)
+            {
+                _mmDbg++;
+                var vp = GetViewport().GetVisibleRect().Size;
+                GD.Print($"MINIMAP-ZOOM dir {(dir > 0 ? "in" : "out")} · zoom {_cam.Zoom.X:F3} px/m " +
+                         $"· view {vp.X / _cam.Zoom.X:F0} m · box {(vp.X / _cam.Zoom.X) * (_minimap.Size.X / _bounds.Size.X):F0} " +
+                         $"px of the inset's {_minimap.Size.X:F0} px · map {_bounds.Size.X:F0} m");
+            }
+        };
+        // A second map with a different aspect re-fits the window (the nodes
+        // are built once, the shape is not).
+        _minimap.Size = mmBox;
+        _mmWin.Size = MmWindowSize(mmBox);
         _lastCamPos = _cam.GlobalPosition;
         _lastCamZoom = zoom;
-        UpdateZoomLabel();
         _minimap.QueueRedraw();
+        EnforceWindows();
 
         GD.Print($"Map ready: bounds {_bounds}, zoom {zoom:F3}");
 
         if (_screenshotPath != null && !_testPan)
             GetTree().CreateTimer(_shotDelay).Timeout += () => SaveShot(_screenshotPath);
+        if (_resizeTo.X > 0 && _resizeTo.Y > 0)
+        {
+            // 1.5 s BEFORE the shot (and never at t=0 - the point of the hook
+            // is a size change that happens AFTER the HUD exists), so a run
+            // with both flags pictures the resized window.
+            float when = Mathf.Max(0.6f, _shotDelay - 1.5f);
+            GetTree().CreateTimer(when).Timeout += () =>
+            {
+                GetWindow().Size = _resizeTo;   // position stays where it is
+                GD.Print($"window resized to {_resizeTo} (--resize)");
+            };
+        }
     }
+
+    /// <summary>The inset's box for a map: BoxSize on the LONG side, the
+    /// world's aspect on the other. A square box forced two different scales
+    /// on x and y (a 2470 x 1950 m network drawn 1.27x too tall) and, being
+    /// smaller than its own window, left the map floating inside empty frame.</summary>
+    static Vector2 MmBoxFor(Rect2 bounds)
+    {
+        float ar = bounds.Size.Y > 0f ? bounds.Size.X / bounds.Size.Y : 1f;
+        return ar >= 1f
+            ? new Vector2(MinimapNode.BoxSize, MinimapNode.BoxSize / Math.Max(0.05f, ar))
+            : new Vector2(MinimapNode.BoxSize * Math.Max(0.05f, ar), MinimapNode.BoxSize);
+    }
+
+    /// <summary>The map window's size for an inset: THE INSET. The content is
+    /// the window - no band for a caption line any more (user decision
+    /// 2026-10-22: "make the minimap content fit in the window", and the
+    /// position/zoom line under the inset is what had to go).</summary>
+    static Vector2I MmWindowSize(Vector2 box) => new((int)box.X, (int)box.Y);
 
     // ------------------------------------------- static marking geometry
 
@@ -1299,6 +1802,7 @@ public partial class MapRenderer : Node2D
     const float ZoomStep = 1.15f;   // wheel/pinch step per notch
 
     bool _dragging;
+    bool _stripDrag;   // a left-button drag that BEGAN on the review strip
     Vector2 _dragStartMouse, _dragStartCam;
 
     public override void _Input(InputEvent e)
@@ -1345,16 +1849,42 @@ public partial class MapRenderer : Node2D
                 ZoomBy(1f / ZoomStep, mb.Position);
             else if (mb.ButtonIndex == MouseButton.Left)
             {
-                // Drag the map with the left button (same as pygame).
-                _dragging = mb.Pressed;
-                if (mb.Pressed) _lastManualMs = Time.GetTicksMsec();
-                _dragStartMouse = mb.Position;
-                _dragStartCam = _cam.GlobalPosition;
-                // A short click (release without moving the map) selects the
-                // car under the cursor; empty space clears the selection.
-                if (!mb.Pressed &&
-                    (mb.Position - _dragStartMouse).Length() < 6f)
-                    SelectCarAt(mb.Position);
+                // The instrument strip is the strip's OWN business: a press
+                // in it is a seek or a button, never a grab of the map.
+                // ReviewScrubZone calls AcceptEvent(), which only shields the
+                // nodes BEHIND it - the old-style _Input() here still receives
+                // the same event, so without this decline one bar gesture
+                // meant two things at once: scrub AND pan (measured, review
+                // mode: press at y 771 inside the seek band 686..856 plus a
+                // 60 px move put the review pin at (-136.8, 0) and slid the
+                // map from cam 848.25 m to 648.92 m while the cursor moved
+                // from frame 8 to 10). The guard is ReviewSelect's y test for
+                // the car pick, so "over the bar" means one thing to both the
+                // pick and the grab - and the drag keeps its full length even
+                // when it started at the strip's edge.
+                if (_review && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
+                {
+                    _stripDrag = mb.Pressed;      // the strip owns it, alone
+                    _dragging = false;            // no grab starts
+                }
+                else
+                {
+                    _stripDrag = false;
+                    // Drag the map with the left button (same as pygame).
+                    _dragging = mb.Pressed;
+                    if (mb.Pressed) _lastManualMs = Time.GetTicksMsec();
+                    _dragStartMouse = mb.Position;
+                    _dragStartCam = ClampViewCentre(_cam.GlobalPosition);
+                    _dragStartPan = _reviewPan;
+                    // A short click (release without moving the map) selects
+                    // the car under the cursor; empty space clears the
+                    // selection. INSIDE the map branch: the strip's own click
+                    // is picked by ReviewSelect, which knows the tape's cars -
+                    // this path only sees the live _carNodes.
+                    if (!mb.Pressed &&
+                        (mb.Position - _dragStartMouse).Length() < 6f)
+                        SelectCarAt(mb.Position);
+                }
             }
         }
         else if (e is InputEventMouseMotion mm && _dragging)
@@ -1362,9 +1892,21 @@ public partial class MapRenderer : Node2D
             // Grab behavior: the world point under the cursor stays put.
             // (screen and Godot world both have +y down, so minus on both axes)
             var d = mm.Position - _dragStartMouse;
-            _cam.GlobalPosition = new Vector2(
-                _dragStartCam.X - d.X / _cam.Zoom.X,
-                _dragStartCam.Y - d.Y / _cam.Zoom.Y);
+            // In review mode the camera is PINNED on the tape frame every
+            // substep, so writing the drag to the camera is undone
+            // immediately - panning did nothing at all. The drag belongs to
+            // the pin instead: an offset the pin adds to.
+            if (_review)
+                _reviewPan = _dragStartPan -
+                    new Vector2(d.X / _cam.Zoom.X, d.Y / _cam.Zoom.Y);
+            else
+                // Panning is bounded by the network plus the belt around it
+                // (binding user decision 2026-10-22) - the same limit the
+                // minimap's handle obeys, so a hand on the map and a hand on
+                // the inset cannot end up with two different countries in view.
+                _cam.GlobalPosition = ClampViewCentre(new Vector2(
+                    _dragStartCam.X - d.X / _cam.Zoom.X,
+                    _dragStartCam.Y - d.Y / _cam.Zoom.Y), "map drag");
             _lastManualMs = Time.GetTicksMsec();
         }
         else if (e is InputEventMagnifyGesture mag) // two-finger trackpad pinch
@@ -1388,27 +1930,60 @@ public partial class MapRenderer : Node2D
                 // Godot flips the raw macOS delta in processPanEvent, so
                 // the camera moves in +Delta direction.
                 if (px != Vector2.Zero) _lastManualMs = Time.GetTicksMsec();
-                _cam.GlobalPosition += px / _cam.Zoom.X;
+                _cam.GlobalPosition = ClampViewCentre(_cam.GlobalPosition + px / _cam.Zoom.X, "trackpad");
             }
         }
     }
 
-    /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
-    /// <summary>Top-left readout: the view width in metres and the camera
-    /// zoom in px/m (Godot world units are metres, so Camera2D.zoom IS
-    /// px/m).</summary>
-    void UpdateZoomLabel()
+    /// <summary>The world point an inset pixel names, projected to the pixel
+    /// of the MAIN window that shows it now - the anchor a wheel has to
+    /// multiply by, because the camera lives here and the inset only knows
+    /// its own pixels.</summary>
+    private Vector2 ScreenOfWorld(Vector2 w)
     {
-        if (_zoomLabel == null) return;
-        float g = _cam.Zoom.X;                       // px per metre
-        float viewWm = GetViewport().GetVisibleRect().Size.X / g;
-        _zoomLabel.Text = $"view {viewWm:F0} m wide  ({g:F1} px/m)";
+        var vp = GetViewport().GetVisibleRect().Size;
+        return vp / 2f + (w - _cam.GlobalPosition) * _cam.Zoom.X;
     }
 
+    /// <summary>Where the view may be parked: the roads plus PanBeyondMapM
+    /// on every side (binding user decision 2026-10-22). Every hand - the map
+    /// drag, the pan keys, the trackpad, the minimap's own handle - goes
+    /// through here, so they cannot disagree about the legal country. Asked
+    /// and got are logged when a hand tries to leave (the only moment the
+    /// limit is visible at all).</summary>
+    private Vector2 ClampViewCentre(Vector2 want, string why = "")
+    {
+        var got = new Vector2(
+            Mathf.Clamp(want.X, _bounds.Position.X - PanBeyondMapM, _bounds.End.X + PanBeyondMapM),
+            Mathf.Clamp(want.Y, -(_bounds.End.Y + PanBeyondMapM), -(_bounds.Position.Y - PanBeyondMapM)));
+        if (why != "" && _clampDbg < 6 && got != want)
+        {
+            _clampDbg++;
+            GD.Print($"VIEW-CLAMP {why}: asked=({want.X:F1},{want.Y:F1}) -> ({got.X:F1},{got.Y:F1}) m " +
+                     $"· legal [{_bounds.Position.X - PanBeyondMapM:F0},{_bounds.End.X + PanBeyondMapM:F0}] x " +
+                     $"[{-_bounds.End.Y - PanBeyondMapM:F0},{-_bounds.Position.Y + PanBeyondMapM:F0}] (godot y)");
+        }
+        return got;
+    }
+
+    /// <summary>The smallest zoom whose view still fits the inset - the map's
+    /// whole extent, i.e. the box at the inset's own size.</summary>
+    private float MinZoomOverMap()
+    {
+        if (_bounds.Size.X <= 0f || _bounds.Size.Y <= 0f) return ZoomMin;
+        var vp = GetTree().Root.GetVisibleRect().Size;   // the MAIN window, not the inset
+        return Math.Max(vp.X / _bounds.Size.X, vp.Y / _bounds.Size.Y);
+    }
+
+    /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
     void ZoomBy(float f, Vector2? at = null)
     {
         float z0 = _cam.Zoom.X;
-        float z1 = Mathf.Clamp(z0 * f, ZoomMin, ZoomMax);
+        // Zooming out stops where the yellow box would fill the minimap
+        // (binding user decision 2026-10-22): the box IS the view, drawn at
+        // the inset's scale, so a view wider than the map's own extent would
+        // need a box wider than the inset.
+        float z1 = Mathf.Clamp(z0 * f, Mathf.Max(ZoomMin, MinZoomOverMap()), ZoomMax);
         if (Mathf.IsEqualApprox(z1, z0)) return;
         var vp = GetViewport().GetVisibleRect().Size;
         Vector2 s = at ?? vp / 2f;
@@ -1469,9 +2044,20 @@ public partial class MapRenderer : Node2D
         if (_keys.Contains(Key.S) || _keys.Contains(Key.Down)) dir.Y += 1;
         if (dir != Vector2.Zero)
         {
-            _cam.GlobalPosition += dir.Normalized() * 600f / _cam.Zoom.X * (float)delta;
+            _cam.GlobalPosition = ClampViewCentre(
+                _cam.GlobalPosition + dir.Normalized() * 600f / _cam.Zoom.X * (float)delta,
+                "pan keys");
             _lastManualMs = Time.GetTicksMsec();
         }
+
+        // The map window belongs to a corner - a resize has to carry it there
+        // again (its position is absolute, so after --resize it sat in the
+        // middle of the top edge, on top of the readout it must not cover).
+        PinMapWindow();
+        // And no window, including this one, may sit partly out of the main
+        // window or touch a neighbour: the guard puts them back (a hand can
+        // drag a title bar anywhere - Godot does not stop it).
+        EnforceWindows();
 
         // M2: interpolate cars from the /state buffer + camera follow.
         UpdateCars();
@@ -1509,7 +2095,6 @@ public partial class MapRenderer : Node2D
         {
             _lastCamPos = _cam.GlobalPosition;
             _lastCamZoom = s;
-            UpdateZoomLabel();
             _minimap.QueueRedraw();
         }
     }
@@ -2321,18 +2906,140 @@ public partial class MapRenderer : Node2D
     /// readout, test label. (The car info panel is a full-width FOOTER at
     /// the window bottom - see LayoutInfoFooter - not part of this stack.)
     /// </summary>
+    /// <summary>Keep the map window in the corner it was built for. Only on a
+    /// size change: a window the operator dragged sideways keeps its spot for
+    /// as long as the window is the same size.</summary>
+    /// <summary>Register an owned window so the guard below knows it exists;
+    /// the reviewer's slot windows call this too (same class, other file).</summary>
+    public void RegisterWindow(Window w)
+    {
+        if (!_windows.Contains(w)) _windows.Add(w);
+    }
+
+    /// <summary>A window that is torn down (a HUD rebuild re-lays the readout
+    /// out) leaves the registry, or the guard would push a freed node around.
+    /// </summary>
+    public void UnregisterWindow(Window w) => _windows.Remove(w);
+
+    /// <summary>Where a window's CLIENT area may sit: the main window minus
+    /// the belt and Godot's own chrome, so the whole window is inside, never
+    /// even partly out (binding user decision 2026-10-22).</summary>
+    private Vector2I ClampWindowPos(Window w, Vector2 want)
+    {
+        var main = GetTree().Root.GetVisibleRect().Size;
+        var loX = (float)(WinGapPx + WinFrameSidePx);
+        var hiX = main.X - WinGapPx - WinFrameSidePx - w.Size.X;
+        var loY = (float)(WinGapPx + WinTitleBarPx);
+        var hiY = main.Y - WinGapPx - WinFrameBottomPx - w.Size.Y;
+        return new Vector2I(
+            (int)Mathf.Clamp(want.X, loX, Mathf.Max(loX, hiX)),
+            (int)Mathf.Clamp(want.Y, loY, Mathf.Max(loY, hiY)));
+    }
+
+    /// <summary>Godot lets a hand drag an embedded window anywhere. Every
+    /// window this client owns is put back where it belongs: inside the main
+    /// window with its chrome, and WinGapPx from each other (binding user
+    /// decision 2026-10-22). A handful of windows, few passes, and the
+    /// assignment only happens when something actually moved - a window the
+    /// hand left alone never jitters.</summary>
+    private void EnforceWindows()
+    {
+        var settled = false;
+        for (var pass = 0; pass < 60 && !settled; pass++)
+        {
+            var moved = false;
+            foreach (var w in _windows)
+            {
+                if (!w.IsInsideTree()) continue;   // torn down, not ours any more
+                var cl = ClampWindowPos(w, new Vector2(w.Position.X, w.Position.Y));
+                if (cl.X != w.Position.X || cl.Y != w.Position.Y)
+                {
+                    w.Position = cl;
+                    moved = true;
+                }
+            }
+            for (var i = 0; i < _windows.Count; i++)
+                for (var j = i + 1; j < _windows.Count; j++)
+                    if (_windows[i].IsInsideTree() && _windows[j].IsInsideTree() &&
+                        SeparateWindows(_windows[i], _windows[j])) moved = true;
+            settled = !moved;
+        }
+        if (settled) return;
+        // Not settled in 60 passes: the windows asked for something the main
+        // window cannot hold side by side. Inside-ness is the hard half of
+        // the decision, so it gets the last word - a final clamp, no further
+        // separation - and the shortfall is named rather than hidden.
+        foreach (var w in _windows)
+        {
+            var cl = ClampWindowPos(w, new Vector2(w.Position.X, w.Position.Y));
+            if (cl.X != w.Position.X || cl.Y != w.Position.Y) w.Position = cl;
+        }
+        if (_clampDbg < 2)
+        {
+            _clampDbg++;
+            var need = 0.0;
+            foreach (var w in _windows) need += w.Size.Y + WinTitleBarPx + WinFrameBottomPx + WinGapPx;
+            GD.Print($"WINDOWS-TIGHT {need:F0} px of windows in {GetTree().Root.GetVisibleRect().Size.Y:F0} px " +
+                     $"of main window · every window is inside, the {WinGapPx} px belt cannot hold " +
+                     $"{_windows.Count} of them at once");
+        }
+    }
+
+    /// <summary>Push B out of A's belt along the axis it crossed least, so a
+    /// drag never lets two windows - or their title bars - overlap. The next
+    /// pass clamps the result back inside, which is what makes a window
+    /// pinned to an edge give way instead of hiding under the main window's
+    /// frame.</summary>
+    /// <summary>A window's CLIENT rect plus Godot's own chrome - what has to
+    /// stay inside the main window and 5 px clear of every other window.</summary>
+    private Rect2 OuterRect(Window w) => new Rect2(
+        new Vector2(w.Position.X, w.Position.Y) - new Vector2(WinFrameSidePx, WinTitleBarPx),
+        new Vector2(w.Size.X + 2f * WinFrameSidePx,
+                    w.Size.Y + WinTitleBarPx + WinFrameBottomPx));
+
+    private bool SeparateWindows(Window a, Window b)
+    {
+        var aR = OuterRect(a);
+        var bR = OuterRect(b);
+        var px = (Mathf.Min(aR.End.X, bR.End.X) - Mathf.Max(aR.Position.X, bR.Position.X)) + WinGapPx;
+        var py = (Mathf.Min(aR.End.Y, bR.End.Y) - Mathf.Max(aR.Position.Y, bR.Position.Y)) + WinGapPx;
+        if (px <= 0f || py <= 0f) return false;
+        var p = new Vector2(b.Position.X, b.Position.Y);
+        if (px < py)
+            p.X += bR.Position.X < aR.Position.X ? -px : px;
+        else
+            p.Y += bR.Position.Y < aR.Position.Y ? -py : py;
+        b.Position = new Vector2I((int)p.X, (int)p.Y);
+        return true;
+    }
+
+    void PinMapWindow()
+    {
+        if (_mmWin == null || _minimap == null) return;
+        var sz = GetViewport().GetVisibleRect().Size;
+        if (sz == _mmPinVp) return;
+        _mmPinVp = sz;
+        _mmWin.Position = ClampWindowPos(_mmWin,
+                                         new Vector2(sz.X - _minimap.Size.X, _mmWin.Position.Y));
+    }
+
+    /// <summary>Stack the readouts UNDER the map window, in the main window:
+    /// the window is the inset and nothing else (user decision 2026-10-22 -
+    /// the position/zoom line is gone and the content has to fit the window),
+    /// so the labels are no longer children of it and their coordinates are
+    /// main-window pixels again.</summary>
     void LayoutUnderMinimap()
     {
-        var vp = GetViewport().GetVisibleRect();
-        float x = vp.Size.X - MinimapNode.BoxSize - MinimapNode.Margin;
-        float y = MinimapNode.Margin + MinimapNode.BoxSize + 6f;
-        if (_speedLabel != null && _speedLabel.Visible)
+        if (_minimap == null) return;
+        var box = _minimap.Size;
+        var x = (float)(_mmWin != null ? _mmWin.Position.X : 0);
+        var y = (float)(_mmWin != null ? _mmWin.Position.Y : 0) + box.Y + WinGapPx;
+        foreach (var lab in new[] { _flowLabel, _speedLabel, _testLabel })
         {
-            _speedLabel.Position = new Vector2(x, y);
-            y += _speedLabel.Size.Y + 6f;
+            if (lab == null || !lab.Visible) continue;
+            lab.Position = new Vector2(x, y);
+            y += lab.Size.Y + 6f;
         }
-        if (_testLabel != null && _testLabel.Visible)
-            _testLabel.Position = new Vector2(x, y);
     }
 
     /// <summary>Position the car info panel as a full-width FOOTER at the
@@ -2344,7 +3051,7 @@ public partial class MapRenderer : Node2D
     {
         if (_infoPanel == null || !_infoPanel.Visible) return;
         var vp = GetViewport().GetVisibleRect();
-        float m = MinimapNode.Margin;
+        var m = (float)WinGapPx;
         _infoPanel.Position = new Vector2(m, vp.Size.Y - FooterHeight - m);
         _infoPanel.Size = new Vector2(vp.Size.X - 2 * m, FooterHeight);
     }
@@ -2833,10 +3540,21 @@ public partial class MapRenderer : Node2D
 /// viewport rectangle. Lives on a CanvasLayer so it ignores the camera.
 /// All input is in SIM coords (x east, y north); the y-flip happens here.
 /// </summary>
-public partial class MinimapNode : Node2D
+/// <summary>The map inset. A CONTROL, not a free-floating Node2D: it draws
+/// into its OWN rect, so whatever hosts it - the map window of either client -
+/// gets an inset that fills the frame. As a Node2D it placed a fixed 360 px
+/// box at (vp.X - BoxSize - Margin, Margin) of the viewport it rendered in,
+/// which inside a window of its own left empty frame around the map.</summary>
+public partial class MinimapNode : Control
 {
-    public const int BoxSize = 360;  // big enough for the whole track to stay readable
-    public const int Margin = 15;
+    public const int BoxSize = 360;  // the LONG side of the inset
+    // No band between the inset and the window: the inset fills the window's
+    // client area, so the only thing inside the frame that is not map is the
+    // caption row under it (binding user decision 2026-10-22: "the minimap
+    // shall fill the minimap window to the edges" - measured before the
+    // change: a 1600 px window, inset 358 x 282 of MINIMAP_BG with 17 px of
+    // see-through band on every side inside the window's own frame).
+    public const int Margin = 0;
     public static readonly Color Bg = new(20 / 255f, 60 / 255f, 20 / 255f);       // MINIMAP_BG
     public static readonly Color Border = new(80 / 255f, 80 / 255f, 80 / 255f);  // MINIMAP_BORDER
     static readonly Color CarColor = new(1f, 0f, 0f);                     // MINIMAP_CAR_COLOR
@@ -2856,21 +3574,98 @@ public partial class MinimapNode : Node2D
                       Rect2 bounds, Color road, Camera2D cam)
     {
         _segs = segs; _bounds = bounds; _road = road; _cam = cam;
+        // The inset is now its OWN surface: the hand works on it (it pins and
+        // sizes the main view's box), so the events must not fall through to
+        // whatever is behind the window.
+        MouseFilter = MouseFilterEnum.Stop;
+    }
+
+    /// <summary>The host's camera hooks (the host owns the camera; this node
+    /// owns the inset's geometry and the hand): the world point the hand
+    /// named, and the wheel's direction (+1 = the box grows bigger view… no:
+    /// +1 = wheel up = zoom IN = a SMALLER view).
+    /// Wired by MapRenderer right after Setup().</summary>
+    public System.Action<Vector2> PinView;
+    public System.Action<Vector2, int> ZoomView;
+
+    private bool _handDown;    // the left button held inside the inset
+    private int _evDbg;         // the first events that arrived here, logged
+
+    /// <summary>Godot gives events inside an embedded window to the window's
+    /// OWN nodes, in the window's local pixels - which is exactly what this
+    /// node needs, since the inset IS its rect (Margin 0).</summary>
+    public override void _GuiInput(InputEvent e)
+    {
+        if (_evDbg < 8)
+        {
+            _evDbg++;
+            string kind = "other";
+            var lp = Vector2.Zero;
+            if (e is InputEventMouseButton kmb) { kind = kmb.ButtonIndex.ToString(); lp = kmb.Position; }
+            else if (e is InputEventMouseMotion kmm) { kind = "motion"; lp = kmm.Position; }
+            GD.Print($"MINIMAP-EV {kind} local=({lp.X:F0},{lp.Y:F0}) " +
+                     $"inset={Size.X:F0}x{Size.Y:F0} held={_handDown}");
+        }
+        if (e is InputEventMouseButton m && m.ButtonIndex == MouseButton.Left)
+        {
+            if (m.Pressed)
+            {
+                _handDown = true;
+                PinView?.Invoke(GdWorld(m.Position));
+            }
+            else
+                _handDown = false;
+        }
+        else if (e is InputEventMouseMotion mm)
+        {
+            if (!_handDown) return;
+            if (mm.Position.X < 0f || mm.Position.Y < 0f ||
+                mm.Position.X > Size.X || mm.Position.Y > Size.Y)
+            {
+                // The hand walked off the inset: the gesture ENDS, it must
+                // not keep dragging the view from outside (measured before:
+                // motion at local (182,334) - 50 px below the inset's 284 -
+                // still moved the view, so a drag that left the inset kept
+                // steering the map).
+                _handDown = false;
+                return;
+            }
+            PinView?.Invoke(GdWorld(mm.Position));
+        }
+        else if (e is InputEventMouseButton w && w.Pressed &&
+                 (w.ButtonIndex == MouseButton.WheelUp || w.ButtonIndex == MouseButton.WheelDown))
+            ZoomView?.Invoke(GdWorld(w.Position),
+                             w.ButtonIndex == MouseButton.WheelUp ? 1 : -1);
+    }
+
+    /// <summary>The world point (Godot world, y DOWN) one of the inset's own
+    /// pixels names: this node's Mm() run backwards at the inset's scale - the
+    /// same scale the yellow view box is drawn at, so the hand and the box
+    /// agree by construction.</summary>
+    private Vector2 GdWorld(Vector2 p)
+    {
+        var sx = Size.X / _bounds.Size.X;
+        var sy = Size.Y / _bounds.Size.Y;
+        var wx = _bounds.Position.X + p.X / sx;                      // sim metres
+        var wy = _bounds.Position.Y + (Size.Y - p.Y) / sy;            // y north
+        return new Vector2(wx, -wy);
     }
 
     public override void _Draw()
     {
         if (_segs == null || _cam == null) return;
-        var vp = GetViewport().GetVisibleRect().Size;
-        float mmx = vp.X - BoxSize - Margin, mmy = Margin;
-        var box = new Rect2(mmx, mmy, BoxSize, BoxSize);
+        // The control's rect IS the inset - the host decides the shape (it
+        // comes from the map's aspect, see MmBoxFor), so the network fills
+        // the frame it was given.
+        var box = new Rect2(Vector2.Zero, Size);
+        if (box.Size.X < 4f || box.Size.Y < 4f) return;
         DrawRect(box, Bg);
 
-        float sx = BoxSize / _bounds.Size.X;
-        float sy = BoxSize / _bounds.Size.Y;
+        float sx = box.Size.X / _bounds.Size.X;
+        float sy = box.Size.Y / _bounds.Size.Y;
         Vector2 Mm(Vector2 p) => new(
-            mmx + (p.X - _bounds.Position.X) * sx,
-            mmy + BoxSize - (p.Y - _bounds.Position.Y) * sy);
+            (p.X - _bounds.Position.X) * sx,
+            box.Size.Y - (p.Y - _bounds.Position.Y) * sy);
 
         // Every road must stay visible: draw each segment with a 1 px floor
         // (wider roads keep their true width when it exceeds 1 px).
@@ -2890,17 +3685,40 @@ public partial class MinimapNode : Node2D
 
         // Yellow viewport rectangle (2 px outline). No clip API in C#, so
         // clamp it to the box — at low zoom it alone can exceed the minimap.
+        //
+        // The view it describes is the MAIN window's, not this inset's own
+        // viewport: inside an embedded subwindow GetViewport() answers with
+        // the subwindow (~390 px instead of ~2900), so the box came out ~7x
+        // too small and always fell through to the crosshair below.
+        var vp = GetTree().Root.GetVisibleRect().Size;
         float z = _cam.Zoom.X;
         var c = _cam.GlobalPosition;                 // Godot world (y down)
         Vector2 camSim = new(c.X, -c.Y);             // sim coords
         float wpx = vp.X / z * sx, hpx = vp.Y / z * sy;
-        float left = mmx + (camSim.X - vp.X / 2f / z - _bounds.Position.X) * sx;
-        float top = mmy + BoxSize - (camSim.Y + vp.Y / 2f / z - _bounds.Position.Y) * sy;
+        float left = (camSim.X - vp.X / 2f / z - _bounds.Position.X) * sx;
+        float top = box.Size.Y - (camSim.Y + vp.Y / 2f / z - _bounds.Position.Y) * sy;
         var vpr = new Rect2(left, top, wpx, hpx).Intersection(box);
-        if (vpr.Size != Vector2.Zero)
+        // A view much smaller than the map (the reviewer at zoom 14 sees
+        // 162 m of 2470 m) made the box a ~10 px mark at the inset's edge -
+        // it read as a clipped ring. Below a legible size the box is dropped
+        // and a crosshair names the spot instead: an indicator, not a shape
+        // that pretends to be the view.
+        if (wpx < 18.0f || hpx < 18.0f)
+        {
+            var mid = new Vector2(left + wpx / 2.0f, top + hpx / 2.0f);
+            DrawLine(new Vector2(mid.X - 7.0f, mid.Y), new Vector2(mid.X + 7.0f, mid.Y),
+                new Color(1f, 1f, 0f), 1.5f);
+            DrawLine(new Vector2(mid.X, mid.Y - 7.0f), new Vector2(mid.X, mid.Y + 7.0f),
+                new Color(1f, 1f, 0f), 1.5f);
+        }
+        else if (vpr.Size != Vector2.Zero)
             DrawRect(vpr, new Color(1f, 1f, 0f), false, 2f);
 
-        DrawRect(box, Border, false, 2f);
+        // Flush to the window: a 2 px outline ON the inset's edge would have
+        // half of itself outside the client area, so the line is drawn just
+        // inside it and keeps all 2 px on screen.
+        DrawRect(new Rect2(box.Position + new Vector2(1f, 1f),
+                           box.Size - new Vector2(2f, 2f)), Border, false, 2f);
     }
 
 }
