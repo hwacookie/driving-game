@@ -280,8 +280,15 @@ PYFO
       # An explicit --center/--zoom on the runner's own command line still wins:
       # the operator outranks the scenario (the same rule the client applies).
       read -r -a CAM_ARGS <<<"$CAM"
-      [ -n "$CAM_CENTER" ] && CAM_ARGS=(--center $CAM_CENTER)
-      [ -n "$CAM_ZOOM" ] && CAM_ARGS=("${CAM_ARGS[@]/--zoom*}" --zoom "$CAM_ZOOM")
+      # The operator's own --center/--zoom outrank the scenario (the same rule
+      # the client applies). Both are UNSET unless passed, and this file runs
+      # under `set -u` — read them with a default or a plain `--tests <name>`
+      # run dies here with "CAM_CENTER: unbound variable" (measured 2026-10-24:
+      # the runner aborted right after "==> Camera: follow mode…", so no single
+      # scenario ran at all while the full suite, which never reaches this
+      # branch, kept working — which is how it stayed unnoticed).
+      [ -n "${CAM_CENTER:-}" ] && CAM_ARGS=(--center $CAM_CENTER)
+      [ -n "${CAM_ZOOM:-}" ] && CAM_ARGS=("${CAM_ARGS[@]/--zoom*}" --zoom "$CAM_ZOOM")
       GODOT_CAM_ARGS=("${CAM_ARGS[@]}")
       case "${CAM_ARGS[0]}" in
         --center) SAY="(a PLACE - no car is followed)" ;;

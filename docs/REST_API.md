@@ -139,9 +139,10 @@ same `label` replaces the note instead of stacking a second one.
 `POST /tape` starts recording, every substep of every car lands in memory,
 `POST /tape/save` writes it next to the run log. `POST /tape/frame` answers
 **one** recorded substep — pose, blinkers, braking, wrong-side verdict, crash
-count, cap key, plus the frame's `fluidity_mps_per_car`, `moving_share` and
-event texts — and answers `ok: false` (it does not invent a frame) when the
-tape does not reach that step. `/tape/load` reads a file back for review and
+count, cap key and the car that owns it (`held_by`), plus the frame's
+`fluidity_mps_per_car`, `moving_share` and event texts — and answers `ok: false`
+(it does not invent a frame) when the tape does not reach that step.
+`/tape/load` reads a file back for review and
 leaves recording OFF, `/tape/list` finds the runs on disk, `/tape/clear` drops
 the frames. Clock = substeps, unit = metres (`"units": "meters"` on the frame
 payload). The format, the limits and the review client that reads them:
@@ -290,6 +291,15 @@ Other per-car fields worth knowing:
   (a crash) - it is TRANSIENT and can clear inside one poll. `crash_episodes`
   is the monotonic count of crash episodes that car took part in; a test that
   must catch the FIRST crash reads the counter, not the flag.
+- `cap_key` is the RULE holding this car back right now (`avoid#12`,
+  `sign#C#7`, `r32#passive`, `""` = free) and `held_by` the **car** that owns it
+  (`0` = nobody - free, or an R32 creep where the kerb is what holds the car).
+  Both are on the tape per substep (see
+  [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md)) and answer in BOTH `/state` payload
+  builders, so a client does not get two contracts depending on whether the map
+  holds one car or fifty. They are what the car detail window draws as its chain
+  ([CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)) - a client must not recover the
+  uid from the key, which is why `held_by` exists.
 - `body_corners` is the exact box used for crash detection: four `[x, y]`
   **metre** corners (front-right, front-left, rear-left, rear-right) of that
   car's per-class body. The client uses it as the car's click/hit area.
@@ -494,9 +504,14 @@ Returns that car's rule log - EVENTS, not per-frame samples:
 
 ```json
 {"uid": 7,
- "decisions": [{"t": 12.34, "msg": "[R5] yield sign: car 26 at the crossing (19 m out)"},
-               {"t": 13.10, "msg": "[R3] entered crossing - committed, continuing"}]}
+ "decisions": [{"t": 12.34, "step": 742, "msg": "[R5] yield sign: car 26 at the crossing (19 m out)"},
+               {"t": 13.10, "step": 788, "msg": "[R3] entered crossing - committed, continuing"}]}
 ```
+
+`step` is the substep the decision was made on - the same number the tape's
+first column carries, so a row of the car detail window looks the same whether
+it came from a live host or from a file
+([CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)).
 
 One entry each time the REASON a car is held back changes (new threat,
 threat gone, rule fired), tagged with the Driving-Ruleset number (see

@@ -32,6 +32,7 @@ public partial class MapRenderer : Node2D
         public int Blinkers; public bool Brake, WrongSide;
         public long Crashes;
         public int Lamps;                 // bit0 headlights, bit1 taillights
+        public int HeldBy;                // the CAR owning CapKey, 0 = nobody
         public string Color = "", CapKey = "";
     }
     private sealed class TapeEventRev { public long Uid; public string Msg = ""; }
@@ -886,13 +887,19 @@ public partial class MapRenderer : Node2D
                     Blinkers = (int)ParseNum(fld[5], 0.0),
                     Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                     Crashes = (long)ParseNum(fld[8], 0.0),
-                    // Three field generations: no colour, colour + capKey,
-                    // colour + lamps + capKey. Accept all three rather than
-                    // refusing the run.
+                    // Four field generations: no colour, colour + capKey,
+                    // colour + lamps + capKey, and colour + lamps + heldBy +
+                    // capKey (docs/CAR_DETAIL_WINDOW.md). Accept all of them
+                    // rather than refusing the run — the reviewer reads tapes
+                    // that were recorded before the field existed. capKey
+                    // stays LAST in every generation, because it can contain
+                    // commas, which is exactly why heldBy went before it.
                     Color = fld.Length >= 11 ? fld[9] : "",
                     Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
-                    CapKey = fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
-                                              : fld.Length >= 11 ? fld[10] : "",
+                    HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,
+                    CapKey = fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                             : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                             : fld.Length >= 11 ? fld[10] : "",
                 };
                 fr.Cars.Add(cf);
             }
@@ -2688,20 +2695,23 @@ public partial class MapRenderer : Node2D
         // the tape centroid is in SIM metres - one flip, not two. The log
         // proved it: want=(100,-275) arrived at godot=(100,+275), which is
         // grass, and the double flip is why.
-        // A slot's follow toggle wins over every other pin: it says "stay on
-        // THIS car", so the pin is the car's own pose at the frame under the
-        // cursor - the same binding pressing F makes in the viewer, held for
-        // the whole scrub. It also supersedes a spot the hand pinned in the
-        // inset: following is not a place, it is a car.
+        // A car detail window's FOLLOW toggle (docs/CAR_DETAIL_WINDOW.md).
+        // It is not a separate camera tier: following a car IS a hand-pin whose
+        // anchor rides the car. That is what makes it beat a place the hand
+        // pinned before (engaging a follow RE-ANCHORS the pin to the car's pose
+        // at this frame), what keeps the operator's pan on top of it (the pin is
+        // the anchor, `_reviewPan` the offset), and what stops the view from
+        // jumping back when the follow is released: the pin simply keeps the
+        // last pose it was given.
         var followUid = SlotFollowUid();
-        if (followUid != 0L) _mmAsk = null;
-        if (followUid != 0L) src = $"slot FOLLOW uid={followUid}";
+        if (followUid != 0L) src = $"window FOLLOW uid={followUid}";
         // The hierarchy of "what the view is on", strongest first:
-        //   1. a slot's FOLLOW toggle (an explicit "stay on THIS car")
-        //   2. the hand (minimap pin / slot CENTRE), as an absolute place
-        //   3. --center / --review-name the operator passed on the command line
-        //   4. WHAT THE SCENARIO DECLARED  ← the run's own intent
-        //   5. the cast's centroid (a tape with no declarations at all)
+        //   1. the HAND — a minimap pin, a window's CENTRE, a map drag, or a
+        //      window's FOLLOW (the same pin again, re-anchored to that car
+        //      every frame, so it outranks a place and still keeps the pan)
+        //   2. --center / --review-name the operator passed on the command line
+        //   3. WHAT THE SCENARIO DECLARED  ← the run's own intent
+        //   4. the cast's centroid (a tape with no declarations at all)
         // A declared "loc" focus is deliberately NOT a car: the crossing and the
         // pass tests are about a place, and following one car out of 50 would
         // carry the camera away from the story (user decision 2026-10-24).
@@ -2738,8 +2748,14 @@ public partial class MapRenderer : Node2D
         }
         var pose = followUid != 0L ? CarPose(followUid) : null;
         if (pose != null)
-            _cam.GlobalPosition = pose.Value;
-        else if (_mmAsk != null)
+        {
+            // Re-anchor the pin on the car and let the pin branch below place
+            // the camera: one writer of the final position, so the pan, the
+            // window guard and the readout all see the same geometry.
+            _mmAsk = pose.Value;
+            src = $"window FOLLOW uid={followUid} (the pin rides the car)";
+        }
+        if (_mmAsk != null)
         {
             src = "the hand (pin)";
             // The hand pinned the view on a spot of the map THROUGH the

@@ -32,6 +32,11 @@ public sealed class TapeCar
     public int CrashEpisodes { get; internal set; }
     public string Color { get; internal set; }      // the sprite -> vehicle class
     public int Lamps { get; internal set; }         // bit0 headlights, bit1 taillights
+    /// <summary>The CAR owning this car's cap (0 = nobody: free, or held by
+    /// the kerb rather than a driver). Written BEFORE `capKey`, which is the
+    /// last field and may itself contain commas (generation 4,
+    /// docs/CAR_DETAIL_WINDOW.md).</summary>
+    public int HeldByUid { get; internal set; }
     public string CapKey { get; internal set; }     // the rule owning the cap, "" = none
 }
 
@@ -354,11 +359,15 @@ public static class RunTape
                         Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                         CrashEpisodes = ParseI(fld[8], 0),
                         Color = fld.Length >= 11 ? fld[9] : "",
-                        // Three field generations: ...,color,capKey (lamps
-                        // absent) and ...,color,lamps,capKey.
+                        // Four field generations: ...,color,capKey (lamps
+                        // absent), ...,color,lamps,capKey and
+                        // ...,color,lamps,heldBy,capKey. capKey stays LAST in
+                        // every one of them, because it may contain commas.
                         Lamps = fld.Length >= 12 ? ParseI(fld[10], 0) : 0,
-                        CapKey = fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
-                                                  : fld.Length >= 11 ? fld[10] : "",
+                        HeldByUid = fld.Length >= 13 ? ParseI(fld[11], 0) : 0,
+                        CapKey = fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                                 : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                                 : fld.Length >= 11 ? fld[10] : "",
                     });
                 }
                 if (evs.StartsWith("~"))
@@ -486,6 +495,11 @@ public static class RunTape
                 // not carry them cannot say what the lamps of the frame
                 // under the cursor looked like.
                 Lamps = (c.HeadlightsOn ? 1 : 0) | (c.TaillightsOn ? 2 : 0),
+                // Who holds me, as a VALUE. The cap key says WHICH rule; a
+                // reader that wants the actor has to be told, because
+                // `r32#passive` names nobody and `sign#C#7` names the node
+                // before the car (docs/CAR_DETAIL_WINDOW.md).
+                HeldByUid = c.HeldByUid,
                 CapKey = c.ActiveCapKey ?? "",
             });
             // A decision made ON this substep is recorded WITH its text - the
@@ -541,7 +555,7 @@ public static class RunTape
                 foreach (var kv in _names) nameParts.Add($"{kv.Key}:{kv.Value}");
                 lines.Add($"# DGTAP1 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
                           (nameParts.Count > 0 ? $" names={string.Join(",", nameParts)}" : ""));
-                lines.Add("# step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,capKey|...;~uid=decision text~…");
+                lines.Add("# step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,heldBy,capKey|...;~uid=decision text~…");
                 foreach (var fn in _focus) lines.Add(fn.ToHeaderLine());
                 foreach (var rn in _results) lines.Add(rn.ToHeaderLine());
                 foreach (var f in _frames)
@@ -551,7 +565,7 @@ public static class RunTape
                         parts.Add($"{cf.Uid},{cf.X:F3},{cf.Y:F3},{cf.HeadingDeg:F2}," +
                                   $"{cf.SpeedMps:F3},{cf.Blinkers},{(cf.Brake ? 1 : 0)}," +
                                   $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Color}," +
-                                  $"{cf.Lamps},{cf.CapKey}");
+                                  $"{cf.Lamps},{cf.HeldByUid},{cf.CapKey}");
                     lines.Add($"{f.Step};{f.FluidityMpsPerCar:F4};{f.MovingShare:F3};" +
                               string.Join("|", parts) +
                               (f.Events.Count > 0

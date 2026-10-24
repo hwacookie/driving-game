@@ -186,6 +186,19 @@ public class Car
     /// logs a decision only when this key TRANSITIONS.</summary>
     public string? ActiveCapKey { get; internal set; }
 
+    /// <summary>The CAR that owns the active cap: the one I am holding back
+    /// for (0 = nothing holds me, e.g. a kerb-to-kerb R32 creep, or free).
+    /// Where <see cref="ActiveCapKey"/> names the RULE (`avoid#12`,
+    /// `r32#passive`), this names the actor - and it is set from the uid the
+    /// rule already knew at the moment it offered the cap, NOT parsed back out
+    /// of the key string (a client doing that has to guess, and `r32#passive`
+    /// guesses wrong). Maintained with ActiveCapKey by CarCollisions: set when
+    /// a cap key is taken or replaced, cleared when the brake decision is
+    /// released. Exported per car in /state (`held_by`) and on the tape, so the
+    /// car detail window's chain is a fact in both clients
+    /// (docs/CAR_DETAIL_WINDOW.md).</summary>
+    public int HeldByUid { get; internal set; }
+
     /// <summary>Node id of the last crossing this car committed to (nose
     /// past the yield stop line) - logs one decision entry per crossing,
     /// not per tick. Set by CarCollisions.ComputeAvoidCaps.</summary>

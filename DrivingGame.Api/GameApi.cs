@@ -146,6 +146,12 @@ public static class GameApi
                     .Select(d => new Dictionary<string, object?>
                     {
                         ["t"] = Math.Round(d.T, 2),
+                        // WHICH substep it was made on: the car detail window
+                        // shows the same row shape from the tape (where the
+                        // step is the first column and clicks to seek) and from
+                        // here, so the live rows must carry it too
+                        // (docs/CAR_DETAIL_WINDOW.md).
+                        ["step"] = d.Step,
                         ["msg"] = d.Msg,
                     }).ToList(),
             });
@@ -501,6 +507,10 @@ public static class GameApi
                     ["blinkers"] = cf.Blinkers, ["braking"] = cf.Brake,
                     ["wrong_side"] = cf.WrongSide, ["crashes"] = cf.CrashEpisodes,
                     ["cap_key"] = cf.CapKey,
+                    // The actor behind that key, so a client reading a TAPE
+                    // frame gets the same contract as one reading /state
+                    // (docs/CAR_DETAIL_WINDOW.md's chain).
+                    ["held_by"] = cf.HeldByUid,
                 });
             var evs = new List<object?>(f.Events.Count);
             foreach (var ev in f.Events)

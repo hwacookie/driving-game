@@ -122,7 +122,7 @@ multi-car run fits (see [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md)).
 | [docs/REST_API.md](docs/REST_API.md) | the API surface **and the multi-car contract** (`uid`, primary/followed car, per-car channels, the `cars` array) |
 | [docs/TESTING.md](docs/TESTING.md) | the e2e workflow, the scenario list, **the baseline** |
 | [docs/SIMULATIONS_REVIEWER.md](docs/SIMULATIONS_REVIEWER.md) | **the review client** — controls, scrub bar, the fluidity chart with its event markers, the three car slots, the connection layer |
-| [docs/CAR_DETAIL_WINDOW.md](docs/CAR_DETAIL_WINDOW.md) | the **per-car inspector** both clients share — right-click to open, unlimited windows, the held-by chain, the event list, session memory. **Specified 2026-10-26, NOT built**; supersedes the three car slots |
+| [docs/CAR_DETAIL_WINDOW.md](docs/CAR_DETAIL_WINDOW.md) | the **per-car inspector** both clients share — right-click to open, unlimited windows, the held-by chain, the event list, session memory. **Specified 2026-10-24, NOT built**; supersedes the three car slots |
 | [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md) | the tape, the clock, the endpoints, the per-substep fluidity |
 | [docs/GODOT_FRONTEND.md](docs/GODOT_FRONTEND.md) | the client's architecture (its phase log below the header is history) |
 | [docs/OBSTACLES.md](docs/OBSTACLES.md) | static obstructions: placement rules, contact stop, REST |

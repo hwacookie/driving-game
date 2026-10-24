@@ -152,7 +152,7 @@ slot filters its markers onto the marker lane and leaves the curve alone.
 
 ## Three car slots
 
-> **Superseded 2026-10-26, still what is BUILT.** The three-slot row is being
+> **Superseded 2026-10-24, still what is BUILT.** The three-slot row is being
 > replaced by the per-car **car detail window** — unlimited windows, opened by
 > right-click only, shared with the live viewer, resizable with a real event
 > list, and remembered across sessions. Specified in
@@ -183,11 +183,18 @@ its full history. See [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
 
 The review camera's precedence is **per scenario, not per session**:
 
-1. a slot's **follow** toggle (an explicit "stay on THIS car" instrument),
-2. the hand — a map drag, a minimap pin, a slot CENTRE,
-3. `--center` / `--review-name` from the command line,
-4. **what the scenario declared** (`# focus …` on the tape),
-5. the cast centroid (a tape with no declarations).
+1. the hand — a map drag, a minimap pin, a panel CENTRE, **and a panel's
+   follow toggle**. Following is not a tier of its own: it IS the hand's pin,
+   re-anchored to that car's pose at every frame. That is what makes it beat a
+   place the hand pinned before it, keeps the operator's drag as an OFFSET on
+   top of the car instead of losing it, and stops the view jumping when the
+   follow is released. (Before this it was tier 1 *above* the pin and merely
+   cleared it — measured 2026-10-24: with the readout's **pin** checkbox held, `▶`
+   moved the tape but not the camera and the follow did nothing at all:
+   `src=… cam=… · cam: fixed (pinned) · view: tape pin`.)
+2. `--center` / `--review-name` from the command line,
+3. **what the scenario declared** (`# focus …` on the tape),
+4. the cast centroid (a tape with no declarations).
 
 Crossing a boundary runs `FocusHandoff()`: the hand's pin, its drag-pan and the
 command-line centre are **released**, the declared zoom is applied once, and the
@@ -504,7 +511,7 @@ above says what replaced them):
 | scrub bar + six buttons ▶ ⏸ ⏹ ● ◀ ▶▶ | inside the bar, dark strip |
 | ⚠ playback-rate buttons ½× 1× 2× 4× 8× | on the bar (rate was keyboard-only before) — replaced by the rate dropdown 2026-10-22 |
 | ⚠ two-line readout | tape · frame [cursor/len] · SIM time · map + hash · fluidity · mode / cam x y zoom · view · units — three lines in ONE box since 2026-10-22 |
-| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it). **Superseded 2026-10-26** by [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md): window per car, no cap, right-click to open, footprint dropped, held-by chain instead of the EndsWith guess, event LIST instead of one collapsed line, geometry + session remembered |
+| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it). **Superseded 2026-10-24** by [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md): window per car, no cap, right-click to open, footprint dropped, held-by chain instead of the EndsWith guess, event LIST instead of one collapsed line, geometry + session remembered |
 | decision trail | count **plus the last two texts** with their frame numbers, clipped to the panel |
 | chart | cyan fleet curve, **yellow standstill blocks** (fleet-level band + per-car lane), **decision hairlines** under the curve, white cursor tick |
 | run picker | six newest tapes listed under the minimap; clicking one reloads that tape, rewinds, re-points the camera |

@@ -1,7 +1,7 @@
 # Car detail window — the per-car inspector (both clients)
 
-> **Status 2026-10-26: specified, NOT built.** Every entry below is a binding
-> user decision taken in the discussion of 2026-10-26 (voice notes transcribed
+> **Status 2026-10-24: specified, NOT built.** Every entry below is a binding
+> user decision taken in the discussion of 2026-10-24 (voice notes transcribed
 > into this document; where a wording was ambiguous the reading is stated as a
 > reading, never as a decision). It **supersedes** the three car slots of
 > [`SIMULATIONS_REVIEWER.md` § "Three car slots"](SIMULATIONS_REVIEWER.md) —
@@ -21,7 +21,7 @@ One window per car the operator opened, showing **that car**: who holds it,
 whom it holds, and the list of decisions and events that made it behave the way
 it does at the frame on screen. The same window in the Simulationsviewer (live
 `/state`) and in the Simulationsreviewer (a tape frame) —
-**identical in both clients** (user decision 2026-10-26: "der Live-Viewer und
+**identical in both clients** (user decision 2026-10-24: "der Live-Viewer und
 der Reviewer sollten sich grundsätzlich komplett gleich verhalten"). Today the
 viewer has no per-car window at all and the reviewer has three fixed slots;
 both give way to this.
@@ -34,11 +34,11 @@ jump to. There it is drawn inert (not styled as a link).
 
 | rule | decision |
 |---|---|
-| how a car is opened | **right-click the car on the map** — the ONLY gesture that opens a persistent window (2026-10-26). **Left-press on a car = the transient peek card** (§"The peek card", user decision 2026-10-26); everywhere else the left button keeps its old job: a pan drag. |
+| how a car is opened | **right-click the car on the map** — the ONLY gesture that opens a persistent window (2026-10-24). **Left-press on a car = the transient peek card** (§"The peek card", user decision 2026-10-24); everywhere else the left button keeps its old job: a pan drag. |
 | the menu | a `PopupMenu` at the cursor. **No window open yet** → one entry: `New slot`. **Windows open** → one entry per open window, labelled with the car it shows (`#65 slow_car`), then `New slot`. |
 | picking a window's entry | that window **replaces** its car with the clicked car. No swapping, no "slot" object beyond the window itself. |
 | picking `New slot` | a new window, bound to the clicked car. |
-| how many | **no cap** (2026-10-26: "die Begrenzung auf drei Fahrzeuge können wir komplett weglassen… er kann jederzeit Fenster schließen"). Twelve windows is the operator's business. |
+| how many | **no cap** (2026-10-24: "die Begrenzung auf drei Fahrzeuge können wir komplett weglassen… er kann jederzeit Fenster schließen"). Twelve windows is the operator's business. |
 | none open | nothing is on screen: no empty placeholder panels. |
 | closing | the window's own close button removes it; closing the last one returns the client to "nothing opened". |
 
@@ -60,7 +60,7 @@ values.
 
 | # | row | content | font |
 |---|---|---|---|
-| 0 | native title bar | `#65 slow_car` — identity only. Class and footprint left the title bar; **the footprint is dropped entirely** (2026-10-26). | OS |
+| 0 | native title bar | `#65 slow_car` — identity only. Class and footprint left the title bar; **the footprint is dropped entirely** (2026-10-24). | OS |
 | 1 | class line | the vehicle class (`Config.VEHICLE_CLASS[color]`), left-aligned, its own line above the header | body |
 | 2 | header row | `[sprite]` · **`65 km/h`** · ●brake ●blinker · `x y h` right-aligned | **1.5 × body** |
 | 3 | chain | `whom I hold up → me → who holds me up` — see below | body |
@@ -69,7 +69,7 @@ values.
 | 5 | status line | `follow` · `centre` | body |
 
 - **The big number is speed in km/h**; the red dot is the brake engaged, the
-  yellow dot a blinker (confirmed 2026-10-26). The car's identity colour needs
+  yellow dot a blinker (confirmed 2026-10-24). The car's identity colour needs
   no chip of its own any more: the **sprite carries it**.
 - **Sprite**: the car's own PNG, **rotated to the heading** `h` (user liked the
   idea on review), sized to sit in row 2 beside the speed — derived from the
@@ -80,12 +80,12 @@ values.
 - `follow` is a toggle, `centre` momentary — the same two instruments the slots
   carry today. In the live viewer `follow` means the camera follows that car;
   in the reviewer it means the camera follows the tape pose of that car. Same
-  word, same meaning (2026-10-26).
+  word, same meaning (2026-10-24).
 
 ## Resizing
 
 The window is resizable. **Rows 1–3 and 5 keep their height; the event list
-takes every pixel of growth and shrinkage** (user decision 2026-10-26). Default
+takes every pixel of growth and shrinkage** (user decision 2026-10-24). Default
 size = the static part plus **exactly three event rows**.
 
 That means a real layout (`VBoxContainer`: fixed rows at their natural height,
@@ -94,7 +94,7 @@ of the slots' per-frame `Label.Size` stamp from `GetVisibleRect()`.
 
 ## The peek card (left-press)
 
-A **transient** car detail card (operator proposal, 2026-10-26): left-press a
+A **transient** car detail card (operator proposal, 2026-10-24): left-press a
 car and see it, release the button and it is gone.
 
 | rule | content |
@@ -110,7 +110,7 @@ This is the borderless technique the **persistent** window deliberately declined
 (there it would cost us our own drag, close and chrome math) — here it is free,
 because the card has no chrome to replace.
 
-**The card and the pan — settled (user decision 2026-10-26: "c").** The left
+**The card and the pan — settled (user decision 2026-10-24: "c").** The left
 button was already the map pan, and the three candidate rules were:
 
 | # | rule | verdict |
@@ -139,7 +139,7 @@ wording: "ganz links: wen halte ich auf … ganz rechts: durch wen werde ich
 aufgehalten"). `me` is static text; the two ends are the two directions of the
 same negotiation.
 
-The list form (user decision 2026-10-26): when a side holds more than one car,
+The list form (user decision 2026-10-24): when a side holds more than one car,
 **show the whole list**, not one name and `+2`:
 
 ```
@@ -163,8 +163,11 @@ holding up: #71, #68        me        held up by: #59 → #61 → #44
   contradict the first.
 - A walk that returns to the car itself **is the R28 lockdown**
   (`FindLockdownCycle`). The chain row prints `LOCKDOWN` there instead of
-  drawing an arrow into itself.
-- **Ids in the chain are interactive** (user decision 2026-10-26):
+  drawing an arrow into itself. Measured on the full-suite tape, a walk closing
+  on itself is COMMON (7 788 substeps where two cars hold each other) and is
+  not by itself a lockdown — so the walk carries a visited set and cuts the
+  branch, and only what R28 itself declares is printed as a lockdown.
+- **Ids in the chain are interactive** (user decision 2026-10-24):
   - **press and hold** an id → that car is highlighted **on the map** for as
     long as the button is down (a red box around its body — the reviewer draws
     it from the tape pose and `Config.SizeForColor`, the viewer from `/state`);
@@ -188,25 +191,49 @@ holding up: #71, #68        me        held up by: #59 → #61 → #44
 | column 1 | **the tape's `step`** — the host's absolute substep counter, what you would quote in a bug report. Displayed with the run-relative time beside it, `(step − firstStep) × dt_fixed`, because that is the number the scrub bar shows and an absolute step means nothing without it. |
 | order | newest at the TOP; older entries below, reached by scrolling down. |
 | click on the step number | **seek** the tape to that frame (reviewer only; inert in the live viewer). Step → index is the existing binary search over the tape index. |
-| scope | this car's own decisions **and the events that come from outside** — explicitly including "someone drove into me" (2026-10-26). |
-| row cap | **the newest 100 rows**, then a footer row **`show all (853 more)`** which drops the cap for that window until the car changes (user decision 2026-10-26). Measured on the tapes we own: a normal full-suite run peaks at **32** events per car, so 100 rows is never reached there; the record is **953** (`#3` of the fig8 stress family, 951 of them `brake: …` at ~3.9/s), i.e. only the dense multi-minute stress runs need the footer. Median car: 6 events. |
+| scope | this car's own decisions **and the events that come from outside** — explicitly including "someone drove into me" (2026-10-24). |
+| row cap | **the newest 100 rows**, then a footer row **`show all (853 more)`** which drops the cap for that window until the car changes (user decision 2026-10-24). Measured on the tapes we own: a normal full-suite run peaks at **32** events per car, so 100 rows is never reached there; the record is **953** (`#3` of the fig8 stress family, 951 of them `brake: …` at ~3.9/s), i.e. only the dense multi-minute stress runs need the footer. Median car: 6 events. |
 
-**"From outside" must be recorded, not reconstructed.** A collision today
-bumps the victim's `crashes` counter and nothing else. Spec: at the crash,
-`RecordDecision` on **both** cars — `crash: hit by car 26` on the victim,
-`crash: hit car 65` on the striking one. It lands in the existing event stream,
-so the tape line `~uid=text~`, the reviewer's index and
-`GET /car/{uid}/decisions` all carry it without a new format.
+**"From outside" is already recorded — verified, not assumed.** The crash
+episode logs a decision on **every** car in contact, each naming the other
+(`[R2] CRASH: contact with car 7 (my speed 12.4 km/h)`, `CarCollisions`’
+contact loop), and `crash_episodes` + `contact_with` are already in `/state`.
+So the victim's `crash: hit by car 26` line needs **no sim change** — only a
+list that shows the events instead of one collapsed line. (An earlier draft of
+this document claimed the victim only got a counter; that was wrong.)
 
 ## What this costs the sim, the tape and the API
 
-| where | change |
-|---|---|
-| `Car` / `SimEngine` | per car per substep: `HeldByUid`, `HeldByRes` — set where the cap is awarded (`CarCollisions` `OfferCap`/`ActiveCapKey` assignment), cleared with it. |
-| `CarCollisions` | `RecordDecision` on both cars at a crash. |
-| `Tape.cs` | a new per-car field **inserted BEFORE `capKey`**. The reader joins *everything* from index 11 to the end as the cap key (`fld.Length >= 12 ? string.Join(",", fld, 11, …)`), so a field appended after it would be silently swallowed into the cap string. Old files keep parsing → tape generation **4**, same as the colour/lamps/capKey generations. |
-| `GameApi` / `/state` | `held_by` + `held_by_res` per car **in both payload builders** (the followed-car branch and the fleet branch) — the rule the camera-focus work established: run/car state must not depend on which builder answered. |
-| `GET /car/{uid}/decisions` | exists already (its comment says "car detail window") but answers only `t` + `msg` → add `step`, so live rows can be the same shape as review rows. |
+**Status 2026-10-24: the first five rows are BUILT** (this is the data layer the
+window reads); the rest of the document is still open.
+
+| where | change | state |
+|---|---|---|
+| `Car` | `HeldByUid` — the CAR owning the active cap, 0 = nobody. Set beside `ActiveCapKey` where a cap is taken or replaced, cleared when the brake decision is released. | **built** |
+| `CarCollisions` | `OfferCap(…, int by = 0)` carries the actor as a VALUE from the rule that already knew it (`_v1By`, `byUid32`, `otherUid`, `blk.Other`, `blockedBy`, `e14.Value`) — no reader has to parse a uid out of a rule string again. The R32 creep now names the car that makes the stretch tight instead of leaving the `-1` sentinel (`avoid#-1`), and keeps `held_by = 0` there, because the KERB is what holds a creep — a chain that named a driver would invent one. | **built** |
+| `Tape.cs` | the per-car record is `…,color,lamps,heldBy,capKey` — **`heldBy` before `capKey`**, because a cap key can contain a comma (`r32#12,passage#4`) and the reader joins everything from the cap key to the end of the record: appending after it would have swallowed the number into the key. Tape **generation 4**; generations 2 and 3 still load, with `heldBy = 0` and the same cap key (`DrivingGame.Sim.Tests/TapeHeldByTests.cs`). | **built** |
+| `/state` | `"held_by"` (uid) and `"cap_key"` (the rule) per car, **in both payload builders** — the followed-car branch and the fleet branch — per the rule the camera-focus work established. (`cap_key` was never in `/state` at all before this, though the tape had it since October.) | **built** |
+| `POST /tape/frame` | `"held_by"` beside `"cap_key"`, so a client reading a tape frame over HTTP gets the same contract as one reading `/state`. | **built** |
+| `GET /car/{uid}/decisions` | answers `step` beside `t` + `msg` (it already existed, its comment naming the car detail window), so live rows and review rows have one shape. | **built** |
+| the reviewer's own tape reader (`MapRenderer.review.cs`) | it parses tapes itself — it needed the same four-generation rule, or the new number would have arrived inside `CapKey`. | **built** |
+| the crash | nothing to build — see above. | — |
+
+Measured on the first runs recorded with the field. A single
+`park_block_overtake` (`tests/tape_T_248_17_…`, 968 substeps) reads
+`car 2 held by 1 (avoid#1)` for 312 substeps and `car 1 held by 2 (avoid#2)` for
+161 — and never both in the same substep.
+
+**The full suite says that last part is NOT a general law**
+(`tests/tape_T_249_0_…`: 126 152 car records, all generation 4, 46 779 substeps
+naming a holder, **7 788 of them with A and B holding each other** in the same
+substep, **0 with a car holding itself**). A mutual pair is ordinary negotiation
+— two cars in one pinch each seeing the other as its own threat — so:
+
+- `held_by` is a **per-direction fact about one car**, not a relation that
+  implies anything about the other end;
+- the chain walk needs a **visited set from the first hop** (a cycle is common,
+  not an emergency). `LOCKDOWN` stays what R28's own test defines it as — a
+  cycle with no base case — and is NOT the same thing as "the walk closed".
 
 ## Geometry and session memory
 
@@ -217,7 +244,7 @@ window create/close/resize-end, on tape load, on scrub pause, and at quit —
 **not** per frame, and CrashDumper gets the same snapshot so a crash does not
 lose the session either.
 
-What is remembered, on close (user decision 2026-10-26: "der gesamte Zustand
+What is remembered, on close (user decision 2026-10-24: "der gesamte Zustand
 des Reviewers… dieselbe Stelle, direkt weiterarbeiten"):
 
 | key | content |
@@ -280,9 +307,10 @@ Restore rules:
 - `SIMULATIONS_REVIEWER.md`: §"Three car slots" and the ⚠ row in
   §"Implementation status" are replaced by a pointer here; the marker-lane
   sentence ("clicking a car slot") becomes "opening a car detail window".
-- `RECORD_PLAYBACK.md`: the per-car column and generation 4.
-- `REST_API.md`: `/state` per-car `held_by` (+ `held_by_res`) in both builders,
-  `step` in `/car/{uid}/decisions`.
+- `RECORD_PLAYBACK.md`: the per-car column and generation 4 — now due, the
+  field is written.
+- `REST_API.md`: `/state` per-car `held_by` + `cap_key` in both builders, and
+  `step` in `/car/{uid}/decisions` — both now due, they are built.
 - `GODOT_FRONTEND.md` § "What the client draws today": the viewer gains the
   windows.
 - `TESTING.md`: the reviewer's identity-line example (title bar now reads

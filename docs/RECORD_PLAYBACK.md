@@ -38,6 +38,7 @@ One record per **substep**, per car:
 | `x, y, heading, speed` | the pose — metres, heading degrees, m/s (`docs/UNITS.md`) |
 | `blinkers, brake, wrongSide` | what the renderer and the guard saw |
 | `capKey` | which rule owns this car's speed cap at this step (`avoid#12`, `r32#3`, `sign#C#4`, `r14#…`) — the "why" of a standstill |
+| `heldBy` | which **car** owns it (0 = nobody: free, or the R32 creep where the kerb is what holds the car). The rule names the situation, the actor names the counterpart — a reader that recovers the uid from the key by matching its tail is wrong for `r32#passive` (names nobody) and for `sign#C#7` (names the node before the car). Written BEFORE `capKey` for exactly that reason: a cap key may contain a comma (`r32#12,passage#4`), so it must stay the last field. Added 2026-10-24 for the car detail window's chain ([CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)) |
 | `crashEpisodes` | so a contact is findable by scrubbing, not only by the crash dump |
 | **decision text** | recorded **only on the substep where a new decision pops up** — the driver's own reasoning at that frame |
 
@@ -154,13 +155,15 @@ The file format is line-based on purpose - the CURRENT generation, one line
 per substep:
 
 ```
-step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,capKey|uid,x,y,…;~uid=decision text~uid=…
+step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,heldBy,capKey|uid,x,y,…;~uid=decision text~uid=…
 ```
 
 The reader accepts three generations - `step;cars`, then `+fluidity;moving`,
-then `+decision events` - and within the car fields the three of `…,color,capKey`
-and `…,color,lamps,capKey`, so a run recorded last week is still reviewable.
-It is greppable, and `tests/` already keeps per-run text logs next to it.
+then `+decision events` - and within the car fields the four of `…,color,capKey`,
+`…,color,lamps,capKey` and `…,color,lamps,heldBy,capKey`, so a run recorded last
+week is still reviewable (an old file reads `heldBy = 0`, which is the truth: an
+older run never named one). It is greppable, and `tests/` already keeps per-run
+text logs next to it.
 
 ## Pause, stop, and scrubbing behind a live sim (corrected 2026-10-21)
 

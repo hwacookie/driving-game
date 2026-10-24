@@ -529,15 +529,19 @@ public static class CarCollisions
         DespawnRequests.Clear();
         var grid = Grid.Build(carList);
         var caps = new Dictionary<int, double>();
-        // WHY each car is capped: (cap, stable key, human text). The key
-        // identifies the situation (rule + other car), so a continuously
-        // re-evaluated cap logs ONE event, and a changing threat (car 26 ->
-        // car 28) logs a new one.
-        var reasons = new Dictionary<int, (double Cap, string Key, string Text)>();
-        void OfferCap(int uid, double cap, string key, string text)
+        // WHY each car is capped: (cap, stable key, human text, the car that
+        // owns the situation). The key identifies the situation (rule + other
+        // car), so a continuously re-evaluated cap logs ONE event, and a
+        // changing threat (car 26 -> car 28) logs a new one. `By` is the SAME
+        // uid the rule just used to build that key, carried as a value instead
+        // of being parsed back out of the string - a client that pattern-matches
+        // `EndsWith(uid)` gets `r32#passive` and `sign#C#7` wrong (the reviewer
+        // did until docs/CAR_DETAIL_WINDOW.md retired it).
+        var reasons = new Dictionary<int, (double Cap, string Key, string Text, int By)>();
+        void OfferCap(int uid, double cap, string key, string text, int by = 0)
         {
             if (reasons.TryGetValue(uid, out var r) && r.Cap <= cap) return;
-            reasons[uid] = (cap, key, text);
+            reasons[uid] = (cap, key, text, by);
         }
         // Broadphase ring covers the LARGEST per-car look-ahead (top speed);
         // the per-car filter below narrows it to each car's own range.
@@ -750,7 +754,17 @@ public static class CarCollisions
                                 {
                                     best = vPass;
                                     _v1Rule = "R32 creep";
+                                    // The car that makes the stretch tight IS
+                                    // known here - naming it costs nothing and
+                                    // keeps `avoid#-1` (the old sentinel: a cap
+                                    // whose holder was nobody) out of the log,
+                                    // the tape and the held-by chain.
+                                    _v1By = o.Uid;
                                     c.ActiveCapKey = "r32#passive";
+                                    // The KERB holds this car, not a driver:
+                                    // the creep cap has no actor, and a chain
+                                    // that named one would be inventing it.
+                                    c.HeldByUid = 0;
                                 }
                             }
                         }
@@ -910,7 +924,8 @@ public static class CarCollisions
                     _v1Rule == "R26"
                         ? $"[R26] single-file passage: car {_v1By} holds it - waiting" +
                           $" (stretch {c.SegIdx}, my room {c.WidthM:F2} m)"
-                        : $"[R7] car {_v1By} ahead (gap {_v1Gap:F1} m)");
+                        : $"[R7] car {_v1By} ahead (gap {_v1Gap:F1} m)",
+                    _v1By < 0 ? 0 : _v1By);
                 DebugLog.Add($"v1 uid{c.Uid}={best:F2} along={_v1Along:F1} lat={_v1Lat:F2} by {_v1By}");   // TEMPORARY
             }
         }
@@ -1121,7 +1136,7 @@ public static class CarCollisions
                 c.OvertakeShiftM = 0.0;
                 OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
                          $"[R32] lane blocked by car {byUid32} ahead - " +
-                         "waiting behind the obstruction");
+                         "waiting behind the obstruction", byUid32);
                 continue;
             }
             // Outside the window the car belongs to its own lane: the shift is
@@ -1167,7 +1182,7 @@ public static class CarCollisions
                 c.OvertakeShiftM = 0.0;
                 OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
                          $"[R32] lane blocked by car {byUid32} ahead - " +
-                         "waiting behind the obstruction");
+                         "waiting behind the obstruction", byUid32);
                 continue;
             }
             double prevShift32 = c.OvertakeShiftM;
@@ -1469,7 +1484,7 @@ public static class CarCollisions
                 if (!wakeCase)
                 {
                     if (!IsPriorityCar(yieldCar))
-                        OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text);
+                        OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text, otherUid);
                 }
                 DebugLog.Add($"v2 uid{yieldUid}={cap:F2} pair({c.Uid},{o.Uid}) s={stageS:F1}");   // TEMPORARY
 
@@ -1585,7 +1600,7 @@ public static class CarCollisions
                         2.0 * Config.CAR_BRAKING * Math.Max(gapM - StandstillGapM, 0.0)));
                 }
                 OfferCap(c.Uid, cap, $"avoid#{otherUid}",
-                         $"[R2] self-protection vs car {otherUid} (TTC {ttc:F1} s)");
+                         $"[R2] self-protection vs car {otherUid} (TTC {ttc:F1} s)", otherUid);
             }
             // else: within grace, not too late - keep watching, no brake.
         }
@@ -1714,7 +1729,8 @@ public static class CarCollisions
             double roomM = r14Room[e14.Key];
             OfferCap(e14.Key, roomM <= 0.0 ? 0.0 : ApproachCapMps(0.0, roomM),
                      $"r14#{r14Node[e14.Key]}#{e14.Value}",
-                     $"[R30] crossing would not stay resolvable (chain vs car {e14.Value}) - holding before the crossing");
+                     $"[R30] crossing would not stay resolvable (chain vs car {e14.Value}) - holding before the crossing",
+                     e14.Value);
         }
 
         // --- R29: the desperation valve (must never fire) -----------------
@@ -1961,7 +1977,8 @@ public static class CarCollisions
                              ? $"[R4] cannot clear before car {blockedBy} arrives " +
                                ($"({dToNodeM:F0} m out)")
                              : $"[R5] yield sign: car {blockedBy} at the crossing " +
-                               ($"({dToNodeM:F0} m out)"));
+                               ($"({dToNodeM:F0} m out)"),
+                             blockedBy);
                     continue;   // held at the line - NOT committed
                 }
                 // COMMITTED ONCE THE NOSE CROSSES THE STOP LINE: a car with
@@ -2006,7 +2023,8 @@ public static class CarCollisions
                         // "stopped in my path" cap; a priority car's staged
                         // response has no immediate cap, so hold it here.)
                         OfferCap(c.Uid, 0.0, $"avoid#{blk.Other}",
-                                 $"[R3] holding before line - box blocked by car {blk.Other}");
+                                 $"[R3] holding before line - box blocked by car {blk.Other}",
+                                 blk.Other);
                         continue;
                     }
                     if (c.CrossingCommittedNode != aheadNode)
@@ -2046,6 +2064,7 @@ public static class CarCollisions
                     _capCandidate.Remove(c.Uid);
                     c.RecordDecision(simTime, "brake: " + r.Text);
                     c.ActiveCapKey = r.Key;
+                    c.HeldByUid = r.By;      // the actor behind the rule
                     // R26: the concession is VISIBLE to the other driver -
                     // hazard lights are the real-world "I signal my intent"
                     // (the driver enforces a 5 s minimum display, so a
@@ -2069,6 +2088,7 @@ public static class CarCollisions
                             !r.Key.StartsWith("passage#"))
                             (c.Driver as BicycleDriver)?.SetHazard(false);
                         c.ActiveCapKey = r.Key;
+                        c.HeldByUid = r.By;
                         if (r.Key.StartsWith("passage#"))
                             (c.Driver as BicycleDriver)?.SetHazard(true,
                                 "single-file passage - yielding the stretch");
@@ -2093,6 +2113,7 @@ public static class CarCollisions
                         (c.Driver as BicycleDriver)?.SetHazard(false);
                     c.RecordDecision(simTime, "gap clear - resuming");
                     c.ActiveCapKey = null;
+                    c.HeldByUid = 0;         // free: nobody holds me any more
                 }
                 else
                 {

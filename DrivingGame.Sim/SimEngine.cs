@@ -1298,6 +1298,14 @@ public sealed class SimEngine
                 ["headlights_on"] = c.HeadlightsOn,
                 ["taillights_on"] = c.TaillightsOn,
                 ["color"] = c.Color,
+                // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
+                // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
+                // the CAR that owns it (0 = nobody). The viewer's car detail
+                // window needs both, and the reader must not have to parse the
+                // uid out of the key — `r32#passive` names nobody and
+                // `sign#C#7` names the node before the car.
+                ["cap_key"] = c.ActiveCapKey ?? "",
+                ["held_by"] = c.HeldByUid,
                 // Driver class for the renderer's click-to-inspect info window.
                 ["driver"] = c.Driver?.GetName() ?? "NONE",
                 // The COURTESY signal (docs §6, bitteschön): set by the car
@@ -1439,6 +1447,11 @@ public sealed class SimEngine
                 ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(car)),
                 // Multi-car: display color + the full car list.
                 ["color"] = car.Color,
+                // The same two keys the fleet builder answers — a client must
+                // not get a different contract because the map held one car
+                // instead of fifty.
+                ["cap_key"] = car.ActiveCapKey ?? "",
+                ["held_by"] = car.HeldByUid,
                 ["cars"] = carsPayload,
                 // (The breadcrumb trail is NOT exported here: it is a pure
                 // visual and the frontend records it client-side from the

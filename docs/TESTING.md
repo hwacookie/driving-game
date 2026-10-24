@@ -146,8 +146,15 @@ sim on a crash and leaves the cars in place.
   red in the previous full run (`T_231`, 2026-10-22), with #27 failing
   differently there (the R29 lockdown valve despawned car 96 at t=15.1 s).
   Read the log's own footer for the verdict of any newer run.
-- C# unit suite: **91 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
-  ~25 s) - skipped are `CrossingStressTests.CrossingStress_NoContact_Within_15s`
+- **Reproduced 2026-10-24** (`--warp 4`, first run whose tape carries the
+  `heldBy` column — `tests/run_test_T_249_0_20261024_204743.log`): the same
+  three red, same first-reason for each (20 timed out, 26 the R33 hit at
+  t=9.1 s, 27 a contact — 9.8 s this time vs 40.2 s there, same pair 100/95),
+  and the same `❌ WRONG-SIDE` marker inside #24 that every full run since
+  T_231 prints without counting it as a failed test.
+- C# unit suite: **93 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
+  ~25 s; 91/2 before the tape-generation tests of 2026-10-24) - skipped are
+  `CrossingStressTests.CrossingStress_NoContact_Within_15s`
   (the crossing bug in unit-test form) and
   `RacelineReferenceTests.RebaselineReferenceFile` (a manual re-baseline tool).
 - Build: `dotnet build DrivingGame.csproj --no-incremental` → **0 errors**.
@@ -814,9 +821,10 @@ road is missing — the camera is cosmetic and must never fail a run.
 
 `--center`, `--zoom`, `--focus`, a map drag or `F` set `_tFocusManual`: from then
 on the announced focus does not re-aim the window. In the reviewer the same precedence
-applies — **per scenario**: a slot's **follow** toggle > the hand (map drag,
-minimap pin, slot CENTRE) > `--center`/`--review-name` > **the scenario's
-declaration** > the cast centroid, and **a test boundary releases the hand** so
+applies — **per scenario**: the hand (map drag, minimap pin, panel CENTRE, or a
+panel's **follow**, which is that pin riding the car) > `--center`/`--review-name`
+> **the scenario's declaration** > the cast centroid, and **a test boundary
+releases the hand** so
 the next scenario's focus and follow item take over
 ([SIMULATIONS_REVIEWER.md → Per-scenario framing](SIMULATIONS_REVIEWER.md#per-scenario-framing-the-recording-re-claims-the-view-at-every-boundary)).
 
