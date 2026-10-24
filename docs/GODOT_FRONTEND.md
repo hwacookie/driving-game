@@ -7,13 +7,21 @@
 > this document turns into a product boundary) and
 > `SMOOTH_GEOMETRY_DESIGN.md` (the geometry contract).
 >
-> **Current state (2026-10-19, code-verified):** ONE repo, ONE app. The Godot
+> **Current state (2026-10-23, code-verified):** ONE repo, ONE app. The Godot
 > 4.7 (.NET) project at the repo root hosts the client (`MapRenderer.cs`) and,
 > in `--source embedded` mode, the simulator itself (`SimHost.cs`) on its own
 > 60 Hz thread, with `DrivingGame.Api` embedded for external test injection.
 > The HTTP double pipeline (`--source http`, the default) to the console host
 > `DrivingGame.Server` on :5001 still coexists. Pygame is gone; the Python
 > reference repo is history.
+>
+> **The same project also hosts the second client** — the Simulationsreviewer,
+> `MapRenderer.review.cs` (a `partial` half of `MapRenderer` that opens its own
+> windows and draws a TAPE frame instead of the live sim). It is not a phase of
+> this migration; it is specified in
+> [SIMULATIONS_REVIEWER.md](SIMULATIONS_REVIEWER.md) and its launch flags are
+> listed there (`--review [path]`, `--review-at`, `--review-name`). Where §6/§7
+> below say "the client", read "the viewer window" unless stated otherwise.
 
 ## 1. Goal
 
@@ -25,7 +33,8 @@ world rules. Nothing in this plan changes simulated behavior; e2e
 (`tests/test_turning.py`) must stay green throughout.
 
 The simulator is now C# (`DrivingGame.Sim`), not Python: the 1:1 port is
-recorded in `C_SHARP_PORT_SPEC.md` (closed) and the post-port features in
+recorded in the port history (`diary/` + git log; the port spec itself was
+retired 2026-10-23 once it had closed) and the post-port features in
 `SPEC.md`.
 
 ## 2. Target architecture: three roles, one seam
@@ -99,9 +108,12 @@ road that looks paved where the simulator says grass (or vice versa), the
 player experiences "impossible" behavior even though the math is clean.
 
 **Oblique/3D views are a camera decision, not a new model.** The world stays
-flat (x = east, y = north, 2 px/m); Godot maps it into its XZ plane and an
-oblique view is just a camera angle; road width becomes ribbon/extrusion
-geometry along the same layer-2 polylines. Physics and model are untouched.
+flat and its frame **is metres** (x = east, y = north — there is no pixel
+frame in the model, see [UNITS.md](UNITS.md)); Godot maps it into its XZ plane
+and an oblique view is just a camera angle; road width becomes ribbon/extrusion
+geometry along the same layer-2 polylines. The px/m scale belongs to the camera
+(`Camera2D.Zoom`, chosen at draw time and announced as `--zoom`), not to the
+world. Physics and model are untouched.
 (Elevation/hills would be new data the simulator does not have — flat world
 until that changes.)
 
@@ -122,7 +134,8 @@ unchanged). Additions:
    interpolation) — no new fields expected; verify at implementation time.
 
 **Transport: REST polling first.** Localhost keep-alive gives ~1–3 ms RTT and
-Flask already runs threaded. Free-mode latency = one POST + at most one
+the then-Python API already ran threaded (the C# port uses ASP.NET Core /
+Kestrel — there is no Flask in this repo). Free-mode latency = one POST + at most one
 physics substep ≈ 2 frames — the same order as today's per-frame key
 polling. A WebSocket push channel is added **only if measurement shows a
 problem**, not beforehand.
@@ -170,8 +183,9 @@ the visible Godot window are the standard.
   shared API on `--port`; `MapRenderer` reads `Engine.StateSnapshot()`
   directly per frame - no HTTP. The `--source http` path stays as the
   alternative, so both communication methods coexist.
-- `scripts/run_e2e.sh --embedded` and the client's Run-Test UI drive the
-  embedded API.
+- `--source embedded` (a client flag, not a runner flag — the runner starts the
+  client and passes it through) and the client's Run-Test UI drive the embedded
+  API. `scripts/run_e2e.sh` itself has no `--embedded` option.
 
 ### Phase 2 — planning outside (NOT done)
 
@@ -219,10 +233,16 @@ contains no driving logic:
   `--motionlog <path>`, `--quit-on-test-done`, and the clean-quit generation
   file `/tmp/driving_game_godot_gen` (the client quits ITSELF when the value
   changes - never signal Godot).
+- **Review mode** (2026-10-21): with `--review` the same node builds the
+  Simulationsreviewer instead of this view — its own windows (map inset, three
+  car panels, readout), a scrub bar over the tape's fluidity curve with
+  decision/crash/wrong-side markers, and `--review-at` / `--review-name` for
+  landing on a known moment and a named car.
 
-### Phase 2 — planning outside (goal state)
+### Phase 2 — planning outside (goal state, §6)
 
-See §6 above: **not done** as of 2026-10-19.
+See §6 above: **not done** as of 2026-10-19, and not on the current roadmap —
+route, raceline and speed profile still live in `DrivingGame.Sim`.
 
 ## 8. Repos & migration
 

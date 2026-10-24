@@ -149,6 +149,17 @@ public partial class MapRenderer : Node2D
     private Line2D _curveLine, _cursorTick, _headTick;
     private readonly List<Button> _buttons = new();
     private readonly List<Polygon2D> _markerPool = new();
+    /// <summary>What a click or a hover on the marker lane would mean: the x
+    /// range (screen px, ALREADY padded), the step it points at and the text to
+    /// show. Rebuilt with the quads, so a hit can never address a stale frame.</summary>
+    private readonly List<(double X0, double X1, long Step, string Text)> _markerHits = new();
+    private Label? _tipLabel;
+    private string _tipShown = "";
+    /// <summary>Half the hit width around an event marker, in px. A decision
+    /// hairline is 1.5 px wide: correct to draw, impossible to hit, so the
+    /// TARGET is padded rather than the picture (the marker stays thin, the
+    /// mouse gets MarkerHitPadPx on either side).</summary>
+    const double MarkerHitPadPx = 7.0;
     private readonly List<SlotWin> _slots = new();
     private readonly List<long> _selected = new();   // last-clicked first
     private readonly List<Line2D> _markTicks = new();
@@ -361,6 +372,11 @@ public partial class MapRenderer : Node2D
         // was ▶ or a hundred presses of '.'.
         _scrubZone = new ReviewScrubZone();
         _scrubZone.Seek = ReviewSeek;
+        _scrubZone.FracAt = BarTapeFracAtX;
+        // (the wheel and the double-click are ReviewInput's, not the zone's:
+        //  see the measurement there — a pushed wheel event never gets here)
+        _scrubZone.Hover = ReviewMarkerHover;
+        _scrubZone.MarkerClick = ReviewMarkerClick;
         _barGroup.AddChild(_scrubZone);
 
         _curveLine = new Line2D { Width = 2.0f, DefaultColor = new Color(0.45f, 0.85f, 0.95f) };
@@ -474,6 +490,11 @@ public partial class MapRenderer : Node2D
         _rateBtn.OffsetRight = bx + 130.0f;
         _rateBtn.OffsetBottom = bt + bh;
         _barGroup.AddChild(_rateBtn);
+        // The Test panel (what is being watched + how the run scored it) is
+        // built with the HUD and survives its rebuilds: it is an OS window, and
+        // re-minting it on every resize is how "readout" title bars stacked.
+        BuildTestWindow();
+
     }
 
     /// <summary>One readout window for the life of the client. Rebuilding the
@@ -622,6 +643,10 @@ public partial class MapRenderer : Node2D
         _curveLine = null; _cursorTick = null; _headTick = null;
         _axisLabel = null; _bar = null; _scrubZone = null; _rateBtn = null;
         _barGroup = null;   // it lives in the layer that was just freed
+        _tipLabel = null; _tipShown = "";        // lived in that layer too
+        _markerHits.Clear();                     // its x's died with the bar
+        _testTicksFor = -1;                      // ditto, for the boundaries
+        _testTickPool.Clear(); _testTickLabels.Clear();
         // The readout window is NOT torn down here: it is an OS window, and
         // minting a new one per rebuild is what stacked "readout" title bars
         // during a resize. The label lives inside it and keeps its text -
@@ -646,6 +671,136 @@ public partial class MapRenderer : Node2D
     /// <summary>Read a tape file into memory (docs/RECORD_PLAYBACK.md format):
     /// one line per substep, a trailing ";~uid=text" only where a decision was
     /// made. Client-side on purpose - playback then needs no host at all.</summary>
+    /// <summary>One `# focus …` line of a tape: what the scenario asked the
+    /// window to look at, from the substep it announced it at. The review
+    /// client reads the FILE, so the run's camera intent has to survive in it —
+    /// otherwise a replay would frame the run differently from the live run
+    /// (kinds: "car" = the primary car, "named" = that car of the cast,
+    /// "loc" = a place, and then NO car is followed).</summary>
+    private readonly record struct RvFocus(long Step, string Kind, double X, double Y,
+                                           double ZoomPxM, string Name, long Uid,
+                                           string Label, string Scenario, string Desc,
+                                           // The car the scenario STAGED under that
+                                           // name — a name is not a key (reused in
+                                           // scenario after scenario), so a replay
+                                           // needs the uid. 0 = older tape, fall
+                                           // back to the name map.
+                                           long NameUid = 0);
+
+    /// <summary>One `# result …` line: how the suite scored that scenario.</summary>
+    private readonly record struct RvResult(long Step, int Number, string Label,
+                                            string Scenario, bool Passed, string Reason,
+                                            double SimS, double WallS, int Crossings, int OffRoad);
+
+    private readonly List<RvFocus> _tapeFocus = new();
+    private readonly List<RvResult> _tapeResults = new();
+
+    /// <summary>The test the cursor is INSIDE (the newest focus note at or
+    /// before it) — the key everything per-scenario in this window follows:
+    /// the camera, the Test panel, the boundary ticks.</summary>
+    private RvFocus? _focusAtCursor;
+    private string _focusLabelShown = "";
+
+    /// <summary>The wheel-zoomed range of the scrub bar, in SUBSTEPS. The tape
+    /// is the whole run, but a 35 000-substep run drawn across one screen makes
+    /// a single decision 0.3 px wide — so the bar gets its own zoom, independent
+    /// of the MAP's zoom, and 10 s of a crossing is readable.</summary>
+    private bool _barAteWheel;      // a wheel the bar consumed: not a map zoom
+    private bool _barAteClickSeek;  // a double-click: reset, not a seek
+    private double _viewLo = 0.0, _viewHi = 1.0;      // fractions of the tape
+    private bool _barZoomed;
+    private bool _cursorOffView;                       // clamped tick = a lie
+    private readonly double[] _tickSim = new double[10];
+    private readonly List<Line2D> _testTickPool = new();
+    private readonly List<Label> _testTickLabels = new();
+    private double _testTicksFor = -1;
+
+    private Window? _testWin;
+    private Label? _testPanelLabel;   // (the viewer's _testLabel is the "5/21"
+                                      // HUD text under the minimap — different thing)
+    private string _testShown = "";
+
+    // --- The bar's own zoom ------------------------------------------------
+    // The bar is the tape's TIME AXIS, so it gets the same courtesy as the
+    // map: a range you can widen and narrow. Wheel over the bar zooms the
+    // range about the pointer; the MAP's zoom is untouched (they answer two
+    // different questions — "which 20 s" vs "how close").
+    const double BarZoomMinSpanFrac = 1.0 / 400.0;   // ≥ 1/400 of the run visible
+    const double BarZoomStep = 1.35;                 // per wheel notch
+
+    /// <summary>The bar's x range on screen: the SAME geometry for the curve,
+    /// the markers, the axis, the boundary ticks and the seek zone. Every
+    /// step→x in this file goes through BarXOf, so zooming the bar cannot
+    /// leave one layer behind (a marker lane drawn against the unzoomed axis
+    /// is how a zoom feature ends up pointing at the wrong second).</summary>
+    double BarX0() => 16.0;
+    double BarW()
+    {
+        var vp = GetViewport().GetVisibleRect();
+        return Math.Max(40.0, vp.Size.X - 32.0);
+    }
+
+    /// <summary>Index of the tape frame at a bar x, in the CURRENT bar zoom.</summary>
+    double BarIndexAtX(float x)
+    {
+        double frac = (x - BarX0()) / BarW();
+        double t = _viewLo + frac * (_viewHi - _viewLo);
+        return Math.Clamp(t, 0.0, 1.0) * Math.Max(0, _tape.Count - 1);
+    }
+
+    /// <summary>Fraction of the tape (0..1, whole run) at a bar x — what a seek
+    /// needs, expressed the way ReviewSeek has always taken it.</summary>
+    double BarTapeFracAtX(float x) =>
+        _tape.Count < 2 ? 0.0 : BarIndexAtX(x) / (_tape.Count - 1.0);
+
+    /// <summary>Screen x of a tape INDEX at the current bar zoom. Points
+    /// outside the visible range come back outside the bar on purpose: the
+    /// callers cull them.</summary>
+    double BarXOf(double index)
+    {
+        double span = Math.Max(1e-9, _viewHi - _viewLo);
+        double t = _tape.Count < 2 ? 0.0 : index / (_tape.Count - 1);
+        return BarX0() + BarW() * ((t - _viewLo) / span);
+    }
+
+    /// <summary>Wheel-zoom the bar's visible range about a bar x. `in`
+    /// stretches the range (more detail), `out` shrinks it back; the range is
+    /// clamped to the tape and never narrower than BarZoomMinSpanFrac.</summary>
+    void BarZoom(bool inward, float atX)
+    {
+        double span = _viewHi - _viewLo;
+        double anchorT = _viewLo + (atX - BarX0()) / BarW() * span;
+        double f = inward ? 1.0 / BarZoomStep : BarZoomStep;
+        double newSpan = Math.Clamp(span * f, BarZoomMinSpanFrac, 1.0);
+        // Keep the point under the cursor where it was.
+        double fracIn = span > 0 ? (anchorT - _viewLo) / span : 0.5;
+        double lo = anchorT - fracIn * newSpan;
+        double hi = lo + newSpan;
+        if (lo < 0) { lo = 0; hi = newSpan; }
+        if (hi > 1) { hi = 1; lo = 1 - newSpan; }
+        _viewLo = lo; _viewHi = hi;
+        _barZoomed = newSpan < 0.999;
+        _markerForSelected = -1;      // every quad is drawn through this range
+        GD.Print($"BAR-ZOOM {(inward ? "in" : "out")} range {lo * (_tape.Count - 1):F0}..{hi * (_tape.Count - 1):F0} " +
+                 $"of {_tape.Count - 1} substeps ({(hi - lo) * 100:F1}% of the run, " +
+                 $"{((hi - lo) * (_tape.Count - 1) * _tapeDt):F1} s of sim)");
+    }
+
+    /// <summary>Zoom all the way back out to the whole run.</summary>
+    void BarZoomReset()
+    {
+        _viewLo = 0.0; _viewHi = 1.0; _barZoomed = false;
+        _markerForSelected = -1;
+    }
+
+    /// <summary>Percent-decoding for the tape's free-text fields (the sim writes
+    /// them with Uri.EscapeDataString so a reason with spaces stays one token).</summary>
+    private static string Unesc(string v)
+    {
+        try { return string.IsNullOrEmpty(v) ? "" : Uri.UnescapeDataString(v); }
+        catch { return v; }
+    }
+
     private bool LoadTape(string path)
     {
         _tape.Clear();
@@ -653,6 +808,11 @@ public partial class MapRenderer : Node2D
         try { text = File.ReadAllText(path); }
         catch { return false; }
         _tapeName = path.Split("/")[^1];
+        _tapeFocus.Clear();
+        _tapeResults.Clear();
+        _focusAtCursor = null;
+        _focusLabelShown = "";
+        _viewLo = 0.0; _viewHi = 1.0; _barZoomed = false;
         foreach (var line in text.Split("\n"))
         {
             if (line.Length == 0) continue;
@@ -673,6 +833,31 @@ public partial class MapRenderer : Node2D
                     }
                 }
                 if (line.Contains("map=")) _tapeMap = line.Split("map=")[1].Split(" ")[0];
+                if (line.StartsWith("# focus ") || line.StartsWith("# result "))
+                {
+                    // The run's own annotations: camera intent + verdicts. Old
+                    // tapes simply have none, which reads as "no declaration"
+                    // (= follow the primary car), never as an error.
+                    var kv3 = new Dictionary<string, string>();
+                    foreach (var tok in line.Substring(line.IndexOf(' ') + 1).Split(' '))
+                    {
+                        int eq = tok.IndexOf('=');
+                        if (eq > 0) kv3[tok.Substring(0, eq)] = tok.Substring(eq + 1);
+                    }
+                    long Lg(string k, long d = 0) => kv3.TryGetValue(k, out var v) ? (long)ParseNum(v, d) : d;
+                    double D(string k, double d = 0) => kv3.TryGetValue(k, out var v) ? ParseNum(v, d) : d;
+                    string S(string k) => kv3.TryGetValue(k, out var v) ? Unesc(v) : "";
+                    if (line.StartsWith("# focus "))
+                        _tapeFocus.Add(new RvFocus(Lg("step"), S("kind"), D("x"), D("y"),
+                                                   D("zoom"), S("name"), Lg("uid"),
+                                                   S("label"), S("scenario"), S("desc"),
+                                                   Lg("name_uid")));
+                    else
+                        _tapeResults.Add(new RvResult(Lg("step"), (int)Lg("number"), S("label"),
+                                                      S("scenario"), S("passed") == "1", S("reason"),
+                                                      D("sim"), D("wall"), (int)Lg("xng"),
+                                                      (int)Lg("off")));
+                }
                 continue;
             }
             var col = line.Split(";");
@@ -778,9 +963,23 @@ public partial class MapRenderer : Node2D
                             Y = (float)nf.Y, HeadingDeg = (float)nf.HeadingDeg,
                             SpeedKmh = (float)(nf.SpeedMps * 3.6), Level = 0 });
         }
-        // Uids that vanished between frames (a despawn) must not stay on screen.
+        // Uids that vanished between frames (a despawn) must not stay on
+        // screen - and clearing the SAMPLES was not enough (measured on
+        // tape_T_240 frame 3308: the frame carries uid 6 (blue, (99.42,277.82))
+        // and uid 7 (mixer, (98.25,265.72)), yet a THIRD sprite - uid 2, the
+        // silver parked car, last recorded at step 868 = SIM 14.5 s - was
+        // painted at (98.75,275.5), i.e. 40 s of tape out of date, with the
+        // blue car driving over it). The render pass skips an empty buffer
+        // with `if (buf.Count == 0) continue;`, which leaves the sprite node
+        // sitting at its last global transform: the review client drew a car
+        // the frame does not have. So the despawn goes through the client's
+        // own teardown, the one that also frees the node.
         foreach (var uid in _carBuf.Keys.ToList())
-            if (!seen.Contains(uid)) _carBuf[uid].Clear();
+            if (!seen.Contains(uid)) RemoveCar(uid);
+        // A node with no buffer at all (the buffer was dropped on a scrub
+        // back, a phase switch) is the same lie: nothing on tape owns it.
+        foreach (var uid in _carNodes.Keys.ToArray())
+            if (!seen.Contains(uid) && !_carBuf.ContainsKey(uid)) RemoveCar(uid);
 
         // The live path renders at (_simNow - RenderDelaySec). The tape has
         // nothing to hide behind, so the delay is cancelled by aiming _simNow
@@ -1191,23 +1390,45 @@ public partial class MapRenderer : Node2D
         double curveTop = barTop + RowInsetPx + RowHpx + 6.0;
         double baseline = barBase - 14.0;
         double amp = Math.Max(24.0, baseline - curveTop);
-        int i = 0;
-        foreach (var f in _tape)
+        // Sampled THROUGH THE BAR'S RANGE: at the full 35 000 substeps across
+        // ~2 900 px, three frames share a pixel; zoomed in, the same loop is
+        // thousands of points wide, so the stride keeps the polyline near one
+        // point per pixel instead of drawing tens of thousands of invisible ones.
+        double span = Math.Max(1e-9, _viewHi - _viewLo);
+        int visCount = Math.Max(2, (int)Math.Round(span * _tape.Count));
+        int stride = Math.Max(1, visCount / Math.Max(2, (int)barW * 2));
+        int first = Math.Max(0, (int)Math.Floor(_viewLo * (_tape.Count - 1)) - stride);
+        int last = Math.Min(_tape.Count - 1,
+                            (int)Math.Ceiling(_viewHi * (_tape.Count - 1)) + stride);
+        for (int i = first; i <= last; i += stride)
         {
-            double x = barX + barW * (i / Math.Max(1.0, _tape.Count - 1.0));
-            double y = baseline - amp * (f.Fluidity / maxF);
-            pts.Add(new Vector2((float)x, (float)y));
-            i++;
+            var f = _tape[i];
+            pts.Add(new Vector2((float)BarXOf(i), (float)(baseline - amp * (f.Fluidity / maxF))));
         }
+        if (last > first && (last - first) % stride != 0)
+            pts.Add(new Vector2((float)BarXOf(last),
+                        (float)(baseline - amp * (_tape[last].Fluidity / maxF))));
         _curveLine.Points = pts.ToArray();
         // cursor + head ticks
-        double cx = barX + barW * (_cursor / Math.Max(1.0, _tape.Count - 1.0));
+        double cx = BarXOf(_cursor);
+        // A cursor OUTSIDE a zoomed range must not pretend to be at the edge it
+        // is clamped to: the tick sticks to that edge and the axis note says
+        // which way to scroll (a clamped tick that lies is worse than none).
+        bool offView = cx < barX - 1.0 || cx > barX + barW + 1.0;
+        _cursorOffView = offView;
         cx = Math.Clamp(cx, barX + 3.0, barX + barW - 3.0);   // never half outside
         _cursorTick.Points = new Vector2[] {
             new Vector2((float)cx, (float)(baseline - amp)), new Vector2((float)cx, (float)barBase) };
-        _headTick.Points = new Vector2[] {
-            new Vector2((float)(barX + barW - 3.0), (float)(baseline - amp)),
-            new Vector2((float)(barX + barW - 3.0), (float)barBase) };
+        // The head of the tape sits at the tape's end: at a zoomed range it is
+        // off screen, and drawing it at the edge would claim the last recorded
+        // substep is right there.
+        double hx = BarXOf(Math.Max(0, _tape.Count - 1));
+        _headTick.Points = hx >= barX && hx <= barX + barW
+            ? new Vector2[] {
+                new Vector2((float)hx, (float)(baseline - amp)),
+                new Vector2((float)hx, (float)barBase) }
+            : new Vector2[0];
+        ReviewTestTicks(barX, barW, barBase, baseline - amp);
         // Event markers on the frame's own events (decisions). Blue/red/yellow
         // categories (wrong lane, crash, standstill) are slice B.
         foreach (var t in _markTicks) t.Points = new Vector2[0];
@@ -1272,6 +1493,35 @@ public partial class MapRenderer : Node2D
 
     private void ReviewInput(InputEvent e)
     {
+        // THE BAR'S OWN WHEEL (user request 2026-10-24: "make the scrub-bar
+        // zoomable by using the mouse wheel"). Handled here rather than in
+        // ReviewScrubZone because this is the ONE place that is handed every
+        // event: the zone demonstrably receives clicks (a click seeks), but a
+        // pushed wheel event never reached its _GuiInput (measured twice: the
+        // range did not move). A wheel INSIDE the bar band zooms the bar's time
+        // range and is eaten; everywhere else it stays the map zoom.
+        if (_testBarUi && e is InputEventMouseButton wd0 &&
+            (wd0.ButtonIndex == MouseButton.WheelUp || wd0.ButtonIndex == MouseButton.WheelDown))
+            GD.Print($"BAR-UI ReviewInput saw a wheel: pressed={wd0.Pressed} " +
+                     $"pos=({wd0.Position.X:F0},{wd0.Position.Y:F0}) " +
+                     $"band={InBarBand(wd0.Position)} vp={GetViewport().GetVisibleRect().Size}");
+        if (e is InputEventMouseButton wb && wb.Pressed &&
+            (wb.ButtonIndex == MouseButton.WheelUp || wb.ButtonIndex == MouseButton.WheelDown) &&
+            InBarBand(wb.Position))
+        {
+            BarZoom(wb.ButtonIndex == MouseButton.WheelUp, wb.Position.X);
+            _barAteWheel = true;
+            return;
+        }
+        // Double-click on the bar: back to the whole run.
+        if (e is InputEventMouseButton dc && dc.Pressed && dc.DoubleClick &&
+            dc.ButtonIndex == MouseButton.Left && InBarBand(dc.Position))
+        {
+            BarZoomReset();
+            _barAteClickSeek = true;      // the seek below must not also jump
+            GD.Print("BAR-ZOOM reset to the whole run");
+            return;
+        }
         ReviewSelect(e);
         if (!(e is InputEventKey k)) return;
         // A RELEASE is a decision for the jog keys and the scrub arrows:
@@ -1337,6 +1587,17 @@ public partial class MapRenderer : Node2D
     /// Printed once per cursor change, not per frame.</summary>
     private int _lastCheckedCursor = -1;
     private bool _camPrinted;
+    // The level that moved the camera last frame ("declared car '19/27'
+    // FOLLOWING uid=16" …) — a change of this is a change of intent, so it is
+    // what the REVIEW-CAM trace keys on.
+    private string _camSrc = "";
+    // The scenario whose declaration last drove the view, and where its followed
+    // subject was when it was last on screen (FocusHandoff / ReviewCamera).
+    private string _lastFocusLabel = "";
+    private bool _focusSeenOnce;
+    private (double a, double b)? _focusLastPose;
+    // The scenario whose declared zoom is already on the camera (empty = none).
+    private string _focusZoomApplied = "";
 
     private void ReviewButton(string action)
     {
@@ -1621,7 +1882,8 @@ public partial class MapRenderer : Node2D
                 $"x {cf.X:F2}  y {cf.Y:F2}  h {cf.HeadingDeg:F1}°",
                 $"holds me: {OrText(holds, "-")}",
                 $"I hold:   {OrText(held, "-")}",
-                $"decisions: {DecisionTrail(uid, fr.Step)}",
+                // _cursor, not fr.Step: DecisionTrail counts in tape indices.
+                $"decisions: {DecisionTrail(uid, _cursor)}",
             };
             s.Lab.Text = string.Join("\n", lines);
         }
@@ -1704,26 +1966,44 @@ public partial class MapRenderer : Node2D
             foreach (var ev in f.Events)
             {
                 if (!_decSteps.ContainsKey(ev.Uid)) _decSteps[ev.Uid] = new List<long>();
-                _decSteps[ev.Uid].Add(f.Step);
-                _decMsg[$"{ev.Uid}:{f.Step}"] = ev.Msg;
+                // The INDEX, not the file's 1-based step column: every other
+                // marker list holds indices, and a step is only an index when
+                // the tape happens to start at step 1 (a host that had already
+                // been running records steps 8 802.. — measured).
+                _decSteps[ev.Uid].Add(i);
+                // KEYED BY THE INDEX TOO. The step column of THIS run starts at
+                // 1, so index i and step f.Step differ by exactly one — and the
+                // lookup in DecisionTrail builds its key from _decSteps, i.e.
+                // from the index. Keying this dictionary by the file's step
+                // therefore missed EVERY read: an exception per frame per slot
+                // ("The given key '132:35174' was not present in the
+                // dictionary", spammed for as long as a car sat in a slot). One
+                // list, one dictionary, one space.
+                _decMsg[$"{ev.Uid}:{i}"] = ev.Msg;
             }
         }
     }
 
-    private string DecisionTrail(long uid, long step)
+    /// <summary>The car's decision count and last message AT OR BEFORE a TAPE
+    /// INDEX (docs/RECORD_PLAYBACK.md: the file stores 1-based steps, every
+    /// review internal works in indices — mixing them is the off-by-one that
+    /// threw a KeyNotFoundException per frame).</summary>
+    private string DecisionTrail(long uid, long index)
     {
         var dec = _decSteps.TryGetValue(uid, out var d) ? d : null;
         if (dec == null || dec.Count == 0) return "none";
-        // Count the entries at or before the cursor (the list is in step
+        // Count the entries at or before the cursor (the list is in index
         // order, so a binary search is enough).
         int lo = 0, hi = dec.Count;
         while (lo < hi)
         {
             int mid = (lo + hi) / 2;
-            if (dec[mid] <= step) lo = mid + 1; else hi = mid;
+            if (dec[mid] <= index) lo = mid + 1; else hi = mid;
         }
         if (lo == 0) return "none";
-        var last = _decMsg[uid + ":" + dec[lo - 1]];
+        // A missing message is a display detail, not a crash: this runs for
+        // every slot on every frame.
+        var last = _decMsg.TryGetValue(uid + ":" + dec[lo - 1], out var m) ? m : "(no text)";
         return $"{lo} here, last: " + (last.Length > 28 ? last.Left(28) : last);
     }
 
@@ -1740,18 +2020,24 @@ public partial class MapRenderer : Node2D
         if (selHash == _markerForSelected) return;
         _markerForSelected = selHash;
         foreach (var p in _markerPool) p.Polygon = new Vector2[] {};
-        if (_selected.Count == 0 || _tape.Count < 2) return;
+        _markerHits.Clear();
+        if (_tape.Count < 2) return;
         var vp = GetViewport().GetVisibleRect();
         double barBase = vp.Size.Y - 46.0;
         double barX = 16.0;
         double barW = vp.Size.X - 32.0;
         int slot = 0;
-        void quad(double fromStep, double toStep, Color col, double h)
+        void quad(double fromStep, double toStep, Color col, double h, string what = "")
         {
             if (slot >= _markerPool.Count) return;
-            double x0 = barX + barW * (fromStep / (_tape.Count - 1.0));
-            double x1 = barX + barW * (toStep / (_tape.Count - 1.0));
+            double x0 = BarXOf(fromStep), x1 = BarXOf(toStep);
             if (x1 - x0 < 1.5) x1 = x0 + 1.5;
+            // Hit test through the SAME x's the quad was drawn at, padded — a
+            // hit list computed against the unzoomed axis would point at a
+            // different second than the mark you can see.
+            if (x1 >= barX - 40 && x0 <= barX + barW + 40 && what.Length > 0)
+                _markerHits.Add((x0 - MarkerHitPadPx, x1 + MarkerHitPadPx,
+                                 (long)fromStep, what));
             var poly = _markerPool[slot++];
             poly.Polygon = new Vector2[]
             {
@@ -1768,7 +2054,9 @@ public partial class MapRenderer : Node2D
         // Fleet-level standstill band: a substep where NO car is moving. The
         // per-frame scan of the whole tape is what made the window crawl, so
         // this is precomputed into _fleetStops at index time.
-        foreach (var s in _fleetStops) quad(s, s + 1, new Color(0.75f, 0.62f, 0.2f, 0.35f), 4.0);
+        foreach (var s in _fleetStops)
+            quad(s, s + 1, new Color(0.75f, 0.62f, 0.2f, 0.35f), 4.0,
+                 $"fleet standstill at {SimOf(s):F2} s SIM — no car was moving");
         // The index, not the tape: per selected car, walk only its own runs
         // and event steps (a handful each), never all 35 905 frames.
         foreach (var uid in _selected)
@@ -1782,7 +2070,9 @@ public partial class MapRenderer : Node2D
                 foreach (var s in wrong) quad(s, s, new Color(0.35f, 0.6f, 1.0f), 12.0);
             var crash = _crashSteps.TryGetValue(uid, out var cl2) ? cl2 : null;
             if (crash != null)
-                foreach (var s in crash) quad(s, s, new Color(1.0f, 0.25f, 0.2f), 12.0);
+                foreach (var c2 in crash)
+                    quad(c2, c2, new Color(1.0f, 0.25f, 0.2f), 12.0,
+                         $"car {uid}: CRASH at {SimOf(c2):F2} s SIM — click to jump there");
         }
         // Decision hairlines from the index too: every step where ANY car
         // decided, merged into one sorted list.
@@ -1792,7 +2082,9 @@ public partial class MapRenderer : Node2D
         // Readable hairlines: at 0.22 alpha over a dark strip they vanished,
         // which made a decision-dense stretch look like a flat line.
         for (int i = 0; i < decAll.Count && i < 600; i++)
-            quad(decAll[i], decAll[i], new Color(0.78f, 0.78f, 0.85f, 0.55f), 22.0);
+            quad(decAll[i], decAll[i], new Color(0.78f, 0.78f, 0.85f, 0.55f), 22.0,
+                 DecisionText(decAll[i]));
+        _markerHits.Sort((a, b) => b.Step.CompareTo(a.Step));   // newest hit wins a tie
     }
 
     private readonly Dictionary<long, string> _carColors = new();
@@ -1806,10 +2098,20 @@ public partial class MapRenderer : Node2D
         var vp = GetViewport().GetVisibleRect();
         double barX = 16.0, barW = vp.Size.X - 32.0;
         double barBase = vp.Size.Y - 46.0;
+        // The axis names the VISIBLE range: at 4 % of the run the tenth tick is
+        // not 90 % of the tape, and a scale that lies is worse than no scale.
         for (var i = 0; i < _markTicks.Count; i++)
         {
-            var frac = (i + 1) / (_markTicks.Count + 1.0);
-            var cx = barX + barW * frac;
+            var frac = _viewLo + (_viewHi - _viewLo) * ((i + 1) / (_markTicks.Count + 1.0));
+            var cx = barX + barW * ((i + 1) / (_markTicks.Count + 1.0));
+            double tickSim = frac * Math.Max(0, _tape.Count - 1) * _tapeDt;
+            if (_markTicks[i].Points.Length == 2)
+                _markTicks[i].Points = new Vector2[]
+                {
+                    _markTicks[i].Points[0],
+                    new Vector2(_markTicks[i].Points[1].X, (float)(barBase - 12.0)),
+                };
+            _tickSim[i] = tickSim;
             _markTicks[i].Points = new Vector2[]
             {
                 new Vector2((float)cx, (float)(barBase - 1.0)),
@@ -1820,10 +2122,18 @@ public partial class MapRenderer : Node2D
         // The time labels live on the bar, above the ticks.
         if (_axisLabel != null)
         {
+            // Named for what is ON SCREEN: a zoomed bar that still says
+            // "0 s .. 588 s" is a scale that lies.
+            double loSim = _viewLo * Math.Max(0, _tape.Count - 1) * _tapeDt;
+            double hiSim = _viewHi * Math.Max(0, _tape.Count - 1) * _tapeDt;
             _axisLabel.Text =
-            $"0 s .. {(_tape.Count * _tapeDt):F0} s sim · " +
-            $"{Math.Round(_tape.Count / 10.0):F0} substeps per tick · " +
-            $"curve 0 .. {_curveMaxF:F1} m/s/car";
+                (_barZoomed ? $"{loSim:F1}–{hiSim:F1} s of {_tape.Count * _tapeDt:F0} s sim"
+                            : $"0 s .. {(_tape.Count * _tapeDt):F0} s sim") +
+                $" · {Math.Round((_viewHi - _viewLo) * _tape.Count / 10.0):F0} substeps/tick" +
+                $" · curve 0 .. {_curveMaxF:F1} m/s/car" +
+                (_barZoomed ? " · wheel=out, double-click=whole run" : " · wheel=zoom the bar") +
+                (_cursorOffView ? $" · cursor {_tape[_cursor].Step} is " +
+                                  $"{(_cursor / Math.Max(1, _tape.Count - 1) < _viewLo ? "LEFT of" : "RIGHT of")} this range" : "");
             // The scale text shares the BUTTON ROW and hangs off the bar's
             // right end: the row is one instrument - transport on the left,
             // its readout on the right - and the band under the row stays
@@ -1837,6 +2147,407 @@ public partial class MapRenderer : Node2D
                 (float)(barBase - StripPx + RowInsetPx
                         + (RowHpx - _axisLabel.Size.Y) / 2.0));
         }
+    }
+
+    /// <summary>The newest focus note at or before the cursor — i.e. the
+    /// scenario this frame belongs to — and the Test panel that goes with it.
+    /// The notes are recorded in step order, so this is a backwards scan that
+    /// stops at the first hit.</summary>
+    /// <summary>Apply the recording's intent when the scenario under the cursor
+    /// CHANGES: hand over the view from the operator's pin/pan to whatever the
+    /// new scenario declared. Strongest input (a slot's FOLLOW toggle, an
+    /// explicit "stay on THIS car" the operator is using as an instrument) is
+    /// left alone; a pin, a drag-pan and the command-line `--center` are the
+    /// framing of the moment they were made in.</summary>
+    /// <summary>Set the zoom the scenario declared — ONCE, at the handoff into
+    /// it. The per-frame write it replaces was reported as "zoom in the main
+    /// window sometimes does not work. I need to zoom in the minimap, and only
+    /// after that, it also works in the main window" (2026-10-24), and that is
+    /// exactly what it does: the declaration re-asserted its px/m on every frame,
+    /// so a wheel notch in the map was overwritten 16 ms later; a minimap zoom
+    /// PINNED the view (hand > declaration), which stopped the re-assertion and
+    /// "unlocked" the map wheel. The framing belongs to the moment a scenario
+    /// starts; after that the operator owns the zoom. Position is a different
+    /// matter — a follow has to be re-derived every substep to stay on its car.</summary>
+    void ApplyFocusZoom(double zoomPxM, System.Action fit = null)
+    {
+        if (_focusZoomApplied == _focusAtCursor?.Label) return;   // already framed
+        _focusZoomApplied = _focusAtCursor?.Label ?? "";
+        if (zoomPxM > 0) _cam.Zoom = new Vector2((float)zoomPxM, (float)zoomPxM);
+        else fit?.Invoke();
+    }
+
+    private void FocusHandoff()
+    {
+        string lbl = _focusAtCursor?.Label ?? "";
+        if (!_focusSeenOnce)
+        {
+            // The framing the operator asked for on the command line is the
+            // STARTING view — honour it, don't release it on frame one.
+            _focusSeenOnce = true;
+            _lastFocusLabel = lbl;
+            return;
+        }
+        if (lbl.Length == 0 || lbl == _lastFocusLabel) return;
+        _lastFocusLabel = lbl;
+        var f = _focusAtCursor.Value;
+        if (SlotFollowUid() != 0L)
+        {
+            GD.Print($"REVIEW-FOCUS '{lbl}': a slot's FOLLOW keeps the view (declared " +
+                     $"{f.Kind} takes over when the slot stops following)");
+            return;
+        }
+        bool released = _mmAsk != null || _reviewPan != Vector2.Zero || _overrideCenter != null;
+        _mmAsk = null;
+        _reviewPan = Vector2.Zero;
+        _overrideCenter = null;
+        _focusLastPose = null;      // a new scenario, a new subject
+        _focusZoomApplied = "";     // …and the new scenario frames its own zoom
+        GD.Print($"REVIEW-FOCUS '{lbl}': {f.Kind}" +
+                 (released ? " — hand pin/pan released, the recording's focus applies"
+                           : " — focus and follow item switch over"));
+    }
+
+    /// <summary>Which CAR a focus note means, in this tape. ONE function, so
+    /// the camera and the diagnostics can never disagree about it (they did:
+    /// the trace resolved by name while the camera resolved by name_uid, and
+    /// reported a 1202 px error that existed only in the log).
+    ///
+    /// Order: the uid the scenario STAGED (name_uid) > the name map > the note's
+    /// primary uid. The name map is only a fallback for tapes recorded before
+    /// the uid was known — it keeps one entry per uid, so a role reused in a
+    /// later scenario points at the wrong car ('19/27' resolved to a slow_car
+    /// that is not on screen anywhere near that frame).</summary>
+    long FocusSubjectUid(RvFocus? f)
+    {
+        if (f == null) return 0L;
+        var v = f.Value;
+        if (v.Kind == "loc") return 0L;          // a place has no subject car
+        if (v.Kind == "named")
+        {
+            if (v.NameUid > 0) return v.NameUid;
+            if (v.Name.Length > 0)
+                foreach (var kv in _tapeNames)
+                    if (kv.Value == v.Name) return kv.Key;
+        }
+        return v.Uid;
+    }
+
+    private void FocusAtCursor()
+    {
+        if (_tapeFocus.Count == 0) { _focusAtCursor = null; UpdateTestPanel(); return; }
+        long step = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)].Step;
+        RvFocus? found = null;
+        for (int i = _tapeFocus.Count - 1; i >= 0; i--)
+            // Both sides in STEP space — that is the unit the file speaks.
+            if (_tapeFocus[i].Step <= step) { found = _tapeFocus[i]; break; }
+        _focusAtCursor = found;
+        UpdateTestPanel();
+    }
+
+    /// <summary>"Fit the view on the primary car" for the REVIEW window: the
+    /// same physical framing the viewer uses (MapRenderer.CarFocusViewM), but
+    /// written straight to the camera — the review pin is re-derived every
+    /// substep, so a SetZoom() there would be undone by the next one.</summary>
+    void FitViewOnCar(double xM, double yM)
+    {
+        var vp = GetTree().Root.GetVisibleRect().Size;
+        double z = Math.Clamp(vp.X / CarFocusViewM, ZoomMin, CrashZoom);
+        _cam.Zoom = new Vector2((float)z, (float)z);
+    }
+
+    /// <summary>Is a pointer inside the instrument strip's band (the bar and its
+    /// curve)? That rectangle is what separates "zoom the timeline" from "zoom
+    /// the map" — and it is the same geometry the strip was built with, so a
+    /// resize cannot move the border out from under the mouse.</summary>
+    /// <summary>Add a control to the instrument strip's own group, so it fades
+    /// and rebuilds WITH the bar. Anything added to the bare layer instead stays
+    /// lit after the instrument has faded (measured on a screenshot: three test
+    /// boundary ticks floating over green with no bar under them).</summary>
+    void AddBarChild(Node child)
+    {
+        if (_barGroup != null) _barGroup.AddChild(child);
+        else _hudLayer?.AddChild(child);
+    }
+
+    bool InBarBand(Vector2 at)
+    {
+        var vp = GetViewport().GetVisibleRect();
+        double barBase = vp.Size.Y - 46.0;
+        return at.Y > barBase - StripPx - 4.0 && at.Y <= vp.Size.Y;
+    }
+
+    /// <summary>Index of the frame carrying a recorded STEP (binary search: the
+    /// tape's step column is monotone but does not have to start at 1, so
+    /// arithmetic on it is wrong for a tape recorded mid-session). Returns the
+    /// first frame at or after that step.</summary>
+    int IndexOfStep(long step)
+    {
+        int lo = 0, hi = _tape.Count - 1;
+        if (hi < 0) return 0;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) / 2;
+            if (_tape[mid].Step < step) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
+    /// <summary>SIM seconds of a tape index — the unit every marker's text is
+    /// quoted in, because the frame number alone cannot be read by an ear.</summary>
+    double SimOf(double step) => step * _tapeDt;
+
+    /// <summary>The decision text a marker stands for ("what happened there").
+    /// The tape carries it at the event's own substep, so the tooltip quotes the
+    /// driver's own line rather than a category.</summary>
+    string DecisionText(long index)
+    {
+        long step = index + 1;      // what the readout and the log quote
+        var fr = _tape[(int)Math.Clamp(index, 0, Math.Max(0, _tape.Count - 1))];
+        var parts = new List<string>();
+        foreach (var ev in fr.Events)
+            parts.Add($"car {ev.Uid}: {ev.Msg}");
+        string who = parts.Count > 0 ? string.Join(" · ", parts.Take(2)) : "decision";
+        return $"{who} · frame {step} · {SimOf(index):F2} s SIM — click to jump there";
+    }
+
+    /// <summary>Where the TESTS begin, drawn at the TOP edge of the bar. One run
+    /// is 26 scenarios in one tape, and without boundaries the bar is a
+    /// continuous curve in which "the crossing test" has no place at all. A tick
+    /// per announced focus note (every scenario announces one), labelled with
+    /// the scenario number where the pixels allow it.</summary>
+    private void ReviewTestTicks(double barX, double barW, double barBase, double curveTop)
+    {
+        if (_tape.Count < 2) return;
+        long hash = (long)(_viewLo * 1e6) * 7919 + (long)(_viewHi * 1e6)
+                    + _tape.Count * 31 + _tapeFocus.Count;
+        if (hash == _testTicksFor) return;
+        _testTicksFor = hash;
+        // A note per scenario number, oldest kept: a re-run of the same label
+        // must not paint a second boundary.
+        var starts = new List<RvFocus>();
+        foreach (var f in _tapeFocus)
+            if (!starts.Exists(x => x.Label == f.Label)) starts.Add(f);
+        double barTop = curveTop - RowHpx - RowInsetPx - 6.0;
+        int used = 0;
+        double lastLabelX = -1e9;
+        foreach (var f in starts)
+        {
+            // A note's STEP is the tape's 1-based substep number; the client's
+            // internal unit is the 0-based INDEX into _tape. Mixing them is a
+            // 60-fold error (measured: a boundary at step 9 landed at 540).
+            double x = BarXOf(IndexOfStep(f.Step));
+            if (x < barX || x > barX + barW) continue;
+            if (used >= _testTickPool.Count)
+            {
+                // In _barGroup, NOT the bare layer: the boundary marks are part
+                // of the instrument, and an element that stays lit while the
+                // strip it belongs to has faded is a leftover from a rebuild
+                // (measured on a screenshot: three floating ticks, no bar).
+                var ln = new Line2D { Width = 1.0f };
+                AddBarChild(ln);
+                _testTickPool.Add(ln);
+            }
+            var line = _testTickPool[used++];
+            // From the very top of the strip down a hand's width: the curve owns
+            // the middle of the band, so a boundary must not read as data.
+            line.Points = new Vector2[]
+            {
+                new Vector2((float)x, (float)(barBase - 2.0)),
+                new Vector2((float)x, (float)(barTop + 2.0)),
+            };
+            line.DefaultColor = new Color(0.55f, 0.85f, 0.95f, 0.55f);
+            // The number only when it will not collide with its neighbour —
+            // 26 ticks across a wide bar would otherwise be white noise.
+            int slotNo = used - 1;
+            while (_testTickLabels.Count <= slotNo)
+            {
+                var lab = new Label { MouseFilter = Control.MouseFilterEnum.Ignore };
+                lab.AddThemeColorOverride("font_color", new Color(0.72f, 0.86f, 0.92f, 0.9f));
+                lab.AddThemeFontSizeOverride("font_size", AxisFontPx);
+                AddBarChild(lab);
+                _testTickLabels.Add(lab);
+            }
+            var tl = _testTickLabels[slotNo];
+            string num = f.Label.Contains("/") ? f.Label.Split('/')[0] : f.Label;
+            if (x - lastLabelX > 46.0 && num.Length > 0 && num.Length <= 4)
+            {
+                tl.Text = num;
+                tl.Visible = true;
+                tl.Position = new Vector2((float)(x + 3.0), (float)barTop - AxisFontPx - 4);
+                lastLabelX = x;
+            }
+            else { tl.Text = ""; tl.Visible = false; }
+        }
+        for (int i = used; i < _testTickPool.Count; i++) _testTickPool[i].Points = new Vector2[0];
+        for (int i = used; i < _testTickLabels.Count; i++) _testTickLabels[i].Visible = false;
+    }
+
+    /// <summary>Hover over the marker lane: show WHAT happened at that mark.
+    /// A 1.5 px hairline with no text is a decoration; the same hairline with a
+    /// tooltip on hover is a table of contents for the run. The hit area is the
+    /// marker's own x range plus <see cref="MarkerHitPadPx"/> on either side, so
+    /// the thin marks are aimable without painting them fatter.</summary>
+    private void ReviewMarkerHover(Vector2 at)
+    {
+        var hit = HitAt(at);
+        if (_tipLabel == null && hit != null)
+        {
+            _tipLabel = new Label
+            {
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+                Visible = false,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+                CustomMinimumSize = new Vector2(320, 0),
+            };
+            _tipLabel.AddThemeColorOverride("font_color", new Color(0.96f, 0.97f, 1.0f));
+            _tipLabel.AddThemeFontSizeOverride("font_size", SlotFontPx);
+            var sb = new StyleBoxFlat
+            {
+                BgColor = new Color(0.04f, 0.06f, 0.10f, 0.94f),
+                BorderColor = new Color(0.55f, 0.8f, 0.95f, 0.9f),
+                BorderWidthLeft = 1, BorderWidthTop = 1,
+                BorderWidthRight = 1, BorderWidthBottom = 1,
+                ContentMarginLeft = 10, ContentMarginRight = 10,
+                ContentMarginTop = 7, ContentMarginBottom = 7,
+            };
+            _tipLabel.AddThemeStyleboxOverride("normal", sb);
+            // Above the bar and inside the fading group: a tooltip for a marker
+            // on an instrument that has faded away must fade with it.
+            if (_barGroup != null) _barGroup.AddChild(_tipLabel);
+            else _hudLayer?.AddChild(_tipLabel);
+        }
+        if (_tipLabel == null) return;
+        string text = hit?.Text ?? "";
+        if (text == _tipShown) { if (text.Length == 0) _tipLabel.Visible = false; return; }
+        _tipShown = text;
+        _tipLabel.Text = text;
+        _tipLabel.Visible = text.Length > 0;
+        if (text.Length > 0)
+        {
+            var vp = GetViewport().GetVisibleRect();
+            _tipLabel.Position = new Vector2(
+                (float)Math.Clamp(at.X - 160.0, 12.0, vp.Size.X - 780.0),
+                (float)(vp.Size.Y - 46.0 - StripPx - 96.0));
+        }
+    }
+
+    private (double X0, double X1, long Step, string Text)? HitAt(Vector2 at)
+    {
+        foreach (var h in _markerHits)
+            if (at.X >= h.X0 && at.X <= h.X1) return h;
+        return null;
+    }
+
+    /// <summary>A click on a marker jumps the cursor to that substep (the padded
+    /// hit list already decided which event was meant).</summary>
+    private bool ReviewMarkerClick(Vector2 at)
+    {
+        var h = HitAt(at);
+        if (h == null) return false;
+        int idx = (int)Math.Clamp(h.Value.Step, 0, Math.Max(0, _tape.Count - 1));
+        _cursor = idx;
+        _playing = false;
+        _tipShown = "";
+        GD.Print($"BAR-MARKER click -> frame {h.Value.Step} ({h.Value.Text})");
+        return true;
+    }
+
+    /// <summary>The TEST panel: what is being watched, and how the run scored
+    /// it. Its content follows the cursor's scenario — the same focus note the
+    /// camera obeys — so scrubbing into the next test turns the page.</summary>
+    private void BuildTestWindow()
+    {
+        if (_testWin != null) return;
+        _testWin = new Window
+        {
+            Title = "test",
+            Transient = true,           // belongs to this window, not to the app
+            Size = new Vector2I(620, 132),   // UpdateTestPanel re-fits it
+        };
+        _testPanelLabel = new Label
+        {
+            Position = new Vector2(10, 8),
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            CustomMinimumSize = new Vector2(560, 0),
+        };
+        _testPanelLabel.AddThemeColorOverride("font_color", new Color(0.93f, 0.95f, 0.99f));
+        _testPanelLabel.AddThemeFontSizeOverride("font_size", SlotFontPx);
+        var sb = new StyleBoxFlat { BgColor = new Color(0.05f, 0.07f, 0.11f, 0.96f) };
+        sb.ContentMarginLeft = sb.ContentMarginRight = 12;
+        sb.ContentMarginTop = sb.ContentMarginBottom = 10;
+        _testPanelLabel.AddThemeStyleboxOverride("normal", sb);
+        _testWin.AddChild(_testPanelLabel);
+        AddChild(_testWin);
+        _testWin.Size = new Vector2I(600, 132);
+    }
+
+    /// <summary>Rewrite the panel when the scenario under the cursor changes —
+    /// not every frame: the text is a paragraph, and re-laying it out at 60 Hz
+    /// is exactly the kind of per-frame churn this client has already been
+    /// burned by.</summary>
+    private void UpdateTestPanel()
+    {
+        if (_testPanelLabel == null) return;
+        var f = _focusAtCursor;
+        string label = f?.Label ?? "";
+        var res = f == null ? default(RvResult?)
+            : _tapeResults.FindLast(r => r.Label == f.Value.Label);
+        string key = $"{label}|{res?.Passed.ToString()}|{res?.Reason}";
+        if (key == _testShown) return;
+        _testShown = key;
+        string head = label.Length > 0
+            ? $"Test {label} · {f?.Scenario}"
+            // Two different nothings, and the operator needs to know which:
+            // a run recorded BEFORE the feature exists (nothing to show, ever)
+            // vs. a cursor parked in the idle time BETWEEN two scenarios
+            // (scroll a little and a test appears).
+            : _tapeFocus.Count > 0
+                ? "Between scenarios — no test at this frame"
+                : "Test (this tape records no scenarios)";
+        string verdict = res == null
+            ? "no verdict recorded for this scenario"
+            : (res.Value.Passed ? "✅ PASSED" : "❌ FAILED") +
+              $" · {res.Value.SimS:F1} s sim · {res.Value.WallS:F1} s wall" +
+              $" · {res.Value.Crossings} centreline crossing(s) · {res.Value.OffRoad} off-road";
+        string why = res != null && !res.Value.Passed && res.Value.Reason.Length > 0
+            ? $"\nreason: {res.Value.Reason}" : "";
+        string desc = f != null && f.Value.Desc.Length > 0 ? $"\n{f.Value.Desc}" : "";
+        string focus = f?.Kind switch
+        {
+            "loc" => $"\nfocus: the PLACE ({f.Value.X:F0}, {f.Value.Y:F0}) m @ {f.Value.ZoomPxM:F0} px/m — no car followed",
+            "named" => $"\nfocus: the named car '{f.Value.Name}'",
+            _ => "\nfocus: the primary car (view fitted)",
+        };
+        _testPanelLabel.Text = head + "\n" + verdict + why + desc + focus;
+        _testWin.Size = new Vector2I(620,
+            (int)Math.Ceiling(_testPanelLabel.GetMinimumSize().Y) + 16);
+        LayoutTestWindow();
+    }
+
+    /// <summary>Where the panel sits: under the readout's own box, above the
+    /// instrument strip, inside the main window — the guard in EnforceWindows
+    /// fixes it if a resize moves anything into it.</summary>
+    private void LayoutTestWindow()
+    {
+        if (_testWin == null) return;
+        var vp = GetViewport().GetVisibleRect();
+        // Top-RIGHT, not under the readout. These are separate OS windows and
+        // nothing orders them: stacked in the top-left column the Test panel
+        // came out buried under the readout and a car slot, i.e. a window whose
+        // whole job is to be read was unreadable (seen on a screenshot). The
+        // right-hand column is free in the reviewer, and the panel is the one
+        // window that is about the RUN rather than about a car.
+        double x = Math.Max(12.0, vp.Size.X - _testWin.Size.X - 12.0);
+        double y = 12.0;
+        // …but STACKED under the minimap, which is the top-right resident (an
+        // embedded Window of its own, 64 px from the top and as tall as the
+        // inset). Right-aligned in the same column, one below the other: two
+        // windows that both claim the corner end up with one unreadable (seen on
+        // a screenshot: the panel's first line behind the minimap's caption).
+        if (_mmWin is { Visible: true })
+            y = Math.Max(y, _mmWin.Position.Y + _mmWin.Size.Y + 10.0);
+        _testWin.Position = new Vector2I((int)x, (int)y);
     }
 
     /// <summary>The car a slot window is following right now (0 = none): the
@@ -1883,6 +2594,8 @@ public partial class MapRenderer : Node2D
             return;
         }
         _mmAsk = ClampViewCentre(pose.Value, "slot centre");
+        _reviewPan = Vector2.Zero;    // CENTRE is dead centre; a drag from here
+                                      // offsets the pin (see ReviewCamera)
         _camPrinted = true;   // the one-shot log line is spent; the button says more
         GD.Print($"SLOT-CENTRE slot {i + 1} · car {uid} -> view on ({_mmAsk.Value.X:F2},{-_mmAsk.Value.Y:F2}) m (sim)");
     }
@@ -1937,9 +2650,31 @@ public partial class MapRenderer : Node2D
         if (_cursor < 0 || _cursor >= _tape.Count) return;
         var fr = _tape[_cursor];
         double cx = 0.0, cy = 0.0;
+        // WHICH of the five levels is driving the view, weakest first (the last
+        // writer wins). "the camera looks right" and "the auto-focus works" are
+        // different claims, and the old log could only answer the first: it
+        // printed "tape-centroid" for a view that a --center was holding, so an
+        // operator could not tell a missing declaration from an override they
+        // had passed themselves (asked 2026-10-24: "looks like the auto-focus
+        // does not work" — it was, and the log could not show why).
+        string src = "cast centroid";
         foreach (var cf in fr.Cars) { cx += cf.X; cy += cf.Y; }
         int n = Math.Max(1, fr.Cars.Count);
         cx /= n; cy /= n;
+        // Which scenario is the cursor inside, and what did IT ask to be shown?
+        // (docs/TESTING.md "Camera focus".) Recomputed here because this is the
+        // one place that runs for every cursor move — scrub, jog, play, seek.
+        FocusAtCursor();
+        // A TEST BOUNDARY RE-CLAIMS THE VIEW. Precedence is per scenario, not
+        // per session: the hand outranks the recording WHILE the operator is
+        // looking at this one moment, and the next scenario is a different
+        // intent — which is exactly what the review is for ("when we switch to
+        // the next test, the focus and follow shall change to that test's focus
+        // and follow item", 2026-10-24). It used to latch: one stray map drag
+        // and the log went `src=declared PLACE '17/27'` → `src=the hand (pin)`
+        // and NEVER back, so from that drag on no scenario's focus or followed
+        // car was ever applied again (measured in a live review session).
+        FocusHandoff();
         // A named car pins the view on IT for the whole scrub - the centroid
         // of a cast drifts with every car that drives by, and the question
         // under review is about one of them.
@@ -1947,6 +2682,7 @@ public partial class MapRenderer : Node2D
         {
             foreach (var cf in fr.Cars)
                 if (cf.Uid == _reviewUid) { cx = cf.X; cy = cf.Y; }
+            src = $"--review-name uid={_reviewUid}";
         }
         // --center is stored in GODOT space (already flipped by W at parse),
         // the tape centroid is in SIM metres - one flip, not two. The log
@@ -1959,34 +2695,91 @@ public partial class MapRenderer : Node2D
         // inset: following is not a place, it is a car.
         var followUid = SlotFollowUid();
         if (followUid != 0L) _mmAsk = null;
+        if (followUid != 0L) src = $"slot FOLLOW uid={followUid}";
+        // The hierarchy of "what the view is on", strongest first:
+        //   1. a slot's FOLLOW toggle (an explicit "stay on THIS car")
+        //   2. the hand (minimap pin / slot CENTRE), as an absolute place
+        //   3. --center / --review-name the operator passed on the command line
+        //   4. WHAT THE SCENARIO DECLARED  ← the run's own intent
+        //   5. the cast's centroid (a tape with no declarations at all)
+        // A declared "loc" focus is deliberately NOT a car: the crossing and the
+        // pass tests are about a place, and following one car out of 50 would
+        // carry the camera away from the story (user decision 2026-10-24).
+        if (followUid == 0L && _mmAsk == null && _overrideCenter == null &&
+            _reviewUid == 0L && _focusAtCursor != null)
+        {
+            var f = _focusAtCursor.Value;
+            if (f.Kind == "loc")
+            {
+                cx = f.X; cy = f.Y;
+                src = $"declared PLACE '{f.Label}' ({f.X:F0},{f.Y:F0}) - no car followed";
+                ApplyFocusZoom(f.ZoomPxM);
+            }
+            else
+            {
+                long wantUid = FocusSubjectUid(f);
+                bool onFrame = false;
+                foreach (var cf in fr.Cars)
+                    if (cf.Uid == wantUid) { cx = cf.X; cy = cf.Y; onFrame = true; }
+                // A subject that has left the cast (removed between phases, or a
+                // name that belongs to a later scenario) must NOT throw the view
+                // back to the fleet centroid mid-scenario: the camera stays where
+                // it last had the car, and says so.
+                if (onFrame) _focusLastPose = (cx, cy);
+                else if (_focusLastPose != null) { cx = _focusLastPose.Value.a; cy = _focusLastPose.Value.b; }
+                // FOLLOW, not just frame: this branch is re-derived for every
+                // substep the cursor moves, so the view rides the car through
+                // the scenario instead of starting on it and drifting off.
+                src = onFrame
+                    ? $"declared {f.Kind} '{f.Label}' FOLLOWING uid={wantUid}"
+                    : $"declared {f.Kind} '{f.Label}' uid={wantUid} not on this frame";
+                ApplyFocusZoom(f.ZoomPxM, () => FitViewOnCar(cx, cy));
+            }
+        }
         var pose = followUid != 0L ? CarPose(followUid) : null;
         if (pose != null)
             _cam.GlobalPosition = pose.Value;
         else if (_mmAsk != null)
         {
+            src = "the hand (pin)";
             // The hand pinned the view on a spot of the map THROUGH the
-            // minimap's inset: an absolute place, so it keeps its meaning
-            // while the tape scrubs and the cast's centroid drifts - and it
-            // already is the whole answer, so the drag offset is not added on
-            // top of it.
-            _cam.GlobalPosition = _mmAsk.Value;
+            // minimap's inset (or a slot's CENTRE button): an absolute place,
+            // so it keeps its meaning while the tape scrubs and the cast's
+            // centroid drifts.
+            //
+            // The pan DOES belong on top of it. It used not to ("the drag
+            // offset is not added"), which made panning die silently: after
+            // one CENTRE press the view obeyed the pin alone, so a grab kept
+            // updating _reviewPan while the camera stayed where it was
+            // (measured 2026-10-24: cam frozen at (1991.43,-1723.27) while
+            // _reviewPan moved to (-273.68, 0), with nothing left to clear the
+            // pin except engaging a follow). The pin is the ANCHOR now and the
+            // hand's offset is relative to it — so the first pixel of a drag
+            // moves the map, and CENTRE still means dead centre (both writers
+            // of _mmAsk reset the offset).
+            _cam.GlobalPosition = _mmAsk.Value + _reviewPan;
         }
         else
         {
             if (_overrideCenter != null)
+            {
                 _cam.GlobalPosition = _overrideCenter.Value;
+                src = "--center (hand)";
+            }
             else
                 _cam.GlobalPosition = W((float)cx, (float)cy);
             _cam.GlobalPosition += _reviewPan;   // the operator's pan, on top
         }
-        // Once per run: the numbers answer "where is the view" honestly, which
-        // a downscaled screenshot cannot.
-        if (!_camPrinted)
+        // Once per CAUSE, not once per run: the answer to "is the recording's
+        // own focus driving the view, and did it change at the test boundary"
+        // is a trace of these lines, and a single startup line cannot show a
+        // switch. The numbers are honest about "where is the view", which a
+        // downscaled screenshot cannot.
+        if (src != _camSrc)
         {
-            _camPrinted = true;
-            GD.Print($"REVIEW-CAM godot=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
-                     $"zoom={_cam.Zoom.X:F1}  view centred on {(_mmAsk != null ? "the hand" : "tape-centroid")} " +
-                     $"({(_mmAsk != null ? _mmAsk.Value : W((float)cx, (float)cy)).X:F2},{(_mmAsk != null ? _mmAsk.Value : W((float)cx, (float)cy)).Y:F2}) " +
+            _camSrc = src;
+            GD.Print($"REVIEW-CAM src={src} godot=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
+                     $"zoom={_cam.Zoom.X:F1} sim=({cx:F2},{cy:F2}) " +
                      $"cars={fr.Cars.Count} frame {fr.Step}");
         }
     }
@@ -2006,6 +2799,16 @@ public partial class ReviewScrubZone : Control
     /// <summary>(fraction of the tape, true while dragging) - wired to
     /// MapRenderer.ReviewSeek.</summary>
     public System.Action<double, bool> Seek;
+    /// <summary>(zoom in?, bar x) — the bar's own wheel zoom, wired to
+    /// MapRenderer.BarZoom. The x is what stays under the cursor while the
+    /// range stretches.</summary>
+    public System.Action<bool, float>? Zoom;
+    /// <summary>() — double-click: back to the whole run.</summary>
+    public System.Action? ZoomReset;
+    /// <summary>(pointer) — hover, for the event markers' tooltip.</summary>
+    public System.Action<Vector2>? Hover;
+    /// <summary>() — click on a padded event marker: jump to its step.</summary>
+    public System.Func<Vector2, bool>? MarkerClick;
 
     private bool _drag;
 
@@ -2021,20 +2824,54 @@ public partial class ReviewScrubZone : Control
         {
             if (m.Pressed)
             {
+                // A click ON an event marker is a JUMP to that moment, not a
+                // seek to the pixel — the markers are the interesting seconds,
+                // and the padded hit area exists so they can be aimed at.
+                if (MarkerClick?.Invoke(G(m.Position)) == true) { AcceptEvent(); return; }
                 _drag = true;
-                Seek?.Invoke(Frac(m.Position.X), true);
+                Seek?.Invoke(TapeFracAt(m.Position.X), true);
                 AcceptEvent();
             }
             else if (_drag)
             {
                 _drag = false;
-                Seek?.Invoke(Frac(m.Position.X), false);
+                Seek?.Invoke(TapeFracAt(m.Position.X), false);
                 AcceptEvent();
             }
         }
-        else if (e is InputEventMouseMotion mm && _drag)
-            Seek?.Invoke(Frac(mm.Position.X), true);
+        else if (e is InputEventMouseButton mw && mw.Pressed &&
+                 (mw.ButtonIndex == MouseButton.WheelUp || mw.ButtonIndex == MouseButton.WheelDown))
+        {
+            // Wheel over the bar = ZOOM THE BAR: stretching the range buys
+            // detail (a decision hairline that was 0.3 px wide becomes 4 px).
+            // The map's zoom is a different question and stays untouched.
+            Zoom?.Invoke(mw.ButtonIndex == MouseButton.WheelUp, mw.Position.X);
+            AcceptEvent();
+        }
+        else if (e is InputEventMouseButton md && md.Pressed &&
+                 md.ButtonIndex == MouseButton.Left && md.DoubleClick)
+        {
+            ZoomReset?.Invoke();
+            AcceptEvent();
+        }
+        else if (e is InputEventMouseMotion mm)
+        {
+            if (_drag) Seek?.Invoke(TapeFracAt(mm.Position.X), true);
+            else Hover?.Invoke(G(mm.Position));
+        }
     }
 
-    private double Frac(float x) => Mathf.Clamp(x / Mathf.Max(1.0f, Size.X), 0.0f, 1.0f);
+    /// <summary>x → fraction of the WHOLE tape, through the bar's current
+    /// zoom range (set by MapRenderer with BarTapeFracAtX).</summary>
+    public System.Func<float, double>? FracAt;
+    private double TapeFracAt(float x) => FracAt?.Invoke(x + Gx) ?? 0.0;
+
+    /// <summary>_GuiInput hands out LOCAL coordinates; the bar's geometry (the
+    /// curve, the marker lane, the boundary ticks) is laid out in the MAIN
+    /// window's space, whose bar starts at x=16. Comparing the two without the
+    /// offset costs exactly that 16 px — enough to make an event marker's padded
+    /// hit area miss the mark you clicked on (measured: a click dead-centre on a
+    /// marker seeked instead of jumping).</summary>
+    float Gx => GetGlobalTransform().Origin.X;
+    private Vector2 G(Vector2 local) => local + new Vector2(Gx, 0f);
 }

@@ -25,13 +25,14 @@ namespace DrivingGame.Sim;
 
 public static class CarCollisions
 {
-    // TEMPORARY diagnostic: DG_R32=1 traces why R32 accepts or rejects a
-    // pair, for the park_block staging where the primary never commits.
-    // Broadphase grid cell size (m). The per-car look-ahead ring is
-    // ceil(LookAheadMaxM / CellSizeM) + 1 = 21 cells wide, the pair
-    // check ring ceil(PairCheckRadiusM / CellSizeM) + 1 = 9. 20 m keeps
-    // both counts small enough that dense traffic stays cheap, while
-    // staying coarse enough that a cell holds few cars.
+    // Broadphase grid cell size (m). With LookAheadMaxM = 300 and
+    // PairCheckRadiusM = 150 (below) the per-car look-ahead ring is
+    // ceil(LookAheadMaxM / CellSizeM) + 1 = 16 cells wide, the pair-check
+    // ring ceil(PairCheckRadiusM / CellSizeM) + 1 = 9. 20 m keeps both
+    // counts small enough that dense traffic stays cheap, while staying
+    // coarse enough that a cell holds few cars. (The ring radii live in
+    // DRIVING_MANEUVERS.md R7 - if you change one of the constants here,
+    // recompute both numbers there.)
     const double CellSizeM = 20.0;
 
     // Forward corridor for avoidance: a car counts as "ahead of me" while
@@ -180,7 +181,7 @@ public static class CarCollisions
     // the car can still EXECUTE, and holding it every tick is what made
     // every rear-end on the 50-car runs look "unavoidable on paper".
     // 5 m/s² ≈ 0.5 g is the service brake a driver actually holds in
-    // traffic (docs/Human Factor Model.md §4 reaction + comfort).
+    // traffic (docs/HUMAN_FACTORS.md §4 reaction + comfort).
     const double ComfortBrakingMps2 = 5.0;
     // NOTE: with ApproachCapMps in play the v1 corridor no longer adds
     // StopMarginM on top - the reaction interval IS the slack the old
@@ -459,7 +460,7 @@ public static class CarCollisions
     static readonly Dictionary<int, (string Key, int Ticks)> _capCandidate = new();
     const int PERSIST_TICKS = 15;   // 0.25 s of sim time at 60 Hz
 
-    // Cap DECISION persistence (docs/Human Factor Model.md §3/§5): while a
+    // Cap DECISION persistence (docs/HUMAN_FACTORS.md §3/§5): while a
     // car's cap reason is absent, the brake decision is HELD for a minimum
     // duration instead of releasing immediately - an immediate release on a
     // boundary situation (both cars slow and close) flutters the cap on/off
@@ -1539,7 +1540,7 @@ public static class CarCollisions
                 // actually moving (clearing the crossing). A standing-still
                 // other car grows the TTC purely because I am braking -
                 // releasing on that is the brake/creep flutter (the TTC
-                // growth is my own action, docs/Human Factor Model.md §3).
+                // growth is my own action, docs/HUMAN_FACTORS.md §3).
                 if (carByUid.TryGetValue(otherUid, out var other) &&
                     other.Speed >= OtherYieldingMinSpeedMps)
                 {

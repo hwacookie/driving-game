@@ -10,7 +10,7 @@ namespace DrivingGame.Sim;
 public abstract record SimCommand;
 
 /// <summary>Teleport: default REPLACES the current car(s) (legacy behavior -
-/// e2e suite, cockpit); Add=true ADDS a fresh car alongside them (parallel
+/// the e2e suite relies on it); Add=true ADDS a fresh car alongside them (parallel
 /// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).
 /// Color (validated against Config.CAR_COLORS at the API layer) overrides
 /// the default uid-based color of the spawned car. Reverse=true spawns the
@@ -64,8 +64,8 @@ public sealed record FlagsCommand(int? Uid,
 /// Uid (omit = primary).</summary>
 public sealed record HazardCommand(bool On, int? Uid) : SimCommand;
 
-/// <summary>Re-point the PRIMARY (followed) car - the /state top level and
-/// the cockpit describe this car. Every teleport re-points it to the newest
+/// <summary>Re-point the PRIMARY (followed) car - the /state top level
+/// describes this car. Every teleport re-points it to the newest
 /// car, so a multi-car scenario that spawned its extras AFTER its own car has
 /// to say which one it is monitoring (POST /follow).</summary>
 public sealed record FollowCommand(int Uid) : SimCommand;
@@ -203,6 +203,55 @@ public sealed class SimEngine
     public long Frame { get; private set; }
     public bool Frozen => _frozen;
     public int? FollowUid => _followUid;
+
+    /// <summary>What the CURRENT scenario asked the window to look at, as
+    /// announced by the suite over POST /focus (docs/TESTING.md "Camera focus
+    /// for the obstruction scenarios"). It is run state, not client state: the
+    /// viewer reads it from /state and re-aims when it changes, and the same
+    /// note is recorded on the tape so the reviewer replays the identical
+    /// framing. A focus of kind "loc" means NO car is followed — the place is
+    /// the subject (user decision 2026-10-24).</summary>
+    public FocusNote? CurrentFocus { get; private set; }
+
+    /// <summary>Verdicts the suite filed for this run, newest last.</summary>
+    public List<TestResultNote> TestResults { get; } = new();
+
+    /// <summary>File the current scenario's camera focus: live for the viewer,
+    /// stamped on the tape for the reviewer.</summary>
+    public void SetFocus(FocusNote note)
+    {
+        CurrentFocus = note with { Step = _simStepsTotal };
+        RunTape.NoteFocus(CurrentFocus.Value);
+    }
+
+    /// <summary>File one scenario's verdict (POST /test_result).</summary>
+    public void NoteTestResult(TestResultNote r)
+    {
+        var withStep = r with { Step = _simStepsTotal };
+        lock (TestResults)
+        {
+            int at = TestResults.FindLastIndex(x => x.Label == withStep.Label);
+            if (at >= 0) TestResults[at] = withStep; else TestResults.Add(withStep);
+        }
+        RunTape.NoteTestResult(withStep);
+    }
+
+    /// <summary>The /state projection of the focus (null when the run never
+    /// declared one — every scenario then means "follow the primary car").</summary>
+    /// <remarks>public: the REST layer answers it in POST /focus.</remarks>
+    public Dictionary<string, object?>? FocusPayload()
+    {
+        var f = CurrentFocus;
+        if (f == null) return null;
+        return new Dictionary<string, object?>
+        {
+            ["kind"] = f.Value.Kind, ["scenario"] = f.Value.Scenario,
+            ["label"] = f.Value.Label, ["desc"] = f.Value.Desc,
+            ["x"] = f.Value.X, ["y"] = f.Value.Y, ["zoom"] = f.Value.ZoomPxM,
+            ["name"] = f.Value.Name, ["uid"] = f.Value.Uid, ["step"] = f.Value.Step,
+            ["name_uid"] = f.Value.NameUid,
+        };
+    }
     public IReadOnlyDictionary<int, Car> Cars => _cars;
 
     public SimEngine(RoadNetwork network, ObstacleManager obstacles)
@@ -1197,7 +1246,7 @@ public sealed class SimEngine
     private void UpdateState(Car? followed, int stepsThisFrame)
     {
         // Multi-car: the top-level fields keep describing the PRIMARY
-        // (followed) car - legacy consumers (e2e suite, cockpit) are
+        // (followed) car - legacy consumers (the e2e suite) are
         // untouched - while `cars` carries ALL cars; the Godot frontend
         // prefers that array.
         var carsPayload = new List<Dictionary<string, object?>>();
@@ -1361,7 +1410,7 @@ public sealed class SimEngine
                 ["crash_episodes"] = car.CrashEpisodes,
                 ["body_corners"] = ObstacleGeometry.PlayerBodyCorners(car)
                     .Select(p => new[] { p.X, p.Y }).ToList(),
-                // Dashboard lamps for the cockpit controller.
+                // Lamps + longitudinal state: what the client's car inspector shows.
                 ["braking"] = car.IsBraking,
                 ["accelerating"] = car.IsAccelerating,
                 ["wrong_side"] = pcs.OnWrongSide,
@@ -1412,6 +1461,21 @@ public sealed class SimEngine
                 ["lane_guard_last"] = LaneGuard.LastUnexplained(),
             };
         }
+
+        // The scenario's camera focus + the verdicts filed so far, added once
+        // for BOTH builders above: a client that follows the focus must see it
+        // whether the map holds one car or fifty (the fleet branch and the
+        // followed-car branch differ in everything else — this is run state,
+        // not car state).
+        state["focus"] = FocusPayload();
+        lock (TestResults)
+            state["test_results"] = TestResults.Select(r => new Dictionary<string, object?>
+            {
+                ["number"] = r.Number, ["label"] = r.Label, ["scenario"] = r.Scenario,
+                ["passed"] = r.Passed, ["reason"] = r.Reason,
+                ["sim_s"] = r.SimS, ["wall_s"] = r.WallS,
+                ["crossings"] = r.Crossings, ["off_road"] = r.OffRoad,
+            }).ToList();
 
         // Merge per key (Python: game_state.update(state)) - keys set by an
         // earlier variant (e.g. 'x' while a car existed) survive.

@@ -14,7 +14,7 @@ namespace DrivingGame.Sim;
 public class RoadSegment
 {
     public int Id;
-    public double X1, Y1, X2, Y2;   // world pixel coords
+    public double X1, Y1, X2, Y2;   // world coords, METRES (x east, y north)
     public string Highway = "";
     /// <summary>Symbolic anchor: "StartNode→EndNode" (assigned by
     /// RoadNetwork.CreateFromParts). Tests and the API address a segment by

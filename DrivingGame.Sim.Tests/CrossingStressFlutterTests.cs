@@ -11,7 +11,7 @@ namespace DrivingGame.Sim.Tests;
 ///
 /// Two tests:
 ///   1. DecisionRate_StaysHuman - the regression test for the cap-persistence
-///      fix (docs/Human Factor Model.md §3/§5): once a car engages the brake,
+///      fix (docs/HUMAN_FACTORS.md §3/§5): once a car engages the brake,
 ///      the brake decision must be held (no "gap clear" < 0.4 s after a
 ///      "brake:"); the old flutter released/re-engaged on 0.08 s cycles
 ///      (~12 decisions/s vs the ~2.5/s human ceiling, doc §1). GREEN.
@@ -77,7 +77,7 @@ public class CrossingStressTests
         Assert.True(minHold >= 0.4,
             $"car {worstCar} released the brake after only {minHold * 1000:F0} ms " +
             $"(decision persistence: the brake must be held ~0.5-1.5 s, " +
-            $"docs/Human Factor Model.md §3) - the cap flutters instead of " +
+            $"docs/HUMAN_FACTORS.md §3) - the cap flutters instead of " +
             $"persisting; log in /tmp/flap_worst_car.txt");
     }
 

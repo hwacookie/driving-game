@@ -202,7 +202,7 @@ public static class GameApi
         });
 
         // Re-point the PRIMARY (followed) car: /state's top level and the
-        // cockpit describe it, and every teleport moves it to the newest
+        // car inspector describe it, and every teleport moves it to the newest
         // car - a multi-car scenario must say which car it monitors.
         app.MapPost("/follow", async (HttpRequest req) =>
         {
@@ -386,6 +386,77 @@ public static class GameApi
             });
         });
 
+        // --- what the window should look at (docs/TESTING.md "Camera focus") ----
+        // The scenario says what it is ABOUT; the sim keeps it as run state and
+        // the tape records it. Two consumers, one declaration: the viewer
+        // re-aims when /state.focus changes, the reviewer replays the same
+        // framing from the file. kind: "car" (the primary car, view fitted),
+        // "named" (that named car of the cast), "loc" (a PLACE - and then no car
+        // is followed at all).
+        app.MapPost("/focus", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            string Str(string k, string d = "") =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String
+                    ? v.GetString()! : d;
+            double Num(string k, double d = 0.0) =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number
+                    ? v.GetDouble() : d;
+            long Lng(string k, long d = 0L) =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number
+                    ? (long)v.GetDouble() : d;
+            var note = new FocusNote(0, Str("kind", "car"),
+                                     Num("x"), Num("y"), Num("zoom"),
+                                     Str("name"), Lng("uid"), Str("label"),
+                                     Str("scenario"), Str("desc"),
+                                     // The uid of the car `name` was given to,
+                                     // when the announcer knows it (the suite
+                                     // does, right after it stages the cast).
+                                     // Names are reused across scenarios, so a
+                                     // name alone cannot address a car on a
+                                     // replay — see FocusNote.NameUid.
+                                     Lng("name_uid"));
+            if (note.Kind is not ("car" or "named" or "loc"))
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = $"unknown focus kind '{note.Kind}'" }, 400);
+            if (note.Kind == "loc" && note.X == 0.0 && note.Y == 0.0)
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "a loc focus needs x and y (metres)" }, 400);
+            engine.SetFocus(note);
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true, ["command"] = "focus",
+                ["focus"] = engine.FocusPayload(),
+            });
+        });
+
+        // The suite's verdict for the scenario that just ended. It already
+        // prints this and writes turning_results.json; the tape needs it too, or
+        // a review of a crashed fleet cannot say what the run thought of it.
+        app.MapPost("/test_result", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            string Str(string k, string d = "") =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String
+                    ? v.GetString()! : d;
+            double Num(string k, double d = 0.0) =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number
+                    ? v.GetDouble() : d;
+            long Lng(string k, long d = 0L) =>
+                data.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number
+                    ? (long)v.GetDouble() : d;
+            bool Bool(string k) => data.TryGetProperty(k, out var v) &&
+                (v.ValueKind == JsonValueKind.True ||
+                 (v.ValueKind == JsonValueKind.Number && v.GetDouble() != 0));
+            var note = new TestResultNote(0, (int)Lng("number"), Str("label"),
+                                          Str("scenario"), Bool("passed"), Str("reason"),
+                                          Num("sim_s"), Num("wall_s"),
+                                          (int)Lng("crossings"), (int)Lng("off_road"));
+            engine.NoteTestResult(note);
+            return Results.Json(new Dictionary<string, object?>
+            { ["ok"] = true, ["command"] = "test_result", ["label"] = note.Label });
+        });
+
         // --- the tape (docs/RECORD_PLAYBACK.md) ---------------------------------
         // Recording is a RUN property, not a per-scenario one: the e2e runner
         // starts it once after the host is up and saves it when the suite
@@ -498,6 +569,13 @@ public static class GameApi
             {
                 ["ok"] = written is not null,
                 ["path"] = written,
+                // A bare ok:false is undiagnosable from the other end of a
+                // socket: `path` is resolved against the SERVER's working
+                // directory, which is not the caller's, so the answer states
+                // the absolute target it tried to write.
+                ["error"] = written is not null ? null
+                    : $"cannot write {System.IO.Path.GetFullPath(path)} " +
+                      $"(server cwd {System.IO.Directory.GetCurrentDirectory()})",
                 ["tape"] = RunTape.StatusPayload(),
             });
         });

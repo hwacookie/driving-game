@@ -168,7 +168,8 @@ public static class Config
     // the rear-axle midpoint, NOT the body centre. Everything visual must be
     // placed relative to that point (a point behind the pivot swings OUT of a
     // turn — drawing wheels symmetric about (x,y) would track wrong).
-    // Proportions from assets/car_sprite.svg: front axle 62/200 of body length
+    // Proportions of the original car sprite (the retired assets/car_sprite.svg;
+    // today's PNGs share the proportions): front axle 62/200 of body length
     // ahead of centre, rear axle 58/200 behind, tyre centres 36/100 of width.
     public static readonly double FRONT_AXLE_OFFSET_M = CAR_LENGTH_M * 62 / 200;   // 1.364 m
     public static readonly double REAR_AXLE_OFFSET_M = CAR_LENGTH_M * 58 / 200;    // 1.276 m

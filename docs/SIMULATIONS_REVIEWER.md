@@ -1,12 +1,64 @@
 # Simulationsreviewer — the review client
 
-Status: **built and in use.** Specified 2026-10-21, implemented in
-`MapRenderer.review.cs` (a second window of the same client), and revised on
-2026-10-22 against an on-screen review list — see *Review-list fixes*
-below. Every decision in this document is a binding user decision; where the
-code has since diverged, the divergence is recorded there. The tape, the
-endpoints and the per-substep fluidity it reads are built — see
-[RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
+> **Status 2026-10-23 (code-verified):** **built and in use.** Specified
+> 2026-10-21, implemented in `MapRenderer.review.cs`, revised 2026-10-22
+> against an on-screen review list. The label format, the flag list and the
+> clipboard behaviour below were re-read from `MapRenderer.review.cs` /
+> `MapRenderer.cs` on 2026-10-23; every decision in this document is a binding
+> user decision, and where the code has since diverged the divergence is named
+> inline. The tape, the endpoints and the per-substep fluidity it reads are
+> built — see [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
+>
+> **Reading order** (sections were appended, not merged): *Controls* →
+> *Readout label* → *Review-list fixes (2026-10-22)* → *One fixed HUD size
+> (2026-10-22)* are current; *Implementation status (2026-10-21)* near the end
+> is the **oldest** state in the file — where it disagrees with the 2026-10-22
+> sections, those win.
+
+## Launching the two windows
+
+Both are the same Godot project; what you pass after `--` decides which window
+appears (`OS.GetCmdlineUserArgs()` in `MapRenderer.cs`).
+
+```bash
+# the Simulationsviewer, HTTP mode against a host on :5001
+"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- --zoom 14
+# the Simulationsviewer, one process (sim embedded + embedded REST API)
+"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
+      --source embedded --map basic --port 5001 --zoom 14
+# the Simulationsreviewer — a second window on a tape. The path is OPTIONAL:
+# without one it opens the newest tape in tests/.
+"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
+      --source embedded --map basic --port 5032 \
+      --review tests/tape_T_240_0_20261022_032831.txt --review-at 3308 --maximized
+```
+
+Use a **free `--port`** for the second window — the embedded API will not bind
+a busy one (`embedded REST API FAILED … Address already in use`), and the
+reviewer then sits on "no connection".
+
+Every flag the client parses (all after `--`):
+
+| flag | meaning |
+|---|---|
+| `--source <http\|embedded>` | state source (default `http` against :5001) |
+| `--map <name>` / `--port <p>` | test map + embedded API port |
+| `--zoom <px/m>` / `--center <x> <y>` | initial scale; pin the camera (metres, x east y north — auto-follow off) |
+| `--focus <name\|role>` | bind the camera to a car by `"name"` from `/teleport`, or by role (`parked`, `slow`) |
+| `--review [path]` | open the **reviewer** instead of the viewer (`NewestTape` in `tests/` when no path) |
+| `--review-at <step>` | start the cursor at that substep |
+| `--review-name <name>` | slot 1 + camera follow the car with that spawn name (from the tape header `names=`) |
+| `--screenshot <path>` / `--delay <s>` | one-shot viewport PNG `--delay` seconds after the map is ready, then quit (never with `--headless`: the dummy renderer has no viewport texture) |
+| `--crash-shot <path>` | one PNG 0.5 s after the crash camera latches |
+| `--run-test <number>` / `--quit-on-test-done` | launch one scenario through `POST /run_test`; close the window when a test run finishes |
+| `--motionlog <path>` | per-frame motion log (the `--test-*` diagnostics read this) |
+| `--test-pan`, `--test-seek <frac>`, `--test-scrub-drag <n>`, `--test-bar-point <x> <y>`, `--test-slot-buttons`, `--test-jog`, `--test-window-out`, `--test-minimap-pan <x> <y>` | scripted interactions, for reproducing a window/HUD defect without a hand on the mouse |
+| `--resize <w> <h>` | grow the window shortly after start — the only scripted way to reproduce "HUD after maximize" |
+| `--test-bar-ui` | scripted probe for the bar's new layers: lands the cursor inside a scenario, zooms the range, hovers and clicks a marker, then prints the tooltip, the Test panel and `focus at cursor` — the deterministic check for boundaries/tooltip/zoom (Godot does not deliver **pushed** wheel or bare-motion events to handlers, so those two go through the same entry points a real event feeds) |
+| `--test-pan-probe` | scripted **pan** probe: the same grab at five window heights, then a slot CENTRE, then the grab again, printing `cam / zoom / _reviewPan / _mmAsk / which pin obeys` around each — the instrument that separated "panning is broken" from "panning is shadowed by the pin" (2026-10-24) |
+
+Godot's **own** options go *before* the `--` (that is where `--fullscreen`
+lives; `scripts/run_e2e.sh --maximized` / `--watch` translates to it).
 
 ## Two clients, one window each
 
@@ -15,8 +67,9 @@ endpoints and the per-substep fluidity it reads are built — see
 | **Simulationsviewer** | the Godot window we have today (`MapRenderer`) | the live sim | rebuilt only when the renderer changes |
 | **Simulationsreviewer** | its own client, its own window | a **tape frame at a cursor** — live or loaded from disk | long-lived; never restarted for a new run |
 
-They are independent. The reviewer holds **no simulation state** — everything
-comes over the API — so a new run is a new tape, not a new process.
+They are independent. The reviewer holds **no simulation state** — it reads
+recorded frames (over the API or from the tape file on disk) and draws them; it
+never re-simulates. A new run is a new tape, not a new process.
 
 ## The one refactor both share
 
@@ -46,6 +99,12 @@ Honest because in replay the endpoints are **adjacent recorded substeps**, so
 every smoothed pose is bracketed by two real ones. In the live view the
 endpoints can be far apart, which is why the same lerp is only an estimate
 there. **Step mode never smooths**, at any ramp speed.
+
+> ⚠ **This promise is currently broken at the head of a fast tape** — open
+> defect 6 in *Review-list fixes*: at 8× a car was drawn **822 substeps stale**
+> while the label said `frame 5752`. The mechanism (bracketing) is right, the
+> cursor-to-picture link is not. Do not read a fast-playback frame as evidence
+> until that is fixed — step mode and 1× are safe.
 
 ## Controls
 
@@ -105,15 +164,150 @@ click.
 | negotiation | **who blocks me** / **whom I block** | the cap key names the other uid (`avoid#1`, `r32#2`, `passage#4`, `sign#C#7`); the reverse is a scan over ≤ 66 cars — free |
 | decisions | the decision list with a cursor marker at the current step | needs the tape (below) |
 
-## The one data gap this exposes
+## The data gap this exposed (closed 2026-10-22)
 
 `Car.Decisions` is capped at **100 entries** and lives in car memory, so a long
 run overwrites its own early history — a scrub to step 200 would show a list
 that no longer contains step 200, and the panel would lie.
 
-**Fix:** record the **decision text at the event steps on the tape**. Decisions
-are rare events, not per-substep data, so this is cheap; the 100-entry cap then
-only protects live memory, and a run loaded from disk keeps its full history.
+**Done:** the decision text is recorded **on the tape** at the event steps
+(`…;~uid=decision text~…`, `RunTape.Save`), exported by `POST /tape/frame` as
+`events[]`, and parsed by the reviewer's tape reader (third format generation).
+The 100-entry cap now only protects live memory; a run loaded from disk keeps
+its full history. See [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
+
+## Per-scenario framing: the recording re-claims the view at every boundary
+
+The review camera's precedence is **per scenario, not per session**:
+
+1. a slot's **follow** toggle (an explicit "stay on THIS car" instrument),
+2. the hand — a map drag, a minimap pin, a slot CENTRE,
+3. `--center` / `--review-name` from the command line,
+4. **what the scenario declared** (`# focus …` on the tape),
+5. the cast centroid (a tape with no declarations).
+
+Crossing a boundary runs `FocusHandoff()`: the hand's pin, its drag-pan and the
+command-line centre are **released**, the declared zoom is applied once, and the
+follow item becomes the new scenario's subject. It used to latch: one stray map
+drag pinned the view for the rest of the session and no later scenario's focus
+or car was ever applied again (measured live: `src=declared PLACE '17/27'` →
+`src=the hand (pin)` → never back). The hand still wins for as long as the
+operator is looking at *that* moment.
+
+Two rules the reports of 2026-10-24 forced into the open:
+
+* **The declared zoom is a framing, applied once at the handoff.** The
+  declaration used to write `_cam.Zoom` on EVERY frame, which is what "zoom in
+  the main window sometimes does not work. I need to zoom in the minimap, and
+  only after that, it also works" describes exactly: a wheel notch was
+  overwritten 16 ms later, and a minimap zoom happens to PIN the view (hand >
+  declaration), which stopped the re-assertion and "unlocked" the map wheel. The
+  subject's POSITION is still re-derived every substep — that is what a follow is.
+* **A drag anchors a pin.** A grab used to add a pan offset while the state
+  still read `FOLLOWING uid=22`, so the picture showed the car 140 px off centre
+  under a label that promised it was centred ("the followed car is NOT in the
+  center of the screen"). Now a drag makes the view the hand's (`src=the hand
+  (pin)`), and "following ⇒ the subject is centred" holds as an invariant until
+  the next boundary hands it back.
+
+`--test-focus-probe` scripts the whole chain — play across a boundary, wheel-zoom
+the map, drag through the real input path — and prints `offCentre=<px>` next to
+`src=`, `pan=`, `mmAsk=`, `zoom=` for every step. While a follow drives the view
+it reads `offCentre=0 px`; a non-zero value appears only once `src` says the hand
+has it.
+
+## The Test panel — what is being watched, and how it ended
+
+One more window (`test`, an OS window like the readout and the three slots). Its
+content follows **the scenario the cursor is inside**, so scrubbing into the next
+test turns the page:
+
+```
+Test 17/27 · park_block_overtake
+✅ PASSED · 10.6 s sim · 2.5 s wall · 2 centreline crossing(s) · 0 off-road
+A parked car blocks the lane - drive around it (R32 overtake: out into the free
+lane, past the obstruction, back to the right)
+focus: the PLACE (100, 275) m @ 26 px/m — no car followed
+```
+
+It sits in the **top-right column, stacked under the minimap** (both are
+transient OS windows of their own, and nothing orders them: parked in the
+top-left they came out buried under the readout and a car slot — a window whose
+whole job is to be read, unreadable).
+
+Two different nothings are named apart, because they call for different actions:
+`Between scenarios — no test at this frame` (scroll a little) versus
+`Test (this tape records no scenarios)` (a run recorded before the feature).
+
+All four lines come from the **tape** (`# focus …` + `# result …`, see
+[RECORD_PLAYBACK.md](RECORD_PLAYBACK.md)) — no host, no log file, no re-run. It
+rewrites only when the scenario or the verdict changes: the text is a paragraph,
+and re-laying it out at 60 Hz is the per-frame churn this client has already been
+burned by. With no declarations on the tape (an older run) it says so rather than
+showing a wrong scenario.
+
+## Scenario boundaries on the bar
+
+A 26-scenario run is ONE curve, and without boundaries "the crossing test" has no
+place on it. The bar now carries **a tick per announced scenario at its top edge**,
+labelled with the scenario number where the pixels allow it (46 px apart minimum —
+26 labels across a wide bar would be white noise):
+
+```
+17 |              18 |                    19 |
+   ── curve ──────────  decision hairlines ──  standstill bands ──
+```
+
+The ticks are **children of the instrument group**, so they fade out with the bar
+and rebuild with it. (They were first added to the bare HUD layer; the screenshot
+showed three ticks floating over grass with no bar under them.)
+
+## Zooming the bar (mouse wheel)
+
+**Wheel over the bar zooms the bar's TIME RANGE** — stretching it, so a decision
+hairline that was 0.3 px wide becomes 4 px and two events 200 substeps apart
+separate. The MAP's zoom is a different question and is untouched: a wheel
+outside the strip still zooms the map.
+
+| gesture | effect |
+|---|---|
+| wheel up over the bar | range ×⅟₁.₃₅ about the pointer (more detail) |
+| wheel down over the bar | range ×1.35 (less) |
+| **double-click** the bar | back to the whole run |
+| minimum range | 1/400 of the run (≈ 1 s of a 43 s tape) |
+
+The point under the cursor stays under the cursor while the range stretches.
+Everything on the bar is drawn through ONE mapping (`BarXOf` / `BarIndexAtX` /
+`BarTapeFracAtX`) — curve, cursor tick, head tick, marker lane, axis ticks,
+boundary ticks and the seek zone — because a zoom that leaves one layer on the
+unzoomed axis points at the wrong second. The axis note names what is on screen
+(`2.4–26.1 s of 43 s sim · 12 substeps/tick · wheel=out, double-click=whole run`),
+and if the cursor has fallen outside the range the readout says which way to go
+instead of letting a clamped tick pretend (`cursor 11352 is RIGHT of this range`).
+
+The curve is also **sampled through the visible range** with a stride of about one
+point per half pixel, so zooming in buys resolution instead of drawing 35 000
+invisible vertices.
+
+## Event markers: tooltip, and a hit area you can actually aim at
+
+The markers (decision hairlines, crash and wrong-side marks, per-car and
+fleet-level standstill bands) now answer **"what happened there"**:
+
+* **Hover** shows a tooltip above the bar with the tape's own decision text, the
+  frame and the sim time — `car 97: brake: [R7] car 83 ahead (gap 25.1 m) · frame
+  21 402 · 356.70 s SIM — click to jump there`.
+* **Click** moves the cursor to that substep (and stops playback).
+* **The hit area is padded `MarkerHitPadPx` = 7 px on either side.** A 1.5 px
+  hairline is correct to *draw* and impossible to *hit*; the picture stays thin and
+  the target grows.
+
+Two subtleties the measurements caught: the hit ranges and the quads are built in
+the **same pass and the same space** (a hit list computed against the unzoomed axis
+would jump to a different second than the mark you clicked), and `_GuiInput`
+reports **window-local** coordinates while the bar is laid out in the main
+window's space — the 16 px difference was exactly enough for a click dead-centre
+on a marker to seek instead of jumping (`Gx`/`G()` add it back).
 
 ## Connection layer (both clients)
 
@@ -141,50 +335,52 @@ Overlay text (English, per the project's language rule):
   one, or every e2e run would shut it down. Never a signal — a SIGTERM pops a
   macOS crash report
 
-## The readout label (binding user decision, 2026-10-21)
+## The readout label (binding user decision, 2026-10-21; format re-read from the code 2026-10-23)
 
-One label, always visible, exact — never smoothed, never an estimate:
-
-Two lines — the first addresses the moment, the second addresses the view.
-Together they make a **screenshot alone** enough to reconstruct everything:
+One label, always visible, exact — never smoothed, never an estimate.
+**Three lines** (`ReviewReadout` in `MapRenderer.review.cs`) that together make
+a **screenshot alone** enough to reconstruct everything — this is the one place
+the format is written down, built from the format strings:
 
 ```
-tape_T_146_17_20261021_202204.txt · frame 743/820 · SIM 12.383 s · ▶ 4× · head 820
-cam  x 98.25  y 275.00  zoom 18 px/m   ·   view: step (exact)   ·   units: meters
+tape_T_240_0_20261022_032831.txt · frame 743 [42/828] · SIM 12.383 s
+cam x 98.25 m  y 275.00 m · zoom 18.0 px/m · view: step (exact substep) · units: meters
+map basic · hash: segs=256 signs=4 … · fluidity 6.93 m/s/car (window 5.00/5.00 s) · ⏸ step
 ```
 
 | part | meaning |
 |---|---|
 | `tape_…txt` | **which run** — and through its header (`map=`, `dt_fixed=`, `steps=`) which map and which clock unit |
-| `frame 743/820` | the **substep index** — the tape's clock, the one number everything else keys on |
+| `frame 743` | the **substep index** — the tape's clock, the one number everything else keys on. It is the tape's own `step`, 1-based like its range |
+| `[42/828]` | cursor position / tape length, so "how far into the run" is readable without a calculator. Both are 1-based, so `frame 1 [1/3768]` cannot be misread as index 0 of 3767 |
 | `SIM 12.383 s` | `frame × dt_fixed` — **sim time, not wall time**, so a `--warp 4` recording and a 1× recording are comparable on the same axis |
-| `▶ 4×` | the current playback mode and rate |
-| `head 820` | the live sim's newest recorded substep — the line the cursor must not pass |
-| `cam x y zoom` | **the reviewer's own camera** — its centre in metres and its scale in px/m |
-| `view: step (exact)` | whether the drawn pose is a real substep or a lerp between two — a pixel-level reading is only honest with this stated |
+| `cam x … m y … m` | the reviewer's **own** camera centre, in **sim** metres (Godot's 2D y grows down, so the label flips it back — the number must be quotable into `/state`) |
+| `zoom … px/m` | the scale of the crop (see below) |
+| `view: step (exact substep)` / `play (lerp between recorded frames)` | whether the drawn pose is a real substep or a blend of two — a pixel-level reading is only honest with this stated |
 | `units: meters` | the project's rule: every coordinate payload declares its unit |
+| `map … · hash: …` | the map the tape was recorded against — a tape and a different network are meaningless together |
+| `fluidity … m/s/car (window w/5.00 s)` | the frame's fleet fluidity **and the window it actually averaged** — at the head of a tape there is no 5 s of history yet, so the window shrinks instead of the number reading 0.00 for a fleet at 49.9 km/h |
+| `▶ 4x` / `⏸ step` | the current playback mode and rate |
+
+The **head of the tape is a tick on the scrub bar, not a number in the label**
+(`_headTick`) — the newest recorded substep is where the grey tick sits, and the
+cursor must not pass it. Putting it in the text would have made one label carry
+two clocks.
 
 The camera line is not decoration. A screenshot is a **crop at a scale**:
 without `x y zoom` there is no way to know which part of the world is shown, and
 no way to convert a painted length back to a real one. With the zoom announced,
-`pixels / zoom = metres` — the pattern `docs/lights_report.md` already uses for
-marking widths. The viewer states its own trail instead: `live head 820 · drawn
-814`, so the 100 ms it takes to hide network jitter is never hidden behind a
-number that looks current.
+`pixels / zoom = metres` — the pattern [lights_report.md](lights_report.md)
+already uses for marking widths.
 
-| part | meaning |
-|---|---|
-| `frame 743` | the **substep index** — the tape's clock, the one number everything else keys on |
-| `/ 828` | the tape length, so the position in the run is readable |
-| `SIM 12.383 s` | `frame × dt_fixed` — **sim time, not wall time**. A tape recorded at `--warp 4` replays at the same sim speed as one recorded at 1×, so this number is comparable across runs |
-| `▶ 4×` | the current playback mode and rate |
-| `head 828` | the live sim's newest recorded substep — the line the cursor must not pass |
+The **viewer** carries no such label: its 100 ms render delay
+(`RenderDelaySec`) is an internal target, visible only in the
+`--motionlog` line (`… _simNow rtClamped renderTarget …`), which is the way to
+measure how far the live picture trails. That asymmetry is deliberate — in the
+reviewer every number on screen describes a file that is not changing.
 
 The **frame number is the address of a screenshot and of a question.** "Frame
 743" identifies one moment in one file; no timestamp rounding, no wall clock.
-The viewer gets the same label for its live head, and states its render delay
-explicitly (`live head 828 · drawn 822`) so the 100 ms it trails is never
-hidden behind a number that looks current.
 
 ## Screenshot of the whole reviewer (binding user decision, 2026-10-21)
 
@@ -195,16 +391,13 @@ panels, the fluidity chart, the scrub bar, the readout label — as one PNG.
 |---|---|
 | name | `review_<tape-name>_f<frame>.png` — e.g. `review_tape_T_145_17_20261021_190356_f743.png` |
 | where | next to the tape it belongs to (`tests/`) |
-| **clipboard** | the button **also copies the PNG to the system clipboard**, so a frame can be dropped into a conversation without a path round-trip |
+| **clipboard** | the button copies the PNG's **path** — text only, see *Clipboard: text only, settled* below. The image itself is NOT on the clipboard (the image clipboard is not reachable from this toolchain) |
 | why the name matters | the image is **self-describing**: the tape file, the frame, and (because the label is inside the shot) the sim time and mode. A screenshot alone can be re-derived later from the tape at that frame |
 
 Godot's own idiom applies: the window's root renders into a texture that is
 saved whole (`--screenshot` in `MapRenderer` already proves the path exists —
 `SavePng` on the viewport texture). Never `--headless` for a shot: the dummy
 renderer has no viewport texture.
-
-Clipboard copy is Godot's own call (`Image.copy_to_clipboard()` on the same
-image that is written to file) — one image, two destinations, no re-render.
 
 ## Why the tape is the better artefact for discussion
 
@@ -320,8 +513,12 @@ Not available in this build: the **image** clipboard. `DisplayServer.ClipboardSe
 takes text only, so the screenshot's path is copied instead and the shot is
 self-describing (name + frame + camera inside the image).
 
-Known intermittent: `park_block_priority` timed out in an earlier batch run before
-the cap side of the clearance relation landed (§7g of `RIGHT_OF_WAY_NEGOTIATION.md`).
+Known intermittent: **#20 `slow_pass_priority`** — the live timeout in every
+full run on record (`T_231`, `T_242`: 240 s of sim, 1.7 m/s per car, never
+reaches the end flag). An earlier batch run also had `park_block_priority`
+(#18) timing out, before the cap side of the clearance relation landed (§7g of
+`RIGHT_OF_WAY_NEGOTIATION.md`); #18 has passed since (17.0 s in `T_242`), so
+do not chase that one. See [TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written).
 
 ## Named selection (2026-10-21)
 

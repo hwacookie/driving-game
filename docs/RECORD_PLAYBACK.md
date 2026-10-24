@@ -1,8 +1,11 @@
 # Record & playback — stepping through a scene
 
-Status: **built 2026-10-21** (sim tape + API; the window scrub is the last
-piece). Binding user decisions: **record every substep**, **keep the log for
-each test run**, size is not a constraint.
+> **Status 2026-10-23 (code-verified):** **built 2026-10-21** — sim tape,
+> endpoints and the scrub window (`MapRenderer.review.cs`) all in use. Payload
+> keys, route verbs and the size figures below were re-read from
+> `DrivingGame.Sim/Tape.cs` (`RunTape`) and `DrivingGame.Api/GameApi.cs`.
+> Binding user decisions: **record every substep**, **keep the log for
+> each test run**, size is not a constraint.
 
 ## Why it exists
 
@@ -22,7 +25,7 @@ simTime = _simStepsTotal * DtFixed
 ```
 
 A slow wall-clock frame runs 2 substeps in one iteration, so `Frame` is not a
-safe index (see `SimEngine.cs:119-124`). Every tape record, every playback
+safe index (see `SimEngine._simStepsTotal`). Every tape record, every playback
 seek and every decision index keys on **`_simStepsTotal`**. `DtFixed` is
 announced in the file header so an offline reader can rebuild the seconds.
 
@@ -47,23 +50,89 @@ list that no longer contains that frame.
 
 Memory: ~100 B/car/step → **66 cars ≈ 24 MB/min**. The user said size is no
 problem; the guard against runaway memory is a generous step cap
-(`Tape.MaxSteps`), not a rolling window — a run is kept whole.
+(`RunTape.MaxSteps` = **200 000 substeps** ≈ 55 min of sim at 60 Hz), not a
+rolling window — a run is kept whole.
+
+**Multiply the two numbers before trusting a long run.** The cap counts
+SUBSTEPS and is shared by the whole fleet, so it bounds duration; the byte
+cost bounds car count. 200 000 substeps × 66 cars × ~100 B ≈ **1.3 GB**: that
+is what a 66-car run that actually reached the cap would have cost, and at the
+cap recording stops with `TAPE FULL at 200000 substeps` rather than growing
+without end. Today's e2e runs (50 cars, ≤ 240 s sim per scenario, one tape per
+run) sit two orders of magnitude below it.
+
+**Retention of the tapes in `tests/`** — the rule the tree actually follows:
+`scripts/run_e2e.sh` saves one tape per run next to its log
+(`tests/tape_T_<nnn>_…txt`); a tape is **kept while it is evidence** (a run
+under review, a crash worth re-watching) and is otherwise a regenerable
+artefact like the log. Nothing prunes them automatically and ~100 are
+committed, which is why `.gitignore` (which ignores `tests/run_test_*.log`)
+and the tree disagree. Untracking them is a repository decision, not a doc fix
+— flagged for the user.
+
+## The run's own annotations: `# focus …` and `# result …`
+
+Two kinds of line sit after the format comment, one per announced scenario.
+They are what makes a tape self-explaining to a person reviewing it days later,
+with no host and no log open:
+
+```
+# focus step=8814 kind=loc x=100.00 y=275.00 zoom=26.00 uid=11 label=17%2F27 scenario=park_block_overtake desc=A%20parked%20car%20blocks%20the%20lane%20-…
+# result step=9462 number=17 label=17%2F27 scenario=park_block_overtake passed=1 reason= sim=10.6 wall=10.6 xng=2 off=0
+```
+
+| field | notes |
+|---|---|
+| `step` | the substep it was announced at — in the file's own **step** column, which does **not** have to start at 1 (a host that was already running records steps from wherever it was). A client reads frames by **index**, so it resolves a step with a lookup (`MapRenderer.IndexOfStep`), never by arithmetic — arithmetic on it is a 60-fold error |
+| `kind` | `car` / `named` / `loc` (see [TESTING.md → Camera focus](TESTING.md#camera-focus-per-test-both-clients-one-declaration)) |
+| `label` | the join key between the two kinds (`"17/27"`); **percent-encoded**, like `scenario` and `desc` (a reason with spaces must stay one token and survive the round trip). It must be the number the SUITE LOOP counts, not one re-derived from the result: `(start_point, direction)` is not unique (`#3`/`#5` are both `tjunction_from_top`/`left`, `#21`/`#24` both `hairpin_exit`/`straight`) and the crossing scenarios file `direction='crossing'` where the table says `straight`. Deriving it collapsed three scenarios onto another's label — so `record_result()` takes `test_no` from the loop |
+| `name_uid` | the car a `named` focus was staged as. Resolution order on replay: `name_uid` > the header's uid→name map > the note's primary `uid` — one function (`MapRenderer.FocusSubjectUid`) so the camera and the diagnostics cannot disagree about which car a note means |
+| `desc`, `reason` | free text, so the reviewer can say what the test was and how it ended |
+
+A run's parity is a grep, not a hope: one `# focus` per executed scenario and one
+`# result` per verdict — **26 and 26** on a full run of the 27 scenarios
+(`fig8_stress` is the one skipped under `--warp`, and it still announces its
+focus, so the boundary shows on the bar as a scenario that did not run) — with
+the two label sets matching one-to-one.
+
+A re-announcement of the same `label` **replaces** the note (a retry must not
+stack a second boundary), and old tapes simply have none: that reads as "no
+declaration" → follow the primary car, never as an error. The reader accepts
+them anywhere in the header block, so a tape saved by an older build still
+loads.
+
+> **`/tape/save` paths are resolved by the SERVER** — its working directory is
+> `DrivingGame.Server/`, not the caller's, so a relative `"path"` lands somewhere
+> nobody meant. A failed write says so in both places now: the HTTP answer carries
+> `error` with the absolute target and the server cwd, and the server log names the
+> exception (`TAPE-SAVE failed for … DirectoryNotFoundException …`). Send an
+> absolute path.
 
 ## Where the work lives — the boundary (binding user decision, 2026-10-21)
 
 **Recording, playback and scrubbing all live in the simulator.** The UI holds
-only the controls. The sim is the single authority for what happened; a client
-never re-simulates and never keeps its own copy of the world.
+only the controls. The sim is the single authority for what happened; **a
+client never re-simulates.** What a client MAY hold is recorded history: the
+review window caches the tape it loaded (that is what makes a run survive the
+host dying, and what `AGENTS.md` prescribes), so the honest boundary is *no
+second model of the car*, not *no data in the client*.
 
-**The playback controls are a separate client of their own** — its own window,
+**The playback controls are a review client of their own** — its own window,
 not an overlay in the map window. Reason (the user's): the map window stays
 clean, and the review client can sit on another screen next to it. So:
 
 | piece | where |
 |---|---|
-| the tape, the frame lookup, the event index | `DrivingGame.Sim/Tape.cs` (the sim) |
+| the tape, the frame lookup, the event index | `DrivingGame.Sim/Tape.cs` (`RunTape`) |
 | the endpoints below | `DrivingGame.Api` |
-| scrub controls (⏸ ⏹ ◀◀ ◀ ▶ ▶▶, a scrub bar, a frame readout) | **a separate review client window**, not `MapRenderer` |
+| scrub controls (⏸ ⏹ ◀◀ ◀ ▶ ▶▶, a scrub bar, a frame readout) | **its own window** — the Simulationsreviewer |
+
+How that window is implemented changed after the decision was written: it is
+`MapRenderer.review.cs`, a `partial` half of the same `MapRenderer` node that
+opens its own `Window`s — not a second executable. What BINDS from the 2026-10-21
+decision is "**its own window, its own controls, never an overlay on the live
+map**", and that holds; "not `MapRenderer`" was the predicted mechanism, and it
+is not what was built. See [SIMULATIONS_REVIEWER.md](SIMULATIONS_REVIEWER.md).
 
 ## API
 
@@ -71,7 +140,7 @@ clean, and the review client can sit on another screen next to it. So:
 |---|---|
 | `POST /tape {}` | start recording (idempotent); answers `{recording, steps, first, last, dt_fixed}` |
 | `POST /tape/clear` | drop the tape (a new run starts a new one) |
-| `GET /tape/frame?step=N` | the recorded frame at substep N (`-1` = last) |
+| `POST /tape/frame {"step": N}` | the recorded frame at substep N (`-1` = last); `ok: false` when the tape does not reach that far |
 | `GET /tape/index` | step range + the steps that carry an event (decision, crash) |
 | `POST /tape/save {"path": …}` | write the whole tape to a text file, one line per substep |
 | `GET /tape/list` | the recorded runs on disk — path, name, bytes, mtime, map, dt, steps (newest first) |
@@ -185,8 +254,6 @@ The **review client** is specified separately:
 see [SIMULATIONS_REVIEWER.md](SIMULATIONS_REVIEWER.md).
 
 ## Gates
-
-
 
 `dotnet build` clean · `dotnet test DrivingGame.Sim.Tests/` at **91 passed /
 2 skipped** · `scripts/run_e2e.sh --warp 4 --tests <relevant>` unchanged ·

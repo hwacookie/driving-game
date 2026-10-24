@@ -1,5 +1,10 @@
 # Units: one dialect — metres
 
+> **Status 2026-10-23 (code-verified):** the greps below were re-run on this
+> tree and still pass. This file is the rule; `AGENTS.md` carries it as a
+> binding project rule, and [REST_API.md](REST_API.md) states the one payload
+> that predates it (`GET /obstacles`, a bare list).
+
 There used to be two length units in the project (world pixels inside the
 sim, metres everywhere else), and that mix was the most common source of
 silent bugs (a car 2× off the road, a halt line twice as wide). It is
@@ -67,11 +72,20 @@ The first list should contain only the boundaries above. A new use of a
 metre value that appears there is either a boundary you are adding or a
 bug.
 
-## Audit results (2026-10-19, verified)
+## Audit results — a PROCEDURE, re-run it, do not trust a snapshot
 
-- `PIXELS_PER_METER` — empty.
+The lists below are what the greps returned on **2026-10-19**; they are an
+example of a clean result, **not a closed set of names**. New screen-frame
+constants appear every time the HUD changes (on 2026-10-23 the client also has
+`WinGapPx`, `WinTitleBarPx`, `ReadoutFontPx`, `StripPx`, … in
+`MapRenderer.cs` / `MapRenderer.review.cs` — all rule-3 legal, none of them
+listed below). Re-run the commands; a hit is only a finding if the value is a
+**physical** length.
+
+- `PIXELS_PER_METER` — empty (re-verified 2026-10-23).
 - `pxPerM`/`PxPerM` — only `DrivingGame.Sim.Tests/RacelineReferenceTests.cs`
-  (the fixture boundary above). The Godot client does not name a scale factor
+  (the fixture boundary above; re-verified 2026-10-23). The Godot client does
+  not name a scale factor
   at all: `Camera2D.zoom` IS px/m and is used directly.
 - leftover `…Px` names (`git ls-files '*.cs' | xargs grep -nE
   "(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*Px([^A-Za-z0-9_]|$)"` minus

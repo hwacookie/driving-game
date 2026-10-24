@@ -46,7 +46,8 @@ poll for the actual condition and stop when it is met:
   is the blind fixed wait whose length guesses at when something "should"
   be done.
 
-The four manual QA scripts in `tests/` already follow this pattern;
+The two manual QA scripts in `tests/` (`light_check.py`, `car_line_check.py`)
+already follow this pattern;
 keep new ones consistent with them.
 
 ## General rule: never do physically impossible things
@@ -68,10 +69,14 @@ This rule may ONLY be violated if the user explicitly asks for it.
 
 The sim and the API speak different length units (see `docs/UNITS.md`).
 Any identifier that holds a length must say which one it holds: `…M`
-for metres, `…Px` for a value that just crossed from metres into the
-sim's own frame, no suffix for plain sim-frame values, and the scale
+for metres, `…Px` for a value that has crossed into a **pixel/screen** frame
+(the client's draw frame - the sim's own frame IS metres, see
+`docs/UNITS.md`), no suffix for plain sim-frame values, and the scale
 factor is always `pxPerM`/`PxPerM` - never `pppm`, `PPPM` or `scale`.
-Every coordinate payload declares `"units": "meters"`. Before touching
+Every coordinate **object** answered by the API declares `"units":
+"meters"` (the one exception predates the rule: `GET /obstacles` answers a
+bare list, metres by convention - `docs/REST_API.md` says so; adding the key
+there would retire the exception). Before touching
 units, grep `pxPerM` - that list IS the set of frame crossings.
 
 ## No pygame compatibility target — Godot idioms win
@@ -160,7 +165,7 @@ console:
 scripts/run_e2e.sh --warp 4                         # the default: visible, ~4x
 scripts/run_e2e.sh                                  # real time (only when asked)
 scripts/run_e2e.sh --no-godot --warp 4              # headless
-scripts/run_e2e.sh --tests corner_left --warp 4     # single scenario
+scripts/run_e2e.sh --tests corner_left_entry --warp 4   # single scenario
 ```
 
 **Default pacing: `--warp 4`.** Any e2e run I start (full suite, subset, or a
@@ -187,8 +192,10 @@ a dead host is a connection state (overlay + backoff re-acquire), and only a
 renderer change forces a rebuild. The reviewer caches its loaded tape client-side
 so a run under review survives the host dying.
 
-Full specification: `docs/SIMULATIONS_REVIEWER.md` (status: specified, not
-implemented). The tape and its endpoints it reads are built: `docs/RECORD_PLAYBACK.md`.
+Full specification: `docs/SIMULATIONS_REVIEWER.md` (status: **built and in
+use** - `MapRenderer.review.cs`, opened with the client's `--review [path]`,
+see the "Launching the two windows" section there). The tape and its endpoints
+it reads are built: `docs/RECORD_PLAYBACK.md`.
 
 ## Two run modes — never mix them (binding user decision, 2026-10-21)
 
@@ -205,12 +212,27 @@ Why the freeze matters: without it the sim is already ticking while the
 scenario is still staging, so the first seconds of the action happen before
 the eye finds the cars — "I'll lose half the action".
 
+Steps 1-4 above are exactly what `scripts/run_e2e.sh --watch` does
+(`--maximized` + `DG_FREEZE_STAGE=1`: stage every car while frozen, poll until
+all uids exist, then unfreeze at the announced pace) — prefer the flag over
+hand-staging, so the procedure and the script cannot drift apart. The manual
+sequence stays right for a live session that the runner does not drive.
+
 **"run the e2e tests"** — the opposite: a **smaller window**, `--warp 4`, and
 get through the named scenarios as fast as possible. Nobody is watching;
 verdicts matter.
 
 **If it is unclear which mode a request means, ASK before running.** Do not
 guess: one loses the spectacle, the other wastes four minutes.
+
+**A scenario aims its own camera** (user decision 2026-10-24): each test declares
+`car` / `named` / `loc` in `SCENARIO_FOCUS`, and both clients honour it - the
+viewer per test off `POST /focus`, the reviewer from the tape. So the `--center` /
+`--zoom` / `--focus-car` of the recipe above are what you type when you want to
+overrule the scenario, not what you owe it. The rule inside the declaration: **if
+a test's focus is not a car, it gets a location and follows no car at all** - and
+the hand outranks both (a drag, a slot toggle, `--center` latches).
+Details: `docs/TESTING.md` ("Camera focus"), `docs/SIMULATIONS_REVIEWER.md`.
 
 When the user asks to run the e2e tests:
 

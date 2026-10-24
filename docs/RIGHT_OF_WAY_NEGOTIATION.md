@@ -1,13 +1,24 @@
 # Right-of-way negotiation — design plan
 
-> **Status 2026-10-20: proposed, not implemented.** Written from the design
-> discussion of 2026-10-20 (see `review_2026-10-20.md` §4/§5 for the measured
-> baseline this rests on). Nothing in this document exists in the code yet
-> except the parts explicitly marked **already there**.
+> **Status 2026-10-23 (code-verified): implemented.** Proposed 2026-10-20
+> (see `docs/reviews/2026-10-20-component-review.md` §4/§5 for the measured
+> baseline this rests on), built 2026-10-21. The subsystem is in the tree:
+> `DrivingGame.Sim/Negotiation.cs` (the resource object, the award,
+> `FlipMargin`, `CostOfWaiting`, `Emergency`), `Car.EmergencyRole`,
+> `Car.CourtesyForUid`/`CourtesyKind` exported in `/state` and rendered as the
+> `bitteschön` cone. **§7b–§7i are the build log** — they are dated entries in
+> the order they happened, appended after §10, so they are read out of order on
+> purpose; a numbered § is design prose, a §7<letter> is "what the measurement
+> said". Baseline numbers quoted there are the suite state **at that date**
+> (scenario numbering changed since — see
+> [TESTING.md §2a](TESTING.md#2a-the-scenario-list-generated-do-not-retype)).
+> §5's rule set is documented where the rules live:
+> [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8 has **R32, R34 and R35**
+> entries since 2026-10-23 (step 1 of §7 was finally executed then).
 >
 > What it supersedes / connects:
-> - **R32** (obstruction pass) — implemented in `CarCollisions.cs` but **has no
->   entry in `docs/DRIVING_MANEUVERS.md` §8**. This document supplies it.
+> - **R32** (obstruction pass) — implemented in `CarCollisions.cs`; the §8
+>   entry this document promised was written 2026-10-23.
 > - **R33** (every centreline crossing is explained) — **implemented** 2026-10-20
 >   in `LaneGuard.cs`. This document states how the corridor and the negotiation
 >   feed it, instead of the three scattered suppressions it replaced.
@@ -221,7 +232,9 @@ and does not publish.
 
 Deliberately ordered so that every number is measured before it is fitted.
 
-1. **Document R32 in §8** (and R26's generalisation). The rule is stated before
+1. **Document R32 in §8** (and R26's generalisation) — **done 2026-10-23**:
+   [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8 now carries R32, R34 and
+   R35. The rule is stated before
    it is built; the code already implements half of it.
 2. **Resource object + key.** `(segment, [s0, s1])`, built from the conflicts the
    pair loop already finds. No auction yet — just the object and its identity.
@@ -542,11 +555,17 @@ design is wrong, not the profile.
 
 ## 10. Verification gates
 
-After each step: `dotnet build` clean (0 errors, 8 pre-existing warnings),
+After each step: `dotnet build` clean (0 errors; the warnings that remain are
+pre-existing nullable-annotation noise — quote the gate as "0 errors", not as a
+fixed warning count, see [TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written)),
 `dotnet test DrivingGame.Sim.Tests/` at **91 passed / 2 skipped**, and
-`scripts/run_e2e.sh --warp 4` — currently **20 of 24**, the four remaining being
-two `park_block_*` timeouts (which step 5 should clear) and the two
-`crossing-stress` crashes from the baseline.
+`scripts/run_e2e.sh --warp 4` — **three known-red** as of 2026-10-23:
+`slow_pass_priority` (#20, timeout), `fig8_xing` (#26, unexplained centreline
+crossing) and `fig8_xing_plain` (#27, contact after flow decay). The counts
+this section carried while the plan was written ("20 of 24", then "17/25")
+are the suite of those dates — the scenario list is
+[TESTING.md §2a](TESTING.md#2a-the-scenario-list-generated-do-not-retype) and
+the current verdict is the baseline block above it.
 
 New assertions this plan should add, in order of the steps:
 
@@ -558,8 +577,6 @@ New assertions this plan should add, in order of the steps:
 - a `park_block_*` scenario reports a `[R32]` decision and reaches its end
   segment
 - no `passage#`/`r32#` award survives a step where its resource is free
-
-Pacey (cool): Design doc written — implementation order, one number to measure.
 
 ## 7g. The cap side of the clearance relation (2026-10-21)
 

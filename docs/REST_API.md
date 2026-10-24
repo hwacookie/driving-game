@@ -1,5 +1,14 @@
 # REST API Documentation
 
+> **Status 2026-10-24 (code-verified):** complete against
+> `DrivingGame.Api/GameApi.cs` — **34 registered handlers over 32 route
+> templates** (`GET`+`POST /run_test`, `GET`/`POST /obstacles`,
+> `DELETE /obstacles/{obId}`), every one of them in the table below. Two were
+> added on 2026-10-24 for the per-test camera focus (`POST /focus`,
+> `POST /test_result`) — see "Camera focus". Route names and payload keys were read from the source,
+> not from an older copy of this file; the record & playback family is
+> summarised here and specified in [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
+
 ## Overview
 
 The game includes an optional REST API for remote control and automated testing. This allows you to:
@@ -14,8 +23,8 @@ The game includes an optional REST API for remote control and automated testing.
 The API is **always on** in both hosts - there is no `--api` flag any more:
 
 ```bash
-DrivingGame.Server --map basic          # console host, REST on 127.0.0.1:5001
-DrivingGame.Server --port 5007          # a free port (e.g. for a screenshot run)
+dotnet run --project DrivingGame.Server -- --map basic   # console host, REST on 127.0.0.1:5001
+dotnet run --project DrivingGame.Server -- --port 5007   # a free port (e.g. for a screenshot run)
 
 # or embedded in the Godot client (one process, sim in-process):
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
@@ -38,11 +47,15 @@ hosts):
 | GET | `/state` | full state of all cars + sim clock + pacing |
 | GET | `/map` | layer-2 geometry export (see the payload below) |
 | GET | `/start_points` | named start points (test maps) |
+| GET | `/segment_names` | the `{name: index}` map of symbolic segment anchors |
+| GET | `/segment/by/{name}` | resolve one anchor by name (400 `ambiguous` + candidates, 404 unknown) |
 | GET | `/segment/{idx}` | one segment's endpoints/length/width/oneway/nodes |
 | GET | `/car/{uid}/decisions` | that car's rule log (events, newest last) |
 | POST | `/control` | sustained keys + one-shot `hazard` |
 | POST | `/reset` | all control inputs false |
 | POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `color`, `reverse`) |
+| POST | `/park` | park an existing car where it stands — the R32 obstruction primitive |
+| POST | `/follow` | re-point the PRIMARY (followed) car at another uid |
 | POST | `/cars` | `clear` / `remove` by uid |
 | POST | `/flags` | per-car green/red test pennants (`red_nav`) |
 | POST | `/label` | per-car HUD text |
@@ -52,7 +65,87 @@ hosts):
 | GET | `/tests` | the numbered scenario list (shells out to the runner) |
 | POST | `/run_test` | launch the external test runner |
 | GET | `/run_test` | status of the running/last test |
-| GET/POST/DELETE | `/obstacles` | list / place / remove static obstacles |
+| GET | `/obstacles` | the placed obstructions (a bare list — see the units note) |
+| POST | `/obstacles` | place one (`type`, `color`, `x`, `y` — or `random`) |
+| DELETE | `/obstacles/{obId}` | remove one by id |
+| POST | `/focus` | what the CURRENT scenario wants the window to look at (a car or a place) |
+| POST | `/test_result` | the suite's verdict for the scenario that just ended (recorded on the tape) |
+| POST | `/tape` | start recording the run's substep tape (idempotent) |
+| POST | `/tape/clear` | drop recorded frames, keep the recorder running |
+| POST | `/tape/frame` | one recorded substep: `{"step": N}`, `-1` = last |
+| GET | `/tape/index` | step range + the steps that carry an event |
+| GET | `/tape/list` | the tapes on disk, newest first (with map + hash) |
+| POST | `/tape/load` | load a saved tape for review (`{"path": …}`) |
+| POST | `/tape/save` | write the tape to a file (`{"path": …}`) |
+
+### Camera focus — `/focus` and `/test_result`
+
+A scenario knows what it is ABOUT. `tests/test_turning.py` declares it in
+`SCENARIO_FOCUS` (keyed by scenario, [TESTING.md → "Camera focus"](TESTING.md#camera-focus-per-test-both-clients-one-declaration)),
+announces it with one `POST /focus` per test, and the sim keeps it as run state
+so **both** consumers get the same answer: the viewer reads `/state.focus` and
+re-aims when it changes; `RunTape` stamps it on the tape so the reviewer
+replays the identical framing from the file alone.
+
+```bash
+# a PLACE (the crossing tests) — and a loc focus means NO car is followed
+curl -s -X POST localhost:5001/focus -H 'Content-Type: application/json' \
+  -d '{"kind":"loc","x":1750,"y":1750,"zoom":26,"label":"26/27",
+       "scenario":"fig8_xing","desc":"Right-of-way crossing WITH signs: 50 cars"}'
+# a named car of the cast (the pass tests)
+curl -s -X POST localhost:5001/focus -H 'Content-Type: application/json' \
+  -d '{"kind":"named","name":"parked_car","zoom":16,"label":"18/27"}'
+# the default: the primary car, view fitted (no x/y/name/zoom needed)
+curl -s -X POST localhost:5001/focus -H 'Content-Type: application/json' -d '{"kind":"car"}'
+```
+
+| field | meaning |
+|---|---|
+| `kind` | `car` (the primary car — `/state`'s followed car), `named` (the car whose spawn name is `name`), `loc` (a place; `x`/`y` in metres) |
+| `x`, `y` | the place, **metres** (`"units": "meters"` applies to `/state.focus` too); required for `kind:"loc"` (400 without) |
+| `zoom` | px/m the client should hold there; `0`/absent for `car` = fit the car (`MapRenderer.CarFocusViewM`, 120 m across) |
+| `name` | the cast name for `kind:"named"` (`POST /teleport {"name": …}`) |
+| `name_uid` | the uid of the car that name was given to. **A role name is not a key** — `parked_car`/`slow_car` recur scenario after scenario, so a replay that resolves by name lands on the wrong car. The suite stages the cast a moment after announcing, so it refines the same `label` with this field (a re-announcement replaces the note) |
+| `uid` | the primary car's uid at the moment of the announcement — for a client with no live `/state` (the reviewer) |
+| `label`, `scenario`, `desc` | `"17/27"`, the scenario key, and its one-line description (the reviewer's Test panel shows them) |
+
+`400` on an unknown `kind` or a `loc` without coordinates; `{"ok":true,
+"focus":{…}}` otherwise, and `/state.focus` carries the same object from the
+next tick (it is `null` while no scenario has announced one, which every client
+reads as "follow the primary car"). An unresolvable declaration (the named road
+is not on this map) is resolved to a car focus by the suite and says so in its
+log — the camera is cosmetic and must never fail a run.
+
+`POST /test_result` files a scenario's verdict:
+
+```bash
+curl -s -X POST localhost:5001/test_result -H 'Content-Type: application/json' \
+  -d '{"number":17,"label":"17/27","scenario":"park_block_overtake",
+       "passed":true,"reason":"","sim_s":10.6,"wall_s":2.5,"crossings":2,"off_road":0}'
+```
+
+| field | meaning |
+|---|---|
+| `number`, `label`, `scenario` | the scenario's place in the list, its `"17/27"` label (the join key against the focus notes) and its start point |
+| `passed`, `reason` | the verdict, and `describe_failure()`'s text for a red one (empty for a green one) |
+| `sim_s`, `wall_s`, `crossings`, `off_road` | the SAME numbers the run's results table prints, from the same dict — so the review panel can never disagree with the log |
+
+Both land in `/state` (`focus`, `test_results`) and on the tape as `# focus …` /
+`# result …` lines ([RECORD_PLAYBACK.md](RECORD_PLAYBACK.md)). Re-announcing the
+same `label` replaces the note instead of stacking a second one.
+
+### The tape family in one paragraph
+
+`POST /tape` starts recording, every substep of every car lands in memory,
+`POST /tape/save` writes it next to the run log. `POST /tape/frame` answers
+**one** recorded substep — pose, blinkers, braking, wrong-side verdict, crash
+count, cap key, plus the frame's `fluidity_mps_per_car`, `moving_share` and
+event texts — and answers `ok: false` (it does not invent a frame) when the
+tape does not reach that step. `/tape/load` reads a file back for review and
+leaves recording OFF, `/tape/list` finds the runs on disk, `/tape/clear` drops
+the frames. Clock = substeps, unit = metres (`"units": "meters"` on the frame
+payload). The format, the limits and the review client that reads them:
+[RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
 
 ### Health Check
 ```bash
@@ -145,11 +238,34 @@ paces on `time` and scales its bounds by `time_warp`. The Godot client
 and the e2e suite do; the visible window at a high warp is a sped-up
 playback, not a smooth one.
 
-**Multi-car (docs/MULTI_CAR_PLAN.md):** several cars can be on the map
-at once. The top-level fields above always describe the PRIMARY car -
-the most recently spawned one - so single-car clients keep working
-unchanged. ALL cars are additionally exported in a `cars` array (empty
-when no car is on the map); the Godot frontend prefers that array:
+**Multi-car — the semantics (binding, and the whole contract):** several cars
+can be on the map at once. These five rules are what every client and every
+test relies on:
+
+1. **`POST /teleport` REPLACES by default** — that is the legacy behaviour the
+   sequential suite depends on. `"add": true` **adds** alongside the existing
+   cars; parallel scenarios opt in explicitly, nothing else changes.
+2. **The PRIMARY (followed) car** is the most recently spawned one, re-pointed
+   by every teleport; `POST /follow {"uid": N}` says so explicitly when a
+   scenario spawned its extras afterwards. **ALL top-level `/state` fields
+   describe the primary car**, so single-car clients keep working untouched.
+   Removing the followed car falls back to the **highest remaining uid**
+   (`SimEngine._followUid = _cars.Keys.Max()`), and no cars at all is the
+   existing `has_car: false` branch.
+3. **Per-car addressing:** `/control`, `/flags`, `/label`, `/toggle` and the
+   hazard command take an optional `"uid"`; omitted = the primary car (legacy).
+4. **Cleanup:** `POST /cars {"action": "clear"}` / `{"action": "remove",
+   "uid": N}`.
+5. **The `/state` shape:** the legacy top-level fields stay **and** a `cars`
+   array is always exported (empty when no car is on the map); the Godot
+   frontend prefers the array automatically.
+
+Cars DO interact now: `CarCollisions` caps speeds and resolves contact per
+substep (the retired plan's "no car–car collisions" decision was superseded
+2026-09-06); `--no-collisions` on the host is the isolation switch.
+
+The top-level fields always describe the PRIMARY car; ALL cars are additionally
+exported in a `cars` array:
 ```json
 "cars": [
   {"car_uid": 1, "x": ..., "y": ..., "heading": ..., "speed_kmh": ...,
@@ -166,7 +282,7 @@ when no car is on the map); the Godot frontend prefers that array:
 `color` names the car's vehicle sprite: `blue`, `silver`, `police`,
 `tan`, `tractor` (Sattelschlepper engine unit), `pickup`, `mixer` -
 assigned deterministically as
-`CAR_COLORS[(uid-1) % 7]` (see `docs/MULTI_CAR_PLAN.md`, sprite section).
+`CAR_COLORS[(uid-1) % 7]`.
 
 Other per-car fields worth knowing:
 

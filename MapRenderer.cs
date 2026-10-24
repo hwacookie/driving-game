@@ -80,6 +80,10 @@ public partial class MapRenderer : Node2D
     private bool _testPan;
     private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
     private bool _testSlotButtons;   // --test-slot-buttons: click a slot's two corner buttons
+    private bool _testPanProbe;      // --test-pan-probe: log a scripted pan, twice
+    private bool _testBarUi;         // --test-bar-ui: wheel-zoom + marker tooltip/click
+    private bool _testFocusProbe;    // --test-focus-probe: review auto-focus + follow trace
+    private bool _dumpAllControls;   // probe-internal: list every Control once
     private bool _testWindowOut;     // --test-window-out: park a window illegally, let the guard answer
     // --quit-on-test-done: exit IN-APP (GetTree().Quit) once a polled test
     // run finishes. Used by scripts/run_e2e.sh so the window never has to
@@ -292,13 +296,30 @@ public partial class MapRenderer : Node2D
     }
     private string _lastTestText = null;
 
+    // --- The scenario's declared camera focus (docs/TESTING.md "Camera focus") --
+    // A test says what it is ABOUT; the window re-aims when that changes.
+    // kind "car"   → the primary car, view fitted (CarFocusViewM across)
+    // kind "named" → that named car of the cast, at the declared zoom
+    // kind "loc"   → a PLACE: no car is followed at all (crossing / pass tests,
+    //                where following one car out of 50 loses the subject)
+    // A focus the OPERATOR gave the client by hand (--center, --zoom, F, a drag)
+    // beats the run's: `_focusManual` latches on the first such input, so an
+    // announced focus cannot undo a deliberate choice mid-run.
+    private string _tFocusLabel = "", _tFocusKind = "car", _tFocusName = "";
+    // The car the scenario STAGED under that role name (focus "name_uid"). The
+    // name alone is not a key: roles are reused from test to test.
+    private long _tFocusNameUid;
+    private double _tFocusX, _tFocusY, _tFocusZoom;
+    private long _tFocusUid;
+    private bool _tFocusManual;
+
     // The view is a CLIENT feature: a Godot Camera2D follows the node of the
     // bound car (engine position smoothing gives the follow lag), and manual
     // pan/zoom takes over until the input stops. The sim has no camera state.
     private ulong _lastManualMs = 0;
     private Vector2 _lastFollowTarget;  // previous follow target (snap rule)
 
-    // Per-car display state from /state (multi-car, docs/MULTI_CAR_PLAN.md):
+    // Per-car display state from /state (multi-car, docs/REST_API.md):
     // color name, blinker/hazard lights, the car's OWN test flags + label.
     private class CarMeta
     {
@@ -368,9 +389,11 @@ public partial class MapRenderer : Node2D
     // trucks were drawn too short in the source photo and are set to real
     // dimensions instead (Zugmaschine ~7.0 m, Betonmischer ~8.4 m,
     // standard truck width 2.5-2.55 m). The renderer stretches each texture
-    // to these sizes; the sim still uses the sedan box for all vehicles -
-    // see "Raceline rework — per-vehicle dimensions" in
-    // docs/C_SHARP_PORT_SPEC.md (TODO, not implemented).
+    // to these sizes; the sim collides with the SAME table (Car.Size ->
+    // Config.VEHICLE_SIZES), so the drawn footprint and the hit box cannot
+    // drift apart. What is still open is per-vehicle TRACK geometry
+    // (wheelbase/steering limits stay sedan-like) - see SPEC.md
+    // "Per-vehicle raceline & kinematics geometry".
     // Per-sprite physical footprint (width × length, metres) - the shared
     // table in Config.VEHICLE_SIZES is the single source of truth (the
     // simulation's collision math uses the same numbers).
@@ -419,7 +442,8 @@ public partial class MapRenderer : Node2D
         _godotGen = ReadGodotGen();   // baseline for the clean-quit check
         // User args after "--": parsed FIRST - the source selection decides
         // how map + state are fetched. --screenshot <path> saves the viewport
-        // a moment after the map is built (parity check vs pygame) and then
+        // a moment after the map is built (the visual check of AGENTS.md
+        // "Screenshots") and then
         // QUITS — screenshot runs are self-terminating, so nothing has to be
         // killed from outside (a SIGTERM kills .NET's exit path into an
         // abort; see 2026-08-31 crash reports). --center <x> <y> and
@@ -434,6 +458,7 @@ public partial class MapRenderer : Node2D
             else if (args[i] == "--center" && i + 2 < args.Length)
             {
                 _overrideCenter = W(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
+                _tFocusManual = true;   // an operator-named view beats the run's
                 // A fixed camera target: never auto-follow a spawned car, so
                 // the view stays on this point (e.g. the crossing) instead of
                 // snapping to the last car. Manual pan/zoom still works.
@@ -452,9 +477,14 @@ public partial class MapRenderer : Node2D
                 else _focusName = fa;   // a NAME the scenario gave the car
                 // The focus car also decides the scale: the crash, close up.
                 _overrideZoom = CrashZoom;
+                // …and the operator, not the scenario, chose it.
+                _tFocusManual = true;
             }
             else if (args[i] == "--zoom" && i + 1 < args.Length)
+            {
                 _overrideZoom = float.Parse(args[i + 1]);
+                _tFocusManual = true;
+            }
             else if (args[i] == "--test-pan")
                 _testPan = true;
             else if (args[i] == "--test-seek" && i + 1 < args.Length)
@@ -487,6 +517,21 @@ public partial class MapRenderer : Node2D
             }
             else if (args[i] == "--test-slot-buttons")
                 _testSlotButtons = true;
+            else if (args[i] == "--test-pan-probe")
+                _testPanProbe = true;
+            else if (args[i] == "--test-focus-probe")
+            {
+                // Dev hook: the review camera's own focus question, scripted.
+                // Three claims to answer without a hand on the mouse:
+                //   1. does a declaration drive the view at all,
+                //   2. does it FOLLOW the car it names (a frame later the view
+                //      must still sit on that car, not on where it started),
+                //   3. does crossing into the next scenario switch both the
+                //      focus and the followed item.
+                _testFocusProbe = true;
+            }
+            else if (args[i] == "--test-bar-ui")
+                _testBarUi = true;
             else if (args[i] == "--test-jog")
                 _testJog = true;
             else if (args[i] == "--test-window-out")
@@ -832,7 +877,11 @@ public partial class MapRenderer : Node2D
                                     // the camera and switch the first back off.
                                     if (_slots.Count < 2 || _slots[1].UidShown <= 0L)
                                     {
-                                        if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                        // Re-assert the framing the panel just
+                                    // described, so the shot shows the SAME
+                                    // instrument state the log line reports.
+                                    ReviewMarkers();
+                                    if (_screenshotPath != null) SaveShot(_screenshotPath);
                                         return;
                                     }
                                     var s2 = _slots[1];
@@ -871,9 +920,526 @@ public partial class MapRenderer : Node2D
                                         {
                                             GD.Print($"SLOT-TEST third follow: slot0 following={s.Following} " +
                                                      $"slot1 following={_slots[1].Following} followed uid={SlotFollowUid()}");
-                                            if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                            // Re-assert the framing the panel just
+                                    // described, so the shot shows the SAME
+                                    // instrument state the log line reports.
+                                    ReviewMarkers();
+                                    if (_screenshotPath != null) SaveShot(_screenshotPath);
                                         };
                                     };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        }
+
+        if (_testPanProbe)
+        {
+            // DIAGNOSTIC ONLY — it changes no state a normal run sees. The
+            // report (2026-10-24): "panning in the main window does not work
+            // reliable". A hand does not say when it broke, so this pushes the
+            // SAME scripted map drag three times through the real input path
+            // and prints the whole view state around each one, with the two UI
+            // actions that plausibly sit between the working and the dead
+            // attempt in between:
+            //   #1 clean            → does the drag move the camera at all?
+            //   centre on a car     → that is CenterViewOnSlot -> _mmAsk
+            //   #2 same drag        → the reported failure, if the cam is stuck
+            //   motion, no button   → a _dragging that never saw its release
+            // It prints WHICH pin the camera obeys, because in review mode the
+            // drag writes an OFFSET the pin adds to — so a pin that wins alone
+            // makes the drag invisible while _reviewPan keeps moving. That is
+            // the difference between "panning is broken" and "panning is
+            // shadowed", and only the log can tell them apart.
+            void Snap(string tag)
+            {
+                var vpS = GetViewport().GetVisibleRect().Size;
+                var mmAsk = _mmAsk == null ? "-" :
+                    $"({_mmAsk.Value.X:F1},{_mmAsk.Value.Y:F1})";
+                GD.Print($"PAN-PROBE {tag}: vp={vpS.X:F0}x{vpS.Y:F0} " +
+                         $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
+                         $"zoom={_cam.Zoom.X:F2} pan=({_reviewPan.X:F2},{_reviewPan.Y:F2}) " +
+                         $"mmAsk={mmAsk} follow={SlotFollowUid()} " +
+                         $"override={(_overrideCenter == null ? "-" : "set")} " +
+                         $"dragging={_dragging} stripDrag={_stripDrag} " +
+                         $"barTop={_barTop:F0} band={_zoneTop:F0}..{_zoneBot:F0} " +
+                         $"obeys={(_review ? (SlotFollowUid() != 0L ? "slot-follow" : _mmAsk != null ? "HAND-PIN(pan ignored)" : "centroid+pan") : "camera direct")}");
+            }
+            // One scripted grab at a FRACTION of the window height, so the
+            // answer is "from which y down does a drag stop being a grab".
+            void DragAt(string tag, double yFrac, double atS)
+            {
+                GetTree().CreateTimer(atS).Timeout += () =>
+                {
+                    var vp = GetViewport().GetVisibleRect().Size;
+                    var p = new Vector2(vp.X * 0.42f, vp.Y * (float)yFrac);
+                    var q = p + new Vector2(120f, 0f);
+                    Snap($"{tag} y={yFrac:F2} before");
+                    // Who sits ON TOP of this point? This build's bindings have
+                    // no Viewport.GuiFindAtPosition, so walk the HUD layer and ask
+                    // each Control the same two questions a press would: is it
+                    // visible, and does it stop the mouse. That names the overlay
+                    // instead of guessing at it.
+                    void Overlays(Vector2 pt)
+                    {
+                        int n = 0;
+                        void Walk(Node node)
+                        {
+                            foreach (var ch in node.GetChildren())
+                            {
+                                if (ch is Control c &&
+                                    (c.GetGlobalRect().HasPoint(pt) ||
+                                     (_dumpAllControls && c.GetMouseFilter() == Control.MouseFilterEnum.Stop)))
+                                {
+                                    n++;
+                                    var over = c.GetGlobalRect().HasPoint(pt);
+                                    GD.Print($"PAN-PROBE   {(over ? "OVER" : "ctrl")} vis={c.IsVisibleInTree()} " +
+                                             $"filter={c.GetMouseFilter()} {c.Name}<{c.GetClass()}> " +
+                                             $"win='{c.GetWindow().Name}' global={c.GetGlobalRect()}");
+                                }
+                                Walk(ch);
+                            }
+                        }
+                        _dumpAllControls = false;   // only the first probe point dumps the lot
+                        Walk(GetTree().Root);
+                        GD.Print($"PAN-PROBE   {(n == 0 ? "no Control stops the mouse here — the map should get the press" : n + " control(s) stop it here")}");
+                    }
+                    _dumpAllControls = tag == "#1";
+                    Overlays(p);
+                    void Push(Vector2 at, bool pressed)
+                    {
+                        GetViewport().PushInput(new InputEventMouseButton
+                        {
+                            Position = at, GlobalPosition = at,
+                            ButtonIndex = MouseButton.Left, Pressed = pressed,
+                        });
+                    }
+                    Push(p, true);
+                    GetTree().CreateTimer(0.05).Timeout += () =>
+                    {
+                        // mid-drag state: is the grab even alive at this y?
+                        GD.Print($"PAN-PROBE {tag} MID-DRAG dragging={_dragging} " +
+                                 $"stripDrag={_stripDrag} pan=({_reviewPan.X:F2},{_reviewPan.Y:F2})");
+                        GetViewport().PushInput(new InputEventMouseMotion
+                        {
+                            Position = q, GlobalPosition = q,
+                            Relative = new Vector2(120f, 0f),
+                            ButtonMask = MouseButtonMask.Left,
+                        });
+                        GetTree().CreateTimer(0.05).Timeout += () =>
+                        {
+                            Push(q, false);
+                            GetTree().CreateTimer(0.12).Timeout += () =>
+                                Snap($"{tag} y={yFrac:F2} after");
+                        };
+                    };
+                };
+            }
+            // The clean sweep: same drag, five heights, nothing else touched.
+            GetTree().CreateTimer(1.45).Timeout += () =>
+            {
+                // Every window this client owns, with its global rect: the drag
+                // points are matched against these by hand in the log.
+                GD.Print($"PAN-PROBE main vp={GetViewport().GetVisibleRect()}");
+                foreach (var n in GetTree().Root.FindChildren("*", "", true, false))
+                    if (n is Window w0 && w0 != GetTree().Root)
+                        GD.Print($"PAN-PROBE WINDOW '{w0.Name}' visible={w0.Visible} " +
+                                 $"pos={w0.Position} size={w0.Size} popup={w0.Popup} " +
+                                 $"parent={w0.GetParent()?.Name}");
+                foreach (var w in System.Linq.Enumerable.Empty<Window>())
+                    GD.Print($"PAN-PROBE window '{w.Name}' visible={w.Visible} " +
+                             $"pos={w.Position} size={w.Size} popup={w.Popup} " +
+                             $"controls={w.GetChildren().OfType<Control>().Count()}" +
+                             (w is Node2D ? " node2d" : ""));
+            };
+            DragAt("#1", 0.20, 1.6);
+            DragAt("#2", 0.35, 2.6);
+            DragAt("#3", 0.52, 3.6);
+            DragAt("#4", 0.70, 4.6);
+            // Then the action the operator does all day: centre the view on a
+            // car (slot's "centre" = the hand-pin), then the SAME drag that
+            // worked above. If _reviewPan moves but the camera does not, the
+            // pan is not broken - it is SHADOWED by the pin that wins.
+            GetTree().CreateTimer(5.6).Timeout += () =>
+            {
+                if (_slots.Count == 0 || _slots[0].UidShown <= 0L)
+                {
+                    var vp = GetViewport().GetVisibleRect().Size;
+                    Vector2 at = new Vector2(vp.X * 0.5f, vp.Y * 0.5f);
+                    if (_review && _cursor >= 0 && _cursor < _tape.Count && _tape[_cursor].Cars.Count > 0)
+                    {
+                        var c0 = _tape[_cursor].Cars[0];
+                        var world = CarPose(c0.Uid);
+                        if (world != null)
+                        {
+                            at = _cam.GetCanvasTransform() * world.Value;
+                            GD.Print($"PAN-PROBE pick uid {c0.Uid}: world " +
+                                     $"({world.Value.X:F1},{world.Value.Y:F1}) -> screen " +
+                                     $"({at.X:F0},{at.Y:F0})");
+                        }
+                    }
+                    GetViewport().PushInput(new InputEventMouseButton
+                    { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left, Pressed = true });
+                    GetViewport().PushInput(new InputEventMouseButton
+                    { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left, Pressed = false });
+                }
+                GetTree().CreateTimer(0.5).Timeout += () =>
+                {
+                    if (_slots.Count == 0 || _slots[0].UidShown <= 0L)
+                    {
+                        GD.Print("PAN-PROBE centre step: no car picked — skipping the centre click");
+                        return;
+                    }
+                    var sq = _slots[0];
+                    var r = sq.CenterBtn.GetGlobalRect();
+                    var c = new Vector2(sq.Win.Position.X + r.Position.X + r.Size.X / 2f,
+                                        sq.Win.Position.Y + r.Position.Y + r.Size.Y / 2f);
+                    GD.Print($"PAN-PROBE clicking slot 1 CENTRE (uid {sq.UidShown}) at ({c.X:F0},{c.Y:F0})");
+                    GetViewport().PushInput(new InputEventMouseButton
+                    { Position = c, GlobalPosition = c, ButtonIndex = MouseButton.Left, Pressed = true });
+                    GetViewport().PushInput(new InputEventMouseButton
+                    { Position = c, GlobalPosition = c, ButtonIndex = MouseButton.Left, Pressed = false });
+                };
+            };
+            DragAt("#5-after-centre", 0.70, 7.0);   // the ONE band no satellite window covers
+            GetTree().CreateTimer(8.2).Timeout += () =>
+            {
+                var vp = GetViewport().GetVisibleRect().Size;
+                Snap("#6 before bare motion");
+                GetViewport().PushInput(new InputEventMouseMotion
+                {
+                    Position = new Vector2(vp.X * 0.42f + 300f, vp.Y * 0.30f),
+                    GlobalPosition = new Vector2(vp.X * 0.42f + 300f, vp.Y * 0.30f),
+                    Relative = new Vector2(300f, 0f),
+                });
+                GetTree().CreateTimer(0.25).Timeout += () =>
+                {
+                    Snap("#6 after bare motion");
+                    if (_screenshotPath != null) SaveShot(_screenshotPath);
+                    GetTree().CreateTimer(0.3).Timeout += () => GetTree().Quit();
+                };
+            };
+        }
+
+        if (_testFocusProbe && _review)
+        {
+            // Everything below reads the tape the reviewer already loaded — no
+            // host, no mouse. "Focus at cursor" is what ReviewCamera aims at.
+            void Trace(string tag)
+            {
+                var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+                var f = _focusAtCursor;
+                long wantUid = FocusSubjectUid(f);       // the SAME resolver
+
+                // THE number that answers "does it follow": the distance between
+                // the view's centre and the focus car's OWN pose (W is the metre
+                // flip only, so this is metres). ~0 = the view rides the car;
+                // growing = it started on the car and drifted off.
+                string carAt = "-", off = "-";
+                foreach (var cf in fr.Cars)
+                    if (cf.Uid == wantUid)
+                    {
+                        var pxCam = _cam.GlobalPosition;
+                        var pxCar = W((float)cf.X, (float)cf.Y);
+                        carAt = $"({cf.X:F2},{cf.Y:F2})";
+                        off = $"{pxCam.DistanceTo(pxCar):F2} m";
+                    }
+                GD.Print($"FOCUS-P {tag}: frame {fr.Step} " +
+                         $"focus={f?.Label ?? "none"}/{f?.Kind ?? "-"} " +
+                         $"uid={wantUid} cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
+                         $"carSim={carAt} offCar={off} zoom={_cam.Zoom.X:F1}");
+            }
+            // A car/named declaration (something to FOLLOW) and the last note in
+            // the tape (a different scenario, so a switch must happen).
+            // A CAST member first ("named"): following a car the scenario NAMED
+            // is the harder case (the uid must come out of the tape's name map),
+            // and #18/#19 exist for exactly that.
+            // RvFocus is a struct, so "first named, else first car" is a scan
+            // into two nullables rather than Find(...) ??.
+            RvFocus? named = null, carFocus = null;
+            foreach (var nf in _tapeFocus)
+            {
+                if (named is null && nf.Kind == "named") named = nf;
+                if (carFocus is null && nf.Kind == "car") carFocus = nf;
+            }
+            RvFocus? carNote = named ?? carFocus;
+            GetTree().CreateTimer(1.2).Timeout += () =>
+            {
+                if (carNote == null)
+                {
+                    GD.Print("FOCUS-P: this tape declares no car focus - nothing to follow");
+                    GetTree().Quit();
+                    return;
+                }
+                _cursor = Math.Clamp(IndexOfStep(carNote.Value.Step) + 60, 0, _tape.Count - 1);
+                ReviewCamera();
+                Trace($"in '{carNote.Value.Label}' ({carNote.Value.Kind}) start");
+                GD.Print($"FOCUS-P names on tape: {string.Join(",", _tapeNames.Select(kv => $"{kv.Key}:{kv.Value}").Take(6))}");
+            };
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                // 4 s of sim later: FOLLOWING means the view moved with the car.
+                _cursor = Math.Clamp(_cursor + 240, 0, _tape.Count - 1);
+                ReviewCamera();
+                Trace("same test, +240 substeps");
+            };
+            // PLAYBACK, not a seek: the user's report was "when PLAYBACK reaches
+            // a new test" (2026-10-24), and a probe that only moves _cursor by
+            // hand cannot see what a real ▶ does on the way. So: park just BEFORE
+            // a boundary, press the real play button, and print the whole
+            // precedence guard every half second while the cursor crosses it.
+            GetTree().CreateTimer(3.4).Timeout += () =>
+            {
+                // Independent of the earlier steps (which leave the cursor at the
+                // END of the tape): park just before the boundary of the note we
+                // picked to follow, then let ▶ walk across it on its own.
+                if (carNote == null) return;
+                var nx = carNote.Value;
+                _cursor = Math.Clamp(IndexOfStep(nx.Step) - 60, 0, _tape.Count - 1);
+                GD.Print($"FOCUS-P PLAY: crossing into '{nx.Label}' ({nx.Kind}) at step {nx.Step}");
+                void Guard(string tag)
+                {
+                    var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+                    var f = _focusAtCursor;
+                    long wantUid = FocusSubjectUid(f);   // the SAME resolver
+
+                    // "the followed car is NOT in the center of the screen" is a
+                    // measurement, not an impression: distance from the view's
+                    // centre to the subject, in metres, next to everything that
+                    // could account for it (a pin, a pan, a zoom anchored at the
+                    // pointer, a slot take-over).
+                    string off = "no-subject-on-frame";
+                    foreach (var cf in fr.Cars)
+                        if (cf.Uid == wantUid)
+                            off = $"{_cam.GlobalPosition.DistanceTo(W((float)cf.X, (float)cf.Y)) * Math.Max(1e-6, _cam.Zoom.X):F0} px " +
+                                  $"({(cf.X - _cam.GlobalPosition.X):+#0.00;-#0.00}, " +
+                                  $"{(cf.Y + _cam.GlobalPosition.Y):+#0.00;-#0.00}) m";
+                    GD.Print($"FOCUS-P {tag}: step={fr.Step} lbl={f?.Label ?? "-"} " +
+                             $"kind={f?.Kind ?? "-"} wantUid={wantUid} offCentre={off} " +
+                             $"zoom={_cam.Zoom.X:F1} src={_camSrc} " +
+                             $"pan=({_reviewPan.X:F0},{_reviewPan.Y:F0}) " +
+                             $"mmAsk={(_mmAsk == null ? "null" : "PIN")} " +
+                             $"center={(_overrideCenter == null ? "null" : "SET")} " +
+                             $"slotFollow={SlotFollowUid()} playing={_playing}");
+                }
+                Guard("before");
+                ReviewButton("play");
+                for (int sNo = 1; sNo <= 8; sNo++)
+                {
+                    int n = sNo;
+                    // Half-way through, zoom the MAP the way the wheel does
+                    // (anchored at a pointer in the middle of the screen) — the
+                    // report pairs the two symptoms, so the trace has to show
+                    // whether an anchored zoom is what moves the subject off
+                    // the centre and whether the declaration now leaves it alone.
+                    GetTree().CreateTimer(3.4 + n * 0.5).Timeout += () =>
+                    {
+                        if (n == 4)
+                        {
+                            var vpZ = GetViewport().GetVisibleRect().Size;
+                            ZoomBy(ZoomStep, new Vector2(vpZ.X * 0.5f, vpZ.Y * 0.42f));
+                            GD.Print("FOCUS-P (zoomed the map — the declaration must now leave the zoom alone)");
+                        }
+                        // A DRAG through the real input path: it must ANCHOR a
+                        // pin (so the view is honestly the hand's, and a view
+                        // that says FOLLOWING is always centred), and the next
+                        // test boundary must take it back.
+                        if (n == 6)
+                        {
+                            var vpD = GetViewport().GetVisibleRect().Size;
+                            var at = new Vector2(vpD.X * 0.45f, vpD.Y * 0.40f);
+                            var to = new Vector2(at.X + 140f, at.Y);
+                            GetViewport().PushInput(new InputEventMouseButton {
+                                Position = at, GlobalPosition = at,
+                                ButtonIndex = MouseButton.Left, Pressed = true });
+                            GetViewport().PushInput(new InputEventMouseMotion {
+                                Position = to, GlobalPosition = to,
+                                ButtonMask = MouseButtonMask.Left });
+                            GetViewport().PushInput(new InputEventMouseButton {
+                                Position = to, GlobalPosition = to,
+                                ButtonIndex = MouseButton.Left, Pressed = false });
+                            GD.Print("FOCUS-P (dragged the map through the input path)");
+                        }
+                        Guard($"t+{n * 0.5:F1}s");
+                        // Keep playing across the boundary: the recording must
+                        // re-claim the view from the hand on its own.
+                        if (n == 8)
+                        {
+                            var nxN = _tapeFocus.FindIndex(m => m.Step > _tape[_cursor].Step + 40);
+                            if (nxN >= 0)
+                            {
+                                var t = _tapeFocus[nxN];
+                                // Park 40 substeps (0.7 s) before the boundary and
+                                // let ▶ cross it: waiting out the real distance at
+                                // 1x would be 16 s of probe for one log line.
+                                int steps = IndexOfStep(t.Step) + 40 - _cursor;
+                                _cursor = Math.Clamp(IndexOfStep(t.Step) - 40, 0, _tape.Count - 1);
+                                GD.Print($"FOCUS-P handoff: was {steps} substeps from " +
+                                         $"the boundary of '{t.Label}' ({t.Kind}); parked at " +
+                                         $"step {_tape[_cursor].Step} with the hand holding " +
+                                         $"a pin={_mmAsk != null}, playing across it now");
+                                for (int k = 1; k <= 6; k++)
+                                {
+                                    int kk = k;
+                                    GetTree().CreateTimer(7.6 + kk * 1.2).Timeout += () =>
+                                    {
+                                        Guard($"handoff+{kk * 1.2:F1}s");
+                                        if (kk == 6)
+                                        {
+                                            if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                            GetTree().Quit();
+                                        }
+                                    };
+                                }
+                            }
+                            else
+                            {
+                                if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                GetTree().Quit();
+                            }
+                        }
+                    };
+                }
+                // (the handoff stage above owns the exit when there is a
+                // boundary left to cross)
+            };
+            GetTree().CreateTimer(2.8).Timeout += () =>
+            {
+                var last = _tapeFocus[^1];
+                _cursor = Math.Clamp(IndexOfStep(last.Step) + 30, 0, _tape.Count - 1);
+                ReviewCamera();
+                Trace($"into '{last.Label}' ({last.Kind})");
+            };
+        }
+
+        if (_testBarUi)
+        {
+            // DIAGNOSTIC: the scrub bar's new zoom and its event markers,
+            // pushed through the real input path. (1) wheel in / in / out must
+            // keep the point under the cursor fixed and must never narrow the
+            // range below one notch of detail; (2) hovering an event marker must
+            // produce its tooltip text; (3) clicking it must move the cursor to
+            // THAT substep, not to the pixel's fraction.
+            GetTree().CreateTimer(1.8).Timeout += () =>
+            {
+                if (_scrubZone == null || _tape.Count < 2) { GD.Print("BAR-UI no tape/bar"); return; }
+                var vp = GetViewport().GetVisibleRect().Size;
+                float x = (float)(vp.X * 0.5);
+                // The instrument FADES while the hand is elsewhere, and a hidden
+                // control receives no input at all — so the probe pins the
+                // pointer inside the band first, exactly what --test-bar-point
+                // exists for. Without it every pushed event here was dropped and
+                // the bar looked dead while it was only asleep.
+                if (_testBarPoint == Vector2.Zero)
+                    _testBarPoint = new Vector2(vp.X * 0.5f, vp.Y - 76.0f);
+                // The band's y comes from the BAR's own geometry, not from
+                // _zoneTop/_zoneBot: while the instrument has faded, those hold
+                // the "no band" sentinel (1e9) and a click pushed there hits
+                // nothing at all (measured: the probe reported zoomed=False).
+                float y = (float)(vp.Y - 46.0 - 30.0);
+                GetViewport().PushInput(new InputEventMouseMotion
+                { Position = new Vector2(x, y), GlobalPosition = new Vector2(x, y) });
+                void Wheel(bool up) => GetViewport().PushInput(new InputEventMouseButton
+                {
+                    Position = new Vector2(x, y), GlobalPosition = new Vector2(x, y),
+                    ButtonIndex = up ? MouseButton.WheelUp : MouseButton.WheelDown,
+                    Pressed = true,
+                });
+                // Land INSIDE a scenario first: the head of a tape recorded
+                // mid-session belongs to no test at all, and "which test is this"
+                // is then legitimately empty.
+                if (_tapeFocus.Count > 0)
+                {
+                    _cursor = Math.Clamp(IndexOfStep(_tapeFocus[0].Step) + 5, 0, _tape.Count - 1);
+                    GD.Print($"BAR-UI cursor into test '{_tapeFocus[0].Label}' at " +
+                             $"index {_cursor} (step {_tape[_cursor].Step})");
+                }
+                GD.Print($"BAR-UI start range {_viewLo * (_tape.Count - 1):F0}.." +
+                         $"{_viewHi * (_tape.Count - 1):F0} of {_tape.Count - 1} " +
+                         $"· cursor {_tape[_cursor].Step}");
+                GetTree().CreateTimer(0.2).Timeout += () =>
+                {
+                    Wheel(true);
+                    GetTree().CreateTimer(0.2).Timeout += () => Wheel(true);
+                    GetTree().CreateTimer(0.2).Timeout += () => Wheel(false);
+                    GetTree().CreateTimer(0.3).Timeout += () =>
+                    {
+                        GD.Print($"BAR-UI after 2 in + 1 out: range " +
+                                 $"{_viewLo * (_tape.Count - 1):F0}..{_viewHi * (_tape.Count - 1):F0} " +
+                                 $"zoomed={_barZoomed} · ticks: " +
+                                 $"{string.Join(",", _tickSim.Select(t => t.ToString("F1")))} s");
+                        // The first marker in the hit list, hovered then clicked.
+                        GD.Print($"BAR-UI hits now {_markerHits.Count} " +
+                                 $"selected={_selected.Count} zoneRect={_scrubZone.GetGlobalRect()} " +
+                                 $"barVisible={_bar?.Visible} tip={_tipLabel != null}");
+                        if (_markerHits.Count == 0)
+                        {
+                            GD.Print("BAR-UI no marker hits (nothing selected?)");
+                            GetTree().CreateTimer(0.2).Timeout += () => GetTree().Quit();
+                            return;
+                        }
+                        var h = _markerHits[0];
+                        float mx = (float)((h.X0 + h.X1) / 2.0);
+                        GD.Print($"BAR-UI marker at x {h.X0:F0}..{h.X1:F0} step {h.Step}: {h.Text}");
+                        GetViewport().PushInput(new InputEventMouseMotion
+                        {
+                            Position = new Vector2(mx, y), GlobalPosition = new Vector2(mx, y),
+                        });
+                        GetTree().CreateTimer(0.2).Timeout += () =>
+                        {
+                            // Wheel and bare motion are NOT delivered to handlers by
+                        // PushInput in this build (measured: the button events
+                        // arrive, these never do), so the two features that rest
+                        // on them are exercised by calling the SAME entry points
+                        // the real events feed, and a screenshot shows the result.
+                        BarZoom(true, (float)(_markerHits[0].X0 + 4));
+                        BarZoom(true, (float)(_markerHits[0].X0 + 4));
+                        BarZoom(false, (float)(_markerHits[0].X0 + 4));
+                        GD.Print($"BAR-UI after 2 in + 1 out (direct): range " +
+                                 $"{_viewLo * (_tape.Count - 1):F0}..{_viewHi * (_tape.Count - 1):F0} " +
+                                 $"zoomed={_barZoomed}");
+                        ReviewMarkerHover(new Vector2(mx, y));
+                        GD.Print($"BAR-UI tooltip visible={_tipLabel?.Visible} " +
+                                     $"text='{_tipLabel?.Text}'");
+                            GetViewport().PushInput(new InputEventMouseButton
+                            {
+                                Position = new Vector2(mx, y), GlobalPosition = new Vector2(mx, y),
+                                ButtonIndex = MouseButton.Left, Pressed = true,
+                            });
+                            GetTree().CreateTimer(0.2).Timeout += () =>
+                            {
+                                GD.Print($"BAR-UI click -> frame {_tape[_cursor].Step} " +
+                                         $"(wanted {h.Step}) cursorOffView={_cursorOffView}");
+                                GetViewport().PushInput(new InputEventMouseButton
+                                {
+                                    Position = new Vector2(mx, y), GlobalPosition = new Vector2(mx, y),
+                                    ButtonIndex = MouseButton.Left, Pressed = false,
+                                });
+                                GetTree().CreateTimer(0.3).Timeout += () =>
+                                {
+                                    // Back INSIDE a scenario, so the Test panel
+                                    // has something to say (the click above put
+                                    // the cursor before the first note).
+                                    _cursor = Math.Clamp(IndexOfStep(_tapeFocus[0].Step) + 30,
+                                                         0, _tape.Count - 1);
+                                    FocusAtCursor();
+                                    // The panel is refreshed on the frame tick;
+                                    // ask it now, so the probe reports the panel
+                                    // for THIS cursor instead of whatever the
+                                    // last frame happened to show.
+                                    UpdateTestPanel();
+                                    GD.Print($"BAR-UI test panel:\n{_testPanelLabel?.Text}");
+                                    GD.Print($"BAR-UI focus at cursor: label='{_focusAtCursor?.Label}' " +
+                                             $"kind={_focusAtCursor?.Kind} " +
+                                             $"boundaries={_tapeFocus.Count} results={_tapeResults.Count}");
+                                    // Re-assert the framing the panel just
+                                    // described, so the shot shows the SAME
+                                    // instrument state the log line reports.
+                                    ReviewMarkers();
+                                    if (_screenshotPath != null) SaveShot(_screenshotPath);
+                                    GetTree().Quit();
                                 };
                             };
                         };
@@ -1442,7 +2008,16 @@ public partial class MapRenderer : Node2D
                 // hand's absolute point is remembered and applied by
                 // ReviewCamera - writing it to the camera here loses it one
                 // frame later (measured: (1399.7,-837.8) -> (775.9,-101.5)).
+                //
+                // The pan offset starts over here: the handle names an
+                // ABSOLUTE place, and that is what must be centred - a stale
+                // offset from an earlier drag would quietly move the spot the
+                // hand just pointed at (and ReviewCamera now adds the pan to
+                // the pin, so it has to be zeroed by whoever sets the pin).
+            {
                 _mmAsk = want;
+                _reviewPan = Vector2.Zero;
+            }
             else
                 _cam.GlobalPosition = want;
             _lastManualMs = Time.GetTicksMsec();    // the hand owns the view
@@ -1807,7 +2382,25 @@ public partial class MapRenderer : Node2D
 
     public override void _Input(InputEvent e)
     {
+        // DIAGNOSTIC (--test-pan-probe): what the handler is actually handed,
+        // before anything can decline it.
+        if (_testPanProbe && (e is InputEventMouseButton || e is InputEventMouseMotion))
+        {
+            string what = e is InputEventMouseButton mb0
+                ? $"button {mb0.ButtonIndex} pressed={mb0.Pressed}"
+                : $"motion mask={((InputEventMouseMotion)e).ButtonMask}";
+            var pos = e is InputEventMouseButton mb1 ? mb1.Position
+                    : ((InputEventMouseMotion)e).Position;
+            var glb = e is InputEventMouseButton mb2 ? mb2.GlobalPosition
+                    : ((InputEventMouseMotion)e).GlobalPosition;
+            GD.Print($"PAN-INPUT {what} pos=({pos.X:F0},{pos.Y:F0}) " +
+                     $"global=({glb.X:F0},{glb.Y:F0}) " +
+                     $"review={_review} dragging={_dragging} stripDrag={_stripDrag} barTop={_barTop:F0}");
+        }
         if (_review) ReviewInput(e);
+        if (_testPanProbe && e is not InputEventKey && _review)
+            GD.Print($"PAN-INPUT   after ReviewInput: dragging={_dragging} " +
+                     $"stripDrag={_stripDrag} pan=({_reviewPan.X:F1},{_reviewPan.Y:F1})");
         if (e is InputEventKey k)
         {
             // NOTE: Key.A.ToString() is "A", not "KeyA" — match on the enum.
@@ -1836,14 +2429,20 @@ public partial class MapRenderer : Node2D
                 }
                 else if (k.Keycode == Key.F)     // toggle follow
                 {
-                    if (_followUid.HasValue) { _followUid = null; _autoFollow = false; }
+                    if (_followUid.HasValue) { _followUid = null; _autoFollow = false; _tFocusManual = true; }
                     else if (_carNodes.Count > 0) _followUid = _carNodes.Keys.Min();
                 }
             }
         }
         else if (e is InputEventMouseButton mb)
         {
-            if (mb.ButtonIndex == MouseButton.WheelUp && mb.Pressed)
+            if (_barAteWheel)
+            {
+                // Review mode: the bar already took this wheel notch for its own
+                // time range. One event, one meaning.
+                _barAteWheel = false;
+            }
+            else if (mb.ButtonIndex == MouseButton.WheelUp && mb.Pressed)
                 ZoomBy(ZoomStep, mb.Position);
             else if (mb.ButtonIndex == MouseButton.WheelDown && mb.Pressed)
                 ZoomBy(1f / ZoomStep, mb.Position);
@@ -1862,6 +2461,11 @@ public partial class MapRenderer : Node2D
                 // the car pick, so "over the bar" means one thing to both the
                 // pick and the grab - and the drag keeps its full length even
                 // when it started at the strip's edge.
+                if (_testPanProbe)
+                    GD.Print($"PAN-INPUT   left-button gate: y={mb.Position.Y:F0} vs barTop-6={_barTop - 6:F0} " +
+                             $"stripDrag={_stripDrag} -> " +
+                             ((_review && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
+                              ? "STRIP owns it, no grab" : "grab starts"));
                 if (_review && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
                 {
                     _stripDrag = mb.Pressed;      // the strip owns it, alone
@@ -1873,9 +2477,33 @@ public partial class MapRenderer : Node2D
                     // Drag the map with the left button (same as pygame).
                     _dragging = mb.Pressed;
                     if (mb.Pressed) _lastManualMs = Time.GetTicksMsec();
+                    // A hand that grabs the map has an opinion; from then on
+                    // the run's declared focus does not re-aim the window
+                    // (docs/TESTING.md "Camera focus"). --focus / --center set
+                    // the same latch, so there is one rule: the operator wins.
+                    if (mb.Pressed && !_review) _tFocusManual = true;
                     _dragStartMouse = mb.Position;
                     _dragStartCam = ClampViewCentre(_cam.GlobalPosition);
                     _dragStartPan = _reviewPan;
+                    // IN REVIEW MODE a grab ANCHORS a pin, it does not just add
+                    // an offset. Without the anchor the recording kept
+                    // "FOLLOWING uid=22" while the pan pushed the view away from
+                    // that car — the reported "the map follows the car, but the
+                    // followed car is NOT in the center of the screen"
+                    // (2026-10-24): the state said follow, the pixels said
+                    // something else. A pin makes the hand honest — the view is
+                    // the hand's for THIS scenario (src becomes "the hand (pin)")
+                    // and the recording re-claims it at the next test boundary
+                    // (FocusHandoff).
+                    if (mb.Pressed && _review && _mmAsk == null)
+                    {
+                        _mmAsk = _cam.GlobalPosition;
+                        _reviewPan = Vector2.Zero;
+                        _dragStartPan = Vector2.Zero;
+                        GD.Print($"REVIEW-DRAG pinning at ({_mmAsk.Value.X:F1},{_mmAsk.Value.Y:F1}) " +
+                                 $"— the hand owns this view until the next test " +
+                                 $"(was: {_camSrc})");
+                    }
                     // A short click (release without moving the map) selects
                     // the car under the cursor; empty space clears the
                     // selection. INSIDE the map branch: the strip's own click
@@ -1976,6 +2604,17 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
+    /// <summary>Absolute zoom (px/m), clamped like the wheel is. The declared
+    /// per-test focus names a zoom, so it needs an absolute setter rather than
+    /// a chain of relative notches.</summary>
+    void SetZoom(double pxPerM)
+    {
+        if (pxPerM <= 0) return;
+        float z = (float)Math.Clamp(pxPerM,
+            Math.Max(ZoomMin, MinZoomOverMap()), ZoomMax);
+        _cam.Zoom = new Vector2(z, z);
+    }
+
     void ZoomBy(float f, Vector2? at = null)
     {
         float z0 = _cam.Zoom.X;
@@ -2410,6 +3049,37 @@ public partial class MapRenderer : Node2D
                 _lastTestText = hl.ValueKind == JsonValueKind.String
                     ? hl.GetString() : null;
 
+            // WHAT THE RUNNING SCENARIO ASKS THE WINDOW TO LOOK AT
+            // (POST /focus by the suite, exported here; docs/TESTING.md
+            // "Camera focus"). Read once per state frame; acted on only when it
+            // CHANGES, i.e. when a new test starts — the framing must not
+            // re-assert itself every 16 ms and fight a hand on the mouse.
+            if (root.TryGetProperty("focus", out var fo) &&
+                fo.ValueKind == JsonValueKind.Object)
+            {
+                string Str(string k) => fo.TryGetProperty(k, out var v) &&
+                    v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
+                double Dbl(string k) => fo.TryGetProperty(k, out var v) &&
+                    v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0.0;
+                double DblN(string k, double d) => fo.TryGetProperty(k, out var v) &&
+                    v.ValueKind == JsonValueKind.Number ? v.GetDouble() : d;
+                long Lng(string k) => fo.TryGetProperty(k, out var v) &&
+                    v.ValueKind == JsonValueKind.Number ? (long)v.GetDouble() : 0L;
+                var f = (kind: Str("kind"), label: Str("label"),
+                         scenario: Str("scenario"), name: Str("name"),
+                         x: Dbl("x"), y: Dbl("y"),
+                         zoom: DblN("zoom", 0.0), uid: Lng("uid"),
+                         nameUid: Lng("name_uid"));
+                if (f.label != _tFocusLabel)
+                {
+                    _tFocusLabel = f.label;
+                    _tFocusKind = f.kind; _tFocusName = f.name;
+                    _tFocusX = f.x; _tFocusY = f.y; _tFocusZoom = f.zoom; _tFocusUid = f.uid;
+                    _tFocusNameUid = f.nameUid;
+                    ApplyFocus();
+                }
+            }
+
             // Fleet flow (the quality metric of 2026-10-19): metres driven by
             // the whole fleet per second of sim time, and the absolute total
             // since the sim started (see docs §8 R28 / SimEngine _flowMeters).
@@ -2770,14 +3440,21 @@ public partial class MapRenderer : Node2D
         if (_minimap != null)
         {
             _minimap.Cars.Clear();
-            foreach (var kv in _carNodes)
+            // The dots are the cars the DATA speaks about, not whatever nodes
+            // happen to exist: a car absent from the frame has nothing to
+            // say about this moment, and its dot used to be painted from the
+            // stale node (the same ghost that drew on the map).
+            foreach (var kv in _carBuf)
             {
+                var buf = kv.Value;
+                if (buf.Count == 0) continue;
+                var node = _carNodes.TryGetValue(kv.Key, out var nd) ? nd : null;
+                Vector2 pos = node != null
+                    ? node.GlobalPosition
+                    : new Vector2(buf[^1].X, -buf[^1].Y);   // samples are sim metres, y north
                 string col = _carMeta.TryGetValue(kv.Key, out var m)
                     ? m.Color : "blue";
-                _minimap.Cars.Add((new Vector2(kv.Value.GlobalPosition.X,
-                                               -kv.Value.GlobalPosition.Y),
-                                   kv.Key == _followUid,
-                                   CarColors[col]));
+                _minimap.Cars.Add((pos, kv.Key == _followUid, CarColors[col]));
             }
             _minimap.QueueRedraw();
         }
@@ -3305,6 +3982,75 @@ public partial class MapRenderer : Node2D
         _flagNodes.Add(poly);
         _flagNodes.Add(line);
     }
+
+    /// <summary>Re-aim the window for the scenario that just started
+    /// (docs/TESTING.md "Camera focus"). Called ONCE per new focus declaration,
+    /// so a run of 26 scenarios moves the camera 26 times and never again — a
+    /// per-frame re-assert would fight every hand that touches the mouse.</summary>
+    void ApplyFocus()
+    {
+        if (_review || _tFocusManual) return;      // the hand outranks the run
+        if (_tFocusKind == "loc")
+        {
+            // A PLACE is the subject: no car is followed at all. Same effect as
+            // starting the client with --center, but arriving mid-run, when the
+            // crossing test begins.
+            _autoFollow = false;
+            _followUid = null;
+            _cam.GlobalPosition = ClampViewCentre(W((float)_tFocusX, (float)_tFocusY), "focus loc");
+            if (_tFocusZoom > 0) SetZoom(_tFocusZoom);
+            GD.Print($"FOCUS test '{_tFocusLabel}': the PLACE ({_tFocusX:F1},{_tFocusY:F1}) m" +
+                     $"{(_tFocusZoom > 0 ? $" @ {_tFocusZoom:F1} px/m" : "")} - no car followed");
+            return;
+        }
+        // A CAR is the subject. "car" = the primary one (the followed car /state
+        // describes); "named" = the car the scenario gave that name to.
+        // A named subject: the uid the scenario STAGED (name_uid) beats looking
+        // the name up in the cast — roles are reused, so the name can be carried
+        // by a different car by the time the view is aimed.
+        long? uid = _tFocusKind == "named"
+            ? (_tFocusNameUid > 0 ? _tFocusNameUid : UidByName(_tFocusName))
+            : _tFocusUid;
+        if (uid is null or 0)
+            uid = _followUid;      // named car not spawned yet: the primary, and
+                                   // the next state frame retries the binding
+        if (uid is null or 0) return;
+        _autoFollow = true;
+        _followUid = uid;
+        _lastManualMs = 0;         // no "manual wins" grace period to wait out
+        if (_tFocusZoom > 0) SetZoom(_tFocusZoom);
+        else FitViewOn(_tFocusX, _tFocusY);       // "fit the primary car"
+        GD.Print($"FOCUS test '{_tFocusLabel}': {_tFocusKind} uid={uid} " +
+                 $"@ {_cam.Zoom.X:F1} px/m");
+    }
+
+    /// <summary>The uid of the car whose HUD name is `name` — the scenario's own
+    /// cast list: POST /teleport {"name": …} → TestFlags.HudLabel → /state.</summary>
+    long? UidByName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        foreach (var kv in _carMeta)
+            if (kv.Value.HudLabel == name) return kv.Key;
+        return null;
+    }
+
+    /// <summary>Zoom so the view is <see cref="CarFocusViewM"/> metres across —
+    /// "fit the primary car" (user decision 2026-10-24). Computed from the
+    /// WINDOW's pixel width, so maximising keeps the same physical framing
+    /// instead of quietly showing more country.</summary>
+    void FitViewOn(double xM, double yM)
+    {
+        var vp = GetTree().Root.GetVisibleRect().Size;
+        double z = Math.Clamp(vp.X / CarFocusViewM, ZoomMin, CrashZoom);
+        SetZoom(z);
+        if (xM != 0.0 || yM != 0.0)
+            _cam.GlobalPosition = ClampViewCentre(W((float)xM, (float)yM), "focus fit");
+    }
+
+    /// <summary>Car-framing width in metres — the one number to argue about.
+    /// 120 m is ~27 px/m in a 3200 px window and ~13 px/m in a 1600 px one,
+    /// i.e. the framing the follow camera has always had, made explicit.</summary>
+    internal const double CarFocusViewM = 120.0;
 
     void SaveShot(string path)
     {

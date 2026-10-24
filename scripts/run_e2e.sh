@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the e2e test suite against a FRESH C# console host (DrivingGame.Server).
-# Port of ../car/scripts/run_e2e.sh for the C# sim (docs/C_SHARP_PORT_SPEC.md,
-# Phase 6 burn-in / gate G5 prep).
+# Port of ../car/scripts/run_e2e.sh for the C# sim (Phase 6 of the Python->C#
+# port, closed 2026-09-08; the port record is diary/ + git history).
 #
 # Workflow:
 #   1. Kill any stale game processes: C# host, old Python src.main (a stale
@@ -23,7 +23,8 @@
 # Usage:
 #   scripts/run_e2e.sh                                  # full suite, visible
 #   scripts/run_e2e.sh --no-godot                       # headless (no window)
-#   scripts/run_e2e.sh --tests corner_left              # single scenario
+#   scripts/run_e2e.sh --tests corner_left_entry        # single scenario
+#   scripts/run_e2e.sh --tests 26 --watch                 # watch one, staged frozen
 #   scripts/run_e2e.sh --tests fig8_stress --stress-cars 250
 #   scripts/run_e2e.sh --tests 21-24                        # resume a range
 #
@@ -252,103 +253,45 @@ if [ "$RUN_GODOT" -eq 1 ]; then
   GODOT_CAM_ARGS=(--zoom "${CAM_ZOOM:-14}")
   echo "==> Camera: follow mode at zoom ${CAM_ZOOM:-14} (px/m) - the window tracks the car"
 fi
-if [ -n "$TEST_NUMBER" ]; then
-  # Camera aiming is cosmetic - a failure here must never abort the run.
-  CAM=$(${PYTHON:-python3} - "$TEST_NUMBER" "$API" <<'EOF'
-import json, subprocess, sys, urllib.request
-num, api = int(sys.argv[1]), sys.argv[2]
-rows = json.loads(subprocess.check_output(
-    [sys.executable, "tests/test_turning.py", "--list-json"]))
-key = next((r["key"] for r in rows if r["number"] == num), None)
-prefix = {"fig8_xing": "xing_", "fig8_xing_plain": "xingp_",
-          # The T-junction scenarios (incl. the two new ones that run it
-          # WITH oncoming traffic): pin the window on the junction, since
-          # what matters is the pair meeting at the node, not one car's
-          # drive across the tile.
-          "tjunction_from_top": "tjunc_",
-          # The obstruction tests: pin on the two-lane straight road, where
-          # the pass of the parked car happens.
-          "park_block_overtake": "straight_",
-          "park_block_priority": "straight_",
-          # The crawler test: the obstruction MOVES, but it starts at a known
-          # spot - the window stays there, so the pass is in the box from the
-          # first frame (the focus is the slow car, not the overtaking one).
-          "slow_pass_overtake": "straight_"}.get(key)
-if not prefix:
-    sys.exit(0)   # not a camera-pinned scenario -> no override
-# The obstruction tests: what happens there is a PASS of a parked car, and
-# the pass happens AT the obstruction, not at the middle of the road - so the
-# window goes on the spot the scenario parks its car at (75% along the
-# scenario's own segment), otherwise the parked car is off-screen entirely
-# and the run shows nothing but empty asphalt.
-OBSTRUCTION_T = {"park_block_overtake": 0.5,      # parked at 50% of segment 0
-                 "park_block_priority": 1.0,      # parked ON the node straight_m
-                 "slow_pass_overtake": 0.35,      # the crawler's start
-                 "slow_pass_priority": 0.70}      # 35% of the WHOLE straight
-
-if key in OBSTRUCTION_T:
-    try:
-        # The name contains a non-ASCII arrow, so it goes through the name
-        # map first and the numeric route second - a raw unicode path in the
-        # URL is what made this whole branch answer nothing.
-        names = json.loads(urllib.request.urlopen(f"{api}/segment_names", timeout=5).read())
-        idx = names["straight_n\u2192straight_m"]
-        with urllib.request.urlopen(f"{api}/segment/{idx}", timeout=5) as r:
-            sg = json.loads(r.read())
-        t = OBSTRUCTION_T[key]
-        print(f"{sg['x1'] + (sg['x2'] - sg['x1']) * t:.2f} "
-              f"{sg['y1'] + (sg['y2'] - sg['y1']) * t:.2f}")
-    except Exception:
-        pass
-    sys.exit(0)
-xs = ys = n = 0.0
-i = 0
-while True:
-    try:
-        with urllib.request.urlopen(f"{api}/segment/{i}", timeout=5) as r:
-            if r.status != 200:
-                break
-            s = json.loads(r.read())
-    except Exception:
-        break
-    if str(s.get("start_node", "")).startswith(prefix):
-        xs += s["x1"]; ys += s["y1"]; n += 1
-    i += 1
-if n:
-    print(f"{xs / n:.2f} {ys / n:.2f}")   # /segment answers metres
-EOF
-) || CAM=""
-  if [ -n "$CAM" ]; then
-    GODOT_CAM_ARGS=(--center ${CAM_CENTER:-$CAM} --zoom "${CAM_ZOOM:-26}")
-    echo "==> Camera PINNED (${CAM_CENTER:-$CAM} @ zoom ${CAM_ZOOM:-26}) - no car follow"
-  fi
-fi
-# A ROLE focus beats the coordinate pin: the scenario stages its cast itself,
-# so the car that matters is defined by the state ("the parked one", "the
-# slowest one still rolling"), not by a uid the runner could know up front.
-CAM_ROLE=""
+# The camera for a single-scenario run comes from the SCENARIO, not from a
+# table in this script: tests/test_turning.py resolves its own SCENARIO_FOCUS
+# against the live map (POST /focus does the same for a full-suite run, and the
+# tape records it for the reviewer). Two kinds reach the client: a PLACE
+# (--center, no car followed) and a CAR (--focus <name>). Cosmetic: a failure
+# here must never abort a run.
 if [ -n "$TEST_NUMBER" ] && [ "$RUN_GODOT" -eq 1 ]; then
-  CAM_ROLE=$(python3 - "$TEST_NUMBER" "$API" <<'EOF'
-import json, subprocess, sys
-num = int(sys.argv[1])
-rows = json.loads(subprocess.check_output(
-    [sys.executable, "tests/test_turning.py", "--list-json"]))
-key = next((r["key"] for r in rows if r["number"] == num), "")
-# 18: the pass happens AT the parked car - the camera stays on the
-# obstruction, which never moves, so the whole manoeuvre stays in frame.
-# 19: the squeeze is against the crawler - follow the slow car.
-# A NAME beats a predicate: the scenario authored the cast, so the car that
-# matters has a name from the spawn ("parked_car", "slow_car", "oncoming_car").
-# The predicate roles stay as the fallback for casts that were never named.
-print({"park_block_priority": "parked_car",
-       "slow_pass_overtake": "slow_car"}.get(key, ""))
-EOF
-) || CAM_ROLE=""
-  if [ -n "$CAM_ROLE" ]; then
-    GODOT_CAM_ARGS=(--focus "$CAM_ROLE" --zoom "${CAM_ZOOM:-16}")
-    echo "==> Camera FOCUSED on the ${CAM_ROLE} car @ zoom ${CAM_ZOOM:-16} - the window tracks it"
+  FOCUS_JSON=$(${PYTHON:-python3} tests/test_turning.py --focus-json "$TEST_NUMBER" 2>/dev/null) || FOCUS_JSON=""
+  if [ -n "$FOCUS_JSON" ]; then
+    export FOCUS_JSON
+    CAM=$(${PYTHON:-python3} <<'PYFO' 2>/dev/null
+import json, os
+try:
+    f = json.loads(os.environ.get("FOCUS_JSON") or "{}")
+except Exception:
+    f = {}
+if f.get("kind") == "loc" and "x" in f:
+    # A PLACE: no car is followed — the scenario's subject does not move.
+    print(f"--center {f['x']:.2f} {f['y']:.2f} --zoom {f.get('zoom') or 26:g}")
+elif f.get("kind") == "named" and f.get("name"):
+    print(f"--focus {f['name']} --zoom {f.get('zoom') or 16:g}")
+PYFO
+)
+    if [ -n "$CAM" ]; then
+      # An explicit --center/--zoom on the runner's own command line still wins:
+      # the operator outranks the scenario (the same rule the client applies).
+      read -r -a CAM_ARGS <<<"$CAM"
+      [ -n "$CAM_CENTER" ] && CAM_ARGS=(--center $CAM_CENTER)
+      [ -n "$CAM_ZOOM" ] && CAM_ARGS=("${CAM_ARGS[@]/--zoom*}" --zoom "$CAM_ZOOM")
+      GODOT_CAM_ARGS=("${CAM_ARGS[@]}")
+      case "${CAM_ARGS[0]}" in
+        --center) SAY="(a PLACE - no car is followed)" ;;
+        *)        SAY="(a named car)" ;;
+      esac
+      echo "==> Camera per the scenario: ${GODOT_CAM_ARGS[*]} $SAY"
+    fi
   fi
 fi
+
 if [ -n "$FOCUS_UID" ] && [ "$RUN_GODOT" -eq 1 ]; then
   GODOT_CAM_ARGS+=(--focus "$FOCUS_UID")
   echo "==> Camera: bound to car $FOCUS_UID @ 34 px/m - that car is what you watch"

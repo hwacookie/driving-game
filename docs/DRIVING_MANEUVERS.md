@@ -1,5 +1,15 @@
 # Driving Maneuvers — Specification
 
+> **Status 2026-10-23 (code-verified):** the ruleset as the code stands at
+> `c827710`. **The R-index is complete: R1–R36 all have an entry below** —
+> R32, R34 and R35 were missing for rules that are implemented, and were added
+> on 2026-10-23 (their design provenance is
+> [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md)). *[proposed]*
+> means "written here, not in the code"; *[measured]* means "an invariant with
+> a number attached, not a behaviour". Status tags were re-checked against
+> `DrivingGame.Sim/` on 2026-10-23; a tag is a claim about the code, so change
+> it together with the code, not afterwards.
+
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
 and intent (throttle / brake).
@@ -21,10 +31,14 @@ target reaches the **speed-dependent** comfortable braking distance —
 | **Stopping** | Speed goes to 0, with the deceleration tapering out (progressive braking) — no jerk at the standstill. The car stands with the wheels parallel and as close to the right edge as possible; at a target flag the front bumper stands at the flag. |
 | **Blinker off** | As soon as the car is stopped (`speed < 0.1 m/s` and `dist_to_dest < 1.0 m`), the blinker is switched off automatically. |
 
-Reproducible headless: `.venv/bin/python scripts/sim_park.py [startpoint] [--dest]`
-logs the complete stopping process (phase, deceleration, remaining distance,
-lateral offset, heading error) and measures at the end the curb distance and
-bumper position.
+Reproducible: run the parking scenario and watch the trace —
+`scripts/run_e2e.sh --tests park_6lane_right_lane --warp 4` (verdicts + the
+per-run log under `tests/`), or `python tests/test_turning.py --only
+park_6lane_right_lane straight 80` against a running host, which prints the
+stopping process (phase, deceleration, remaining distance, lateral offset,
+heading error) and measures the kerb distance and bumper position at the end.
+There is no `scripts/sim_park.py` — the Python repro tool of the retired `car/`
+repo; `--only` is the door that replaced it (see [TESTING.md](TESTING.md)).
 
 ### Parameters
 
@@ -304,11 +318,31 @@ routes the eased bound stays below the nominal line — there nothing changes.
 
 ### Reachability
 
-A blinker means "I want to turn at the next place where it *still physically
-works*" (see `TURN_REWORK_PLAN.md` § 2.5). If the car is already faster than
-the profile allows at its position (`REACHABLE_SPEED_TOLERANCE`), no braking
-helps — then the crossing is **driven straight through** (the nav rebuilds
-the route across the node) and the blinker stays on.
+**The blinker is the decision point.** Setting it means: *"I want to turn this
+way at the next decision point where it is still physically reachable"* —
+reachable meaning there is enough road left to brake to a speed whose arc radius
+AND tangent distance both fit (`REACHABLE_SPEED_TOLERANCE`). It does **not**
+mean "turn at the junction 3 m ahead": all braking and steering after the
+blinker is a function of the distance to that tangent point, never of which
+segment the car happens to be on.
+
+When the signaled turn is no longer reachable, no amount of braking makes it
+reachable, and the car:
+
+- **drives straight through** if the road goes on (the nav rebuilds the route
+  across the node) and **keeps the blinker on** — the request stands, the next
+  junction may still make it;
+- **crashes** into the obstacle at the end of a dead end / into the arm of a
+  T-junction if there is no continuation. That is not a bug and not a validation
+  failure: a crash is something a real car does. A teleport, a spot-turn, or a
+  5 m radius at 60 km/h are not — those are what
+  [AGENTS.md](../AGENTS.md) "never do physically impossible things" forbids, and
+  what `PhysicsValidator` (R1) exists to catch.
+
+*(This was principle 2.5 of the 2026-08 turn-planning rework; the rework is
+finished and its plan document is retired, so the principle lives here — with
+the geometry side in [SMOOTH_GEOMETRY_DESIGN.md](SMOOTH_GEOMETRY_DESIGN.md) and
+the optimisation side in [SPEC.md](SPEC.md) "The Driving Line".)*
 
 ---
 
@@ -558,6 +592,18 @@ the per-car decision log cites); it is *not* a priority.
 **Implementation status** per rule: *[implemented]* / *[partial]* /
 *[proposed]*.
 
+**The two tiers of road surface** (the premise every lateral rule below shares,
+agreed in the 2026-08 turn rework and restated here because that plan document
+is retired): a carriageway has a **physically drivable** area — the whole
+street, both lanes and the shoulder — and a **permitted** area — our own lane.
+The opposing half may be used only when it is **clear of oncoming traffic** and
+only as the last resort the manoeuvre genuinely needs: R8 takes the room my own
+kerb side has left, R32/R36 borrow the opposing lane inside a window that is as
+short as physics allows, and the lane guard (R33) counts any crossing no
+commitment asked for as an error. Never the other way round: "drivable" is not
+permission, and "permitted" never overrides what the car can physically do
+(R1).
+
 ### Tier 0 — Hard invariants (a post-filter over every output)
 
 Tier 0 is **not a set of situational decision nodes** — it is an invariant
@@ -725,6 +771,37 @@ then commitment.
   (measured 2026-10-19: crash at t=41 s on `fig8_xing`). Because caps are
   recomputed every substep, a chain of blocked arms unwinds over substeps
   (the fixed point by iteration, not a single solve).
+- **R34 Negotiated right of way** *(crossing; implemented 2026-10-21 — the
+  entry itself was missing here until 2026-10-23)* — the plan chooser itself:
+  **facts → proposals → awards → application**. One decision per car, one
+  award per contested resource, **committed, not converged**: an award is held
+  across substeps and re-awarded only past `FlipMargin = 0.4` of cost, so a
+  contested stretch cannot flip owner every frame and make both drivers
+  hesitate in turn; awards with no contest left are dropped
+  (`Negotiation.Keep(liveKeys)`).
+  The resource is `(segment, [s0, s1])` quantised to 0.5 m — **never a car
+  pair** (three cars would mean three objects and three awards for one
+  stretch, the trap named in §9 of the design doc). The cost that decides is
+  the cost of waiting: R16's standstill growth, R12's disturbance weight
+  (still 0, deliberately) and R35's role, over facts the cars already carry
+  (`ApproachCapMps`-style quantities) — feasibility is judged BEFORE the
+  award, so a role can never buy an impossible maneuver.
+  *In the code:* `DrivingGame.Sim/Negotiation.cs`, asked by `CarCollisions`
+  wherever v1 compared two cars — the R26 head-on claim and the R32 pinch
+  claim. Full design, the auction's cost terms and the build log:
+  [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md).
+- **R35 Emergency priority** *(crossing; implemented 2026-10-21 — the entry
+  itself was missing here until 2026-10-23)* — a role with special rights wins
+  the claim on a contested resource and pays ~nothing for disturbance (the
+  R12 term is what it discounts). **Feasibility is unchanged**: a priority
+  vehicle still never enters an unavoidable conflict — the mechanism is the
+  arbiter, not a per-role behaviour branch, so Tier 0 (R1) and Tier 1 (R2) are
+  untouched by it.
+  *In the code:* `Car.EmergencyRole` (`Negotiation.Emergency(car)`), set from
+  the `police` sprite when the car is created (`SimEngine`); `/state` exports
+  it. The counterpart a conceder shows is the courtesy signal (R12):
+  `Car.CourtesyForUid` / `CourtesyKind`, rendered as the warm `bitteschön` cone
+  pointing at the car being let through.
 
 ### Liveness & quality (the user's rules of 2026-10-19)
 These are not traffic rules - they are the **invariants the sim must never
@@ -742,12 +819,20 @@ break** and the **measurements that show whether it does**.
   `lockdowns` / `lockdown_last`). The graph above (R14/R30) only sees cars
   BEFORE the box - a committed car is not in it - so it missed the wedged
   box the user showed; the geometric detector does not.
-- **R29 Desperation valve** *[implemented, must never fire]* — if a
+- **R29 Desperation valve** *[implemented, must never fire — and it DID once]*
+  — if a
   lockdown persists 6 s, one car is **taken out of the equation** (despawn,
   highest uid inside the box = the last arriver) so the sim never stands
   there forever. This is an ERROR: it is logged (`!! R29 DESPERATION VALVE`)
   and the e2e suite fails on it. It exists so the sim cannot hang, not as
   an excuse for the other rules.
+  *Measured status:* it fired once on record — `fig8_xing_plain`,
+  `tests/run_test_T_231_…log` (2026-10-22): `R29 lockdown valve: car 96
+  despawned at t=15.1s (1 car(s) removed)`. It did **not** fire in the
+  2026-10-23 full run (same scenario failed differently, on a contact at
+  40.2 s), so it is not a daily occurrence — but "must never fire" is a
+  requirement, not a prediction, and one recorded firing is a red fact.
+  Current baseline: [TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written).
 - **R30 Keep the crossing resolvable** *[implemented]* — the prevention half:
   a car may creep onto a crossing only if the chain of standing blockers
   ahead of it **bottoms out** - `resolves(X)` = X's own exit is free (base
@@ -837,15 +922,24 @@ break** and the **measurements that show whether it does**.
   maximum the sim APPLIES; the brake light comes on whenever the cap is
   actively holding the car down (steady, because the cap is a smooth function
   of gap). The jerk of the brake value itself is still unbounded (R18).
-- **R12 Voluntary yield (courtesy)** *(crossing)* *[proposed]* — a priority
+- **R12 Voluntary yield (courtesy)** *(crossing)* *[implemented 2026-10-21 as
+  a term — the weight is still 0]* — a priority
   car may give up its right-of-way to let a long queue on the cross street
-  pass. *(Optional.)*
-- **R16 Anti-starvation / wait-time escalation** *(crossing)* *[proposed]* —
+  pass. It is a **weight in the award** (`Negotiation.CostOfWaiting`), never a
+  change to feasibility. The weight is deliberately **0** until the
+  disturbance measurement behind it exists —
+  [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md) §8 names it "the
+  one number that must not be guessed"; see also R34.
+- **R16 Anti-starvation / wait-time escalation** *(crossing)* *[implemented
+  2026-10-21]* —
   independent of R12: after X s of waiting, a yield car's required gap
   **decreases stepwise** (patience decays), so a car waiting against
   sustained priority traffic does not starve indefinitely (gap-acceptance
   literature). R12 is voluntary courtesy from the priority car; R16 is the
   waiting car's own escalation.
+  *In the code:* `Car.StandstillS` enters `Negotiation.CostOfWaiting`
+  monotonically, so a car that keeps losing an award eventually wins it; it
+  can never make an inadmissible plan admissible.
 - **R17 Signal before the maneuver** *[partial]* — blinker on a fixed
   time/distance **before** a lane change / avoidance so the intent is visible
   to others (complements R9: making intent recognizable needs a visible
@@ -935,7 +1029,25 @@ break** and the **measurements that show whether it does**.
   (`SingleFilePair` + `PassagePriority` in the v1 corridor) and the
   "they can pass - not a threat" release. *Not yet:* step (c), the scripted
   reverse retreat.
-
+- **R32 Careful passing of an obstruction** *(maneuver; implemented
+  2026-10-20/21 — the entry itself was missing from this document until
+  2026-10-23)* — an obstruction (a parked car, or one crawling far below my
+  speed) sits in my lane on a carriageway too narrow to pass without leaving my
+  half. I may take the free lane **only if I can clear the pinch before
+  oncoming traffic reaches it, and only if that oncoming car could physically
+  stop in time should it need to.** Otherwise I wait behind the obstruction.
+  The lateral need is `touchM + OvertakeClearM − |lat|`, bounded by the room
+  inside the carriageway; **how long** the borrow lasts is R36's window, not
+  this rule's. The pinch is a resource, so the claim is decided by R34 — which
+  is what stops two cars from both starting the same pass.
+  *In the code:* `CarCollisions` sees the blockage and offers the cap —
+  `r32#<uid>` (I hold back for that car) and `r32#passive` (the other car owns
+  the pinch) — and logs `[R32] lane blocked by car N ahead …` /
+  `[R32] obstruction ahead - borrowing the free lane …`; the committed pass is
+  part of the raceline's identity (`BicycleNav.part2.cs`), so the borrow is a
+  planned line and not a lateral impulse. Scenarios #17 `park_block_overtake`
+  and #19 `slow_pass_overtake`; design + measurements:
+  [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md) §5, §7d-§7i.
 ### Meta — system (not a traffic rule)
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
@@ -947,8 +1059,10 @@ break** and the **measurements that show whether it does**.
   unexplainable. Fixed by naming the car before the break (2026-10-19). *Currently logging:* R1 (`PhysicsValidator`), R2/R3/R4/R5/R6/R7
   and R14 (`CarCollisions`), R17 (nav / `LaneChangeSignal`), R25 (nav / `Car`).
   Still silent: R8 (the lateral yield fires but logs nothing), R13 (planned
-  but not logged) and the not-yet-implemented rules (R9–R12, R16, R18–R19,
-  R21–R24). R15, R26 and R27 are implemented and log their trigger; R8 fires
-  silently. Deterministic tie-breaks are uid-based (no wall-clock or run
+  but not logged) and the not-yet-implemented rules (R9, R18–R19, R21–R24).
+  R15, R26 and R27 are implemented and log their trigger; R8 fires
+  silently. R32 logs `[R32]`; R34/R35 and R12/R16 are not separate log lines —
+  they decide WHO holds a resource, and the result is visible as the awarding
+  cap key (`passage#N`, `r32#N`) on the conceding car. Deterministic tie-breaks are uid-based (no wall-clock or run
   randomness); per-car jitter (e.g. `ReleaseHoldTicks`) is a pure function of
   the uid, so a replay stays reproducible.

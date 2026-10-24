@@ -1,26 +1,38 @@
 # How Testing Works Here
 
-Testing has two layers:
+> **Status 2026-10-23 (code-verified):** every command below was run against
+> the tree at `c827710` + the comment-only doc pass; scenario numbers, id.
+> durations and runner flags are read out of `tests/test_turning.py` and
+> `scripts/run_e2e.sh`, the baseline is the full-suite log
+> `tests/run_test_T_242_0_20261023_231042.log`. The scenario list in §2a is
+> generated from `tests/test_turning.py --list` - regenerate it instead of
+> editing numbers by hand.
 
-1. **Headless pytest suites** (`tests/test_obstacles.py`,
-   `tests/test_road_network.py`) - no game process, no window, no REST
-   server: they build the road network and car directly in-process and
-   assert on placement rules, collision geometry, stop-on-contact
-   physics, layout save/load, and the obstacle REST handlers (via
-   Flask's test client). They run in seconds and are the first thing to
-   run after a change:
+Testing has three layers:
+
+1. **Headless unit / integration tests** (`DrivingGame.Sim.Tests/`, xunit on
+   .NET) - no game process, no window, no REST server: they build the road
+   network and the car in-process and assert on placement rules, collision
+   geometry, stop-on-contact physics, layout save/load, the lane guard and the
+   raceline solver against its golden fixture. They run in ~25 s and are the
+   first thing to run after a change:
    ```bash
-   .venv/bin/python -m pytest tests/test_obstacles.py tests/test_road_network.py -q
+   dotnet test DrivingGame.Sim.Tests/          # 91 passed / 2 skipped
    ```
+   (The Python pytest suites of the original `car/` repo -
+   `tests/test_obstacles.py`, `tests/test_road_network.py`,
+   `tests/test_api.py` - were retired with that repo; these xunit suites are
+   their equivalents. See §6.)
 2. **Live e2e suite** (the rest of this document) - the running game
    exposes a REST API, and test scripts drive the actual game (actual
    physics, actual rendering, actual road network) from the outside,
    exactly like a human or another program would: `tests/test_turning.py`
-   for the turning scenarios, `tests/light_check.py` / `tests/car_line_check.py`
-   for the manual visual QA, and the C# xunit suites (`DrivingGame.Sim.Tests/`)
-   for the headless layer.
+   for the turning scenarios.
+3. **Manual visual QA scripts** (`tests/light_check.py`,
+   `tests/car_line_check.py`) - no pass/fail, they stage a situation for the
+   eye (see the section at the end).
 
-See `docs/REST_API.md` for the full endpoint reference; this document
+See [REST_API.md](REST_API.md) for the endpoint reference; this document
 focuses on the *testing workflow* itself.
 
 ## Fast mode (warped runs)
@@ -73,18 +85,33 @@ scripts/run_e2e.sh --warp 4                         # the default: visible, ~4x
 scripts/run_e2e.sh                                  # same (warp 4 is the default)
 scripts/run_e2e.sh --realtime                       # real time (only when asked)
 scripts/run_e2e.sh --no-godot --warp 4              # headless (CI only)
-scripts/run_e2e.sh --tests corner_left --warp 4     # single scenario by name
+scripts/run_e2e.sh --tests corner_left_entry --warp 4   # one scenario by name
+scripts/run_e2e.sh --tests 2 --warp 4               # ...or by its number
 scripts/run_e2e.sh --tests 21-24 --warp 4           # a range (goes to the suite's
                                                      # own --tests parser)
 scripts/run_e2e.sh --tests fig8_stress --stress-cars 250
+scripts/run_e2e.sh --watch --center 1250 1750 --zoom 18   # the "I want to see it" mode
 scripts/run_e2e.sh --focus-car 37                   # bind the camera to that car
-CRASH_SHOT=/tmp/crash.png scripts/run_e2e.sh --tests 23
+CRASH_SHOT=/tmp/crash.png scripts/run_e2e.sh --tests 26   # the signed crossing
 ```
 
-Runner flags: `--no-godot`, `--tests <name|number|spec>`, `--fast`,
-`--warp N`, `--realtime`, `--focus-car <uid>` (the client binds to that car -
-e.g. the last crashed uid - at `CrashZoom` 34 px/m), and the env var
-`CRASH_SHOT` (one PNG 0.5 s after the crash camera latches, diagnostic).
+Runner flags (`scripts/run_e2e.sh`): `--no-godot`, `--tests <name|number|spec>`,
+`--fast`, `--warp N`, `--realtime`, `--focus-car <uid>` (the client binds to
+that car - e.g. the last crashed uid - at `CrashZoom` 34 px/m),
+`--maximized` / `--watch` (see the two run modes below), `--zoom <px/m>`,
+`--center <x> <y>` (metres - pins the camera, auto-follow off),
+`--focus <name|role>`, `--map <name>`, and anything else, which is passed
+through to the suite (e.g. `--stress-cars 250`). Env vars: `CRASH_SHOT`
+(one PNG 0.5 s after the crash camera latches, diagnostic) and
+`DG_FREEZE_STAGE=1` (set by `--watch`: stage every car while the sim is
+frozen, then unfreeze).
+
+**The two run modes** (binding user decision, see `AGENTS.md`) are both the
+runner's, not a manual recipe: an e2e run is `--warp 4` in a normal window;
+"I want to watch it" is `--watch` (window maximized via Godot's own
+`--fullscreen`, sim frozen while the scenario stages its cars, every car
+spawned at speed, unfrozen at the announced pace) - typically with
+`--center`/`--zoom` on the hotspot or `--focus <name>` on a named car.
 
 **Camera defaults** (user decision 2026-10-18): the window follows the car
 at `--zoom 14` px/m so every maneuver is actually visible. Crossing
@@ -97,16 +124,37 @@ be analysed (click a car, read its decision window, `GET /state`); stop the
 host later with `pkill -f DrivingGame.Server`. The suite itself freezes the
 sim on a crash and leaves the cars in place.
 
-## Current baseline (run 2026-10-19, `--warp 4`)
+## Current baseline (the one place a number is written)
 
-**23 of 23 run scenarios pass** (1 skipped: `fig8_stress`), 0 off-road,
-0 instant snaps, 0 teleports, 0 wrong-side, 0 wrong end segment, 0 timeouts.
-Both 50-car crossing scenarios survive their full 60 s window with zero
-contact and keep flowing (`moving` 26-50 of 50 at the 10 s reports).
-C# unit suite: **91 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
-~27 s) - skipped are `CrossingStressTests.CrossingStress_NoContact_Within_15s`
-(the crossing bug in unit-test form) and
-`RacelineReferenceTests.RebaselineReferenceFile` (a manual re-baseline tool).
+> **Baseline 2026-10-23, `--warp 4`, HEAD `c827710` + comment-only doc pass**
+> (`tests/run_test_T_242_0_20261023_231042.log`). **This block is the single
+> source of the suite's numbers** - every other document links here instead of
+> restating them. Regenerate it from a full run's log; never edit the numbers
+> by hand.
+
+- **27 numbered scenarios**: 26 run + 1 skipped (`fig8_stress`, the capacity
+  probe - skipped in any warped run by design).
+- Verdict of that run: **23 passed / 3 failed of 26 run** (`returncode 1`).
+- Named failures (three, all multi-car or long-hold scenarios - every single-
+  car scenario 1-24 is green):
+  | # | scenario | how it failed | sim s |
+  |---|---|---|---|
+  | 20 | `slow_pass_priority` | `timed out: never reached expected segment` - the fleet crawls at **1.7 m/s per car** and never completes the pass | 240.1 |
+  | 26 | `fig8_xing` | `unexplained centreline crossing at t=9.1s (lane_guard_errors 1 -> 2)` - an R33 lane-guard hit, not a contact | 9.1 |
+  | 27 | `fig8_xing_plain` | `crash at t=40.2s: car 86 contacted car None` - flow decayed 46→33→25→14 moving over the 40 s before it (`logs/T_242_crash_623s_car84_car86.json`) | 40.2 |
+  So the suite is **3 known-red**, not green - the same three scenarios were
+  red in the previous full run (`T_231`, 2026-10-22), with #27 failing
+  differently there (the R29 lockdown valve despawned car 96 at t=15.1 s).
+  Read the log's own footer for the verdict of any newer run.
+- C# unit suite: **91 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
+  ~25 s) - skipped are `CrossingStressTests.CrossingStress_NoContact_Within_15s`
+  (the crossing bug in unit-test form) and
+  `RacelineReferenceTests.RebaselineReferenceFile` (a manual re-baseline tool).
+- Build: `dotnet build DrivingGame.csproj --no-incremental` → **0 errors**.
+  Quote the warnings as "pre-existing nullable-annotation noise (CS86xx) + one
+  CA2255", never as a fixed count: a full rebuild of the Godot project prints
+  25, of the console host 5, and an *incremental* build prints 0 because
+  nothing recompiles.
 
 ## Capacity benchmark (the sim's own throughput)
 
@@ -137,10 +185,17 @@ scenario holds to ~45 cars - the renderer costs about 10% of the budget.
 ## 1. Start the game with the API enabled
 
 ```bash
-DrivingGame.Server --map basic            # console host, REST API on :5001
-DrivingGame.Server --map basic --warp 4   # warped pacing (see Fast mode above)
-DrivingGame.Server --fast --no-collisions # CI pacing, collisions off
+dotnet run --project DrivingGame.Server -- --map basic
+    # console host, REST API on :5001
+dotnet run --project DrivingGame.Server -- --map basic --warp 4
+    # warped pacing (see Fast mode above)
+dotnet run --project DrivingGame.Server -- --map basic --fast --no-collisions
+    # CI pacing, collisions off
 ```
+
+`DrivingGame.Server` is a project, not a command on `PATH` - the built binary
+only exists under `DrivingGame.Server/bin/Debug/net9.0/` (that is the path
+`scripts/run_e2e.sh` launches after its own build step).
 
 - `--map basic` loads the synthetic **test map**
   (`DrivingGame.Sim/TestMaps.cs`) - a small, fully known/deterministic road
@@ -169,7 +224,7 @@ to poke at:
 
 ```bash
 # terminal 1 - console host
-DrivingGame.Server --map basic --warp 4
+dotnet run --project DrivingGame.Server -- --map basic --warp 4
 # terminal 2 - Godot client, HTTP mode (default)
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- --zoom 14
 # or one process: sim embedded in the client + embedded REST API
@@ -222,8 +277,47 @@ python tests/test_turning.py --list               # the numbered scenario list
 python tests/test_turning.py --list-json          # ...as JSON (GET /tests uses this)
 ```
 
-Numbering is preserved when filtering, so "TEST 7/24" always identifies the
+Numbering is preserved when filtering, so "TEST 7/27" always identifies the
 same scenario - the point being to jump straight back to one that failed.
+The selector must match the start-point name EXACTLY (`corner_left_entry`,
+not `corner_left`); an unknown token exits 2 and prints the available list.
+
+### 2a. The scenario list (generated, do not retype)
+
+The suite owns the numbering; `--list` is the only honest copy of it.
+Regenerate this table with `.venv/bin/python tests/test_turning.py --list`
+whenever a scenario is added, dropped or re-ordered - the count that used to
+live in prose here rotted three times.
+
+| # | start point | dir | monitor window | scenario |
+|---|---|---|---|---|
+| 1 | `corner_right_entry` | right | 60 s | sharp 90° right corner |
+| 2 | `corner_left_entry` | left | 60 s | sharp 90° left corner |
+| 3 | `tjunction_from_top` | left | 60 s | T-junction, turning left off the stem |
+| 4 | `tjunction_from_top` | right | 60 s | T-junction, turning right off the stem |
+| 5 | `tjunction_from_top` | left | 60 s | same turn WITH an oncoming car on the bar |
+| 6 | `tjunction_from_top` | right | 60 s | same turn WITH an oncoming car on the bar |
+| 7 | `y_from_stem` | left | 60 s | Y-intersection, left fork (south-east arm) |
+| 8 | `y_from_stem` | right | 60 s | Y-intersection, right fork (south-west arm) |
+| 9 | `crossroads_from_north` | left | 60 s | 4-way crossroads, turning left |
+| 10 | `crossroads_from_north` | right | 60 s | 4-way crossroads, turning right |
+| 11 | `crossroads_from_north` | straight | 60 s | 4-way crossroads, straight through |
+| 12 | `oneway_entry` | straight | 60 s | entering a one-way legally |
+| 13 | `mixed_from_west` | straight | 60 s | one-way into a two-way 4-way, straight |
+| 14 | `mixed_from_east` | straight | 60 s | two-way into a one-way exit, straight |
+| 15 | `s_curve` | straight | 60 s | zig-zag S-curve |
+| 16 | `hairpin_entry` | straight | 60 s | hairpin bend, entry side |
+| 17 | `park_block_overtake` | straight | 60 s | drive around a parked car (R32) |
+| 18 | `park_block_priority` | straight | 60 s | blocked lane + oncoming car (R26/R32) |
+| 19 | `slow_pass_overtake` | straight | 60 s | overtake a 10 km/h crawler (R32/R36) |
+| 20 | `slow_pass_priority` | straight | 60 s | crawler + oncoming: wait, then pass |
+| 21 | `hairpin_exit` | straight | 60 s | hairpin bend, exit side |
+| 22 | `roundabout_from_north` | right | 60 s | roundabout, first exit (west) |
+| 23 | `park_6lane_right_lane` | straight | **45 s** | back-in park from the right lane |
+| 24 | `hairpin_exit` | straight | 60 s | **NEGATIVE** - must go wrong-side (§3) |
+| 25 | `fig8_stress` | straight | **170 s** | capacity probe, 51 cars (**skipped when warped**) |
+| 26 | `fig8_xing` | straight | 60 s | 50-car crossing WITH signs |
+| 27 | `fig8_xing_plain` | straight | 60 s | 50-car crossing, right-before-left |
 
 Test maps do NOT auto-spawn a car: the sim starts with no car
 (`GET /state` reports `has_car: false`) and the suite's setup teleport
@@ -261,35 +355,26 @@ Godot window, run one of the parking-offset scenarios from the suite instead
 set the flag as the nav's destination and trigger the full parking
 approach (including reverse-in where the geometry calls for it).
 
-### Cockpit controller (`tools/controller.py`)
+### Starting a scenario from the window (there is no cockpit any more)
 
-The driver's cockpit is a **separate window** (its own process, its own
-pygame) that talks to the game over the same REST API - the Godot frontend
-stays a pure world view. It shows the dashboard (speed, lamps,
-OFF-ROAD / WRONG-SIDE warnings, fed by `GET /state`) plus one of two panels:
+The pygame "cockpit controller" (`tools/controller.py`) was retired with the
+pygame frontend. What replaces its two uses:
 
-```bash
-python tools/controller.py                 # TEST mode (default): runs the suite
-python tools/controller.py --tests 1-3     # ...but only those scenarios
-python tools/controller.py --drive         # DRIVE mode: manual driving console
-```
+- **Run a scenario and watch it** - the runner: `scripts/run_e2e.sh --tests <n>
+  --watch` (window maximized, camera pinned, cars staged while frozen). The
+  client can also launch one itself: `--run-test <number>` posts
+  `POST /run_test` once the map is up, and `--quit-on-test-done` closes the
+  window when the run finishes (that is how the runner closes it without ever
+  sending a signal).
+- **Drive by hand** - the keys the client itself listens to (`_Input` in
+  `MapRenderer.cs`): arrow keys / WASD steer, `Q`/`E` blinker, `H` hazard,
+  `T` toggles BICYCLE↔FREE, `+`/`-` zoom, `C` centers on the car, mouse drag
+  pans. Everything goes through the same `POST /control` channel the suite uses.
+- **Read a finished car** - click it: the inspector window shows speed, pose,
+  nav state and the rule log from `GET /car/{uid}/decisions`.
 
-- **TEST mode** shows a row of numbered scenario buttons (1..N, same
-  numbering as `--tests`). Clicking a button - or typing its number and
-  pressing Enter - **aborts the current test and starts that one**, then
-  continues with the rest. Buttons turn green/red as scenarios pass/fail;
-  aborted runs are reported separately in the summary and never recorded in
-  `turning_results.json`. The suite output goes to the console exactly as
-  with `test_turning.py`, so the usual `| tee /tmp/test_run.log` workflow
-  applies.
-- **DRIVE mode** is a manual driving console for FREE mode: hold-buttons
-  for steering/gas/brake plus one-shot blinker stalks, hazard and U-turn -
-  mouse or keyboard (arrows/WASD, Q/E, H, U). `F` switches the game between
-  AI (BICYCLE) and manual (FREE) via `POST /toggle`. Both panels feed the
-  same `POST /control` channel the test runner uses.
-
-`python tests/test_turning.py` remains the headless/CI way to run the suite;
-the cockpit is the visible, interactive one.
+`python tests/test_turning.py` against a running host remains the headless/CI
+way to run the suite.
 
 ### Random-location mode
 
@@ -322,16 +407,19 @@ road (criteria below). Decision 2026-08-27: tests must be fast, and
 parking is covered by the dedicated parking scenarios - not bolted onto
 every turn.
 
-**Parking-offset scenarios** (`kerb_check` = true, tests 18-20,
-DRIVING_MANEUVERS.md §1 variant): the only scenarios that still park. The
-runner spawns the car at 15% of the segment in one of THREE lateral start
-positions (baked into the named start points on the parking avenue, always
-on our own side of the road - middle of the left/overtaking driving lane,
-middle of the right/normal driving lane, middle of the parking lane), and
-the red flag at 50% is the nav's DESTINATION (`red_nav: true`): the car must
+**Parking-offset scenario** (`kerb_check` = true, exactly ONE scenario today:
+**#23 `park_6lane_right_lane`**; DRIVING_MANEUVERS.md §1 "Variant: Dead-end /
+route end"): the only scenario that still parks. The runner spawns the car at
+15% of the segment in the lateral position baked into that named start point
+(always on our own side of the road), and the red flag at 50% is the nav's
+DESTINATION (`red_nav: true`): the car must
 execute the full parking approach (parking ramp + kerb drift, plus reverse-in
 where the geometry calls for it) and end with BOTH right-hand wheels within
 `KERB_PASS_MAX_M` (30 cm) of the right kerb - i.e. INSIDE the parking lane.
+(The two other lateral starts on the parking avenue - `park_6lane_left_lane`
+and `park_6lane_parking` - are still *named start points* on the map, but
+their scenarios were dropped by user decision 2026-10-19; #18-#20 are
+right-of-way scenarios, not parking ones.)
 
 A scenario **passes** only if ALL of these hold:
 
@@ -372,25 +460,31 @@ A scenario **passes** only if ALL of these hold:
    must cross for a reason (e.g. passing a parked car on a narrow road)
    needs an explicit per-scenario opt-out - not the default.
 
-   **Negative detector test.** The last scenario in `DETERMINISTIC_TESTS`
-   is a negative test: it replays the old 80%-spawn `hairpin_exit` config,
+   **Negative detector test.** Scenario **#24** is a negative test: it
+   replays the old 80%-spawn `hairpin_exit` config,
    where the car provably slides into the oncoming lane at the tip of the
    V (too close + too fast to make the ~166° turn). It PASSES when the
    wrong-side detection fires and FAILS if the car stays in its own lane -
-   it proves the detector works. It runs last so a full run always ends
-   with every real driving scenario tested first.
+   it proves the detector works. It is **not** the last scenario: #25
+   `fig8_stress`, #26 `fig8_xing` and #27 `fig8_xing_plain` were appended
+   after it, so a full run ends with the three multi-car scenarios and a
+   green #24 says nothing about them.
 4. **No instant heading snaps.** ≤ 30° per frame (physically impossible
    rotation).
 5. **No teleport/jump.** Movement between polls is physically plausible:
    distance ≤ speed × time + margin.
 6. **Game stays alive.** The API answers throughout the scenario.
-7. **Within the window.** Arrival within the scenario's monitor window
-   (default 30 s; `s_curve` and roundabout 40 s - see the table). Passing
+7. **Within the window.** Arrival within the scenario's monitor window - the
+   5th field of each `DETERMINISTIC_TESTS` tuple: **60 s** for all 23 turn
+   scenarios, **45 s** for `park_6lane_right_lane`, **170 s** for
+   `fig8_stress` (whose phases are `STRESS_PHASE_SECONDS` = 30 s of sim time
+   each). Passing
    tests exit on arrival, so the window only bounds how long a FAILING run
-   takes.
+   takes - which is why a `slow_pass_priority` timeout costs the full 60 s.
 
-User-aborted runs (cockpit jump) are neither pass nor fail: they are
-reported separately and not persisted to `tests/turning_results.json`.
+A run aborted from outside (Ctrl-C on the suite, or the runner tearing the
+host down) is neither pass nor fail and is not persisted to
+`tests/turning_results.json`.
 
 For parking tests, criterion 1 is strict on purpose, and it is satisfied by
 the CAR itself: the red flag is the nav's destination
@@ -453,8 +547,8 @@ by `CarCollisions` (see DRIVING_MANEUVERS.md §8 R4/R5/R14).
 
 ## 5. Showing which test is running in the HUD
 
-`tests/test_turning.py` also calls `POST /label` (see `docs/REST_API.md`)
-with the **current test number** (`"10/15"`), shown in the Godot window
+`tests/test_turning.py` also calls `POST /label` (see [REST_API.md](REST_API.md))
+with the **current test number** (`"10/27"`), shown in the Godot window
 - purely a visual aid so a human watching it can tell at a glance which
 scenario is currently being driven.
 Standalone runs (no suite context) fall back to the start point's map-tile
@@ -511,7 +605,8 @@ This is the actual workflow used throughout this project's development:
 
 ## 8. Parallel test runs (multiple cars)
 
-The sim supports several cars at once (docs/MULTI_CAR_PLAN.md), so
+The sim supports several cars at once (semantics in
+[REST_API.md → "Multi-car"](REST_API.md)), so
 scenarios can run in parallel instead of sequentially:
 
 - `POST /teleport {"start_point": ..., "add": true}` spawns a car
@@ -593,9 +688,26 @@ FIRST crash. Pass = the whole fleet survives that window with zero contact.
   open for analysis (`--focus-car <uid>` re-watches the crashed car,
   `CRASH_SHOT=<png>` takes one PNG 0.5 s after the crash camera latches).
 
-Baseline 2026-10-19 (`--warp 4`): both survive 60 s clean - signed crossing
-`moving` 43/50 → 34/50 → 29/50 → 35/50 → 40/50 at t=10…50 s, un-signed
-50/50 → 47/50 → 43/50 → 35/50 → 26/50.
+Baseline 2026-10-23 (`--warp 4`, see **Current baseline** above): **both
+crossings are red** - `fig8_xing` dies at 9.1 s on an unexplained lane-guard
+crossing, `fig8_xing_plain` after 40 s of flow decay on a contact.
+
+**Measured history of these two scenarios** (the reason the criterion is 60 s
+and the reason nobody should call them solved):
+
+| date | both crossings | evidence |
+|---|---|---|
+| 2026-09-11 | crash in 8-16 s: signed `car 8 contacted car 32` at **7.6 s**; un-signed `car 18 contacted car 20` at **15.6 s** (moving already down to 32/50 at t=10 s) | first head-to-head baseline of the crossing experiment (`T_001`, `T_002`) |
+| 2026-10-19 | **survive 60 s, zero contact** - `moving` 43→34→29→35→40 of 50 signed, 50→47→43→35→26 un-signed | the run that set today's pass criterion |
+| 2026-10-22 (`T_231`) | red: #26 unexplained crossing 9.1 s; #27 the **R29 lockdown valve despawned car 96** at 15.1 s | `tests/run_test_T_231_…log` |
+| 2026-10-23 (`T_242`) | red: #26 the same failure at the same 9.1 s; #27 a **contact at 40.2 s** after the flow decayed | `tests/run_test_T_242_…log`, `logs/T_242_crash_623s_car84_car86.json` |
+
+The 2026-09 experiment that chased this (two model branches against one shared
+criterion, `fix/fig8-crossing-opus48` vs `-qwen38`) ended without a head-to-head
+verdict: both branches merged into `main` in pieces, so what survived is the
+engineering (route-true corridor, R8 lateral yield, the widened R14 exit gate,
+stop-line discipline, the frozen spawn discipline) rather than a comparison.
+The 2026-10-19 success did not hold.
 
 ## Crash forensics
 
@@ -638,12 +750,99 @@ python3 tests/car_line_check.py   # ALL vehicle types lined up on a road,
   teleportation-watchdog exception and kill the host. The suite unfreezes
   defensively at the start of every crossing run for that reason.
 
-## Camera focus for the obstruction scenarios (2026-10-21)
+## Camera focus: per test, both clients, one declaration
 
-`scripts/run_e2e.sh` pins the visible window per scenario. For the two
-passes where the subject is a specific staged car, a coordinate pin is the
-wrong instrument — the scenario stages its cast itself, so the uid is not
-knowable before the run. The client takes a ROLE instead:
+**The scenario says what the window should look at** (`SCENARIO_FOCUS` in
+`tests/test_turning.py`). Three kinds, and the difference between the last two
+is the whole point:
+
+| kind | what the camera does | who uses it |
+|---|---|---|
+| `car` (default) | follow the **primary** car and **fit the view to it** (`MapRenderer.CarFocusViewM` = 120 m across the window) | every scenario that declares nothing |
+| `named` | follow that named car of the cast (`POST /teleport {"name": …}`) at a declared px/m | #18 `parked_car`, #19 `slow_car` — the subject is not the primary car |
+| `loc` | a **place**: centre it, hold the declared px/m, and **follow no car at all** | #3–6 (the T-junction node), #17/#20 (the spot on the straight where the pass happens), #26/#27 (the crossing box) |
+
+> **The rule (user decision 2026-10-24):** if a test's focus is not a car, the
+> window gets a **location**, not "a car plus a location". Following one car out
+> of 50 loses the crossing; tailing a car that drives away loses the obstruction
+> the whole test is about.
+
+### Where it is declared, and how it reaches each client
+
+One table, in the file that owns the scenarios — it used to be two python dicts
+embedded in `scripts/run_e2e.sh`, which meant the focus could only be handed to
+the client as ONE command-line argument for the whole window (so a full-suite run
+kept showing the first scenario's framing) and the reviewer could not know it at
+all.
+
+```
+SCENARIO_FOCUS (tests/test_turning.py)
+  ├─ resolved per test against the live map  (GET /segment_names, /segment/{idx})
+  ├─ POST /focus at the scenario's start     → /state.focus  → the VIEWER re-aims once per test
+  │                                          → RunTape       → "# focus step=… …" in the tape
+  └─ --focus-json <n>                        → scripts/run_e2e.sh → --center x y --zoom z / --focus name --zoom z
+```
+
+The verdict travels the same way: `POST /test_result` when the suite files a
+scenario, exported in `/state.test_results` and recorded as `# result …` on the
+tape, so a review can show **"17/27 · ✅ PASSED · 10.6 s sim · 2 crossings"** next
+to the frame under the cursor ([RECORD_PLAYBACK.md](RECORD_PLAYBACK.md)).
+
+Locations are derived from the map's own vocabulary so they survive a rebuilt
+network: `node_prefix` averages the start points of every segment leaving a node
+of that family (the crossing of a fig-8, the mouth of a T), `segment`+`t` is a
+fraction along a named segment. `--focus-json` prints the resolved numbers:
+
+```bash
+.venv/bin/python tests/test_turning.py --focus-json 26
+{"kind":"loc","scenario":"fig8_xing","zoom":26.0,"x":1250.0,"y":1750.0,"uid":…}
+```
+
+The tape of any run proves the plumbing:
+
+```bash
+grep -c '^# focus'  tests/tape_….txt   # 26 on a full run (one per executed scenario)
+grep -c '^# result' tests/tape_….txt   # 26 as well (27 scenarios, fig8_stress skipped)
+diff <(grep '^# result' tests/tape_….txt | grep -oE 'label=[^ ]*' | sort -u) \
+     <(grep '^# focus'  tests/tape_….txt | grep -oE 'label=[^ ]*' | sort -u)   # the join must hold
+```
+
+It answers `{"kind":"car"}` (with a warning line) when no host is up or the named
+road is missing — the camera is cosmetic and must never fail a run.
+
+### The hand always outranks the run
+
+`--center`, `--zoom`, `--focus`, a map drag or `F` set `_tFocusManual`: from then
+on the announced focus does not re-aim the window. In the reviewer the same precedence
+applies — **per scenario**: a slot's **follow** toggle > the hand (map drag,
+minimap pin, slot CENTRE) > `--center`/`--review-name` > **the scenario's
+declaration** > the cast centroid, and **a test boundary releases the hand** so
+the next scenario's focus and follow item take over
+([SIMULATIONS_REVIEWER.md → Per-scenario framing](SIMULATIONS_REVIEWER.md#per-scenario-framing-the-recording-re-claims-the-view-at-every-boundary)).
+
+### Verifying it
+
+```bash
+# scripted (no hand needed): boundaries, tooltip, marker click, bar zoom, Test panel
+"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . --fullscreen -- \
+      --source embedded --map basic --port 5037 --review tests/tape_focusdemo.txt \
+      --test-bar-ui --test-bar-point 1200 2780 --screenshot /tmp/bar.png
+grep -E "BAR-UI|BAR-ZOOM|FOCUS test" /tmp/godot.log
+```
+
+`BAR-UI test panel:` prints the panel's text, `BAR-UI click -> frame N` proves a
+marker click jumps to the right substep, `BAR-ZOOM in/out` prints the visible
+range. Note: Godot does not deliver **pushed** wheel or bare-motion events to
+input handlers in this build, so those two paths are exercised by calling the
+same entry points (`BarZoom`, `ReviewMarkerHover`) — a real wheel/hand goes
+through the identical code.
+
+## Roles: the fallback when a cast was never named (2026-10-21, history)
+
+Superseded by the section above for everything the scenario author knows up
+front (it does know: `SCENARIO_FOCUS` names the car). What stays is the client's
+ROLE fallback, for a cast that was never named — the scenario stages its cast
+itself, so the uid is not knowable before the run:
 
 ```
 --focus parked    # the car parked in the lane  (test 18 park_block_priority)

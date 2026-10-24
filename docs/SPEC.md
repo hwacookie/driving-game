@@ -1,17 +1,25 @@
 # Car Game — Specification
 
-> **Status 2026-10-19 (code-verified):** this is the master spec of the game.
-> The engine is now **C# / Godot 4.7**, not pygame: the simulator is
+> **Status 2026-10-23 (code-verified):** this is the master spec of the game.
+> The engine is **C# / Godot 4.7**, not pygame: the simulator is
 > `DrivingGame.Sim` (+ `DrivingGame.Api`, `DrivingGame.Server`), the client is
-> `MapRenderer.cs`, and the Python original (`/Users/hauke/prj/car`) is
-> retired history. Sections that describe the pygame frontend (Visual Layout,
-> HUD, Minimap, Controls Summary, Game Loop, Debug Features, the Python
-> `config.py` listing) are kept as history - the Godot client is specified in
-> [GODOT_FRONTEND.md](GODOT_FRONTEND.md), the behaviour in
+> `MapRenderer.cs` (+ `MapRenderer.review.cs` for the review window), and the
+> Python original (`/Users/hauke/prj/car`) is retired history. Sections that
+> describe the pygame frontend (Visual Layout, HUD, Minimap, Controls Summary,
+> Game Loop, Debug Features, the Python `config.py` listing, the **pixel** half
+> of "Coordinate System") are kept as history - the Godot client is specified
+> in [GODOT_FRONTEND.md](GODOT_FRONTEND.md), the behaviour in
 > [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md), the interface in
 > [REST_API.md](REST_API.md), the workflow in [TESTING.md](TESTING.md), and
 > the units rule in [UNITS.md](UNITS.md). Where this document and the code
 > disagree, the code (esp. `DrivingGame.Sim/Config.cs`) wins.
+>
+> 2026-10-23 sweep: the pygame-era facts that had crept into present-tense
+> prose were corrected (no pixel frame, no Flask, no `GET /screenshot`, no
+> palette UI, the suite's scenario COUNT now links to the list instead of
+> quoting a number, LOC re-measured, the corridor's left bound is conditional).
+> **Suite verdicts are never stated here** — they live in
+> [TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written).
 
 ## Overview
 
@@ -119,7 +127,9 @@ This section only defines the two drivers and their inputs.
 
 ### BICYCLE Mode (Intent-Based AI)
 The player gives high-level intent; the car executes it with the kinematic
-bicycle model (`src/bicycle_nav.py`: reference line + speed profile + pure pursuit).
+bicycle model (`DrivingGame.Sim/BicycleNav.part1-3.cs`: reference line +
+speed profile + pure pursuit; the Python `src/bicycle_nav.py` it was ported
+from is retired).
 - **W/↑ / S/↓**: Gas / brake (manual override of the speed plan)
 - **A/← / D/→**: Toggle **left / right blinker** → turn that way at the next
   junction where it is still physically possible (DRIVING_MANEUVERS.md §4)
@@ -131,7 +141,7 @@ bicycle model (`src/bicycle_nav.py`: reference line + speed profile + pure pursu
   - Blinker auto-off is mechanical (steering-cam logic: steered in, then back to
     centre), plus per-maneuver rules in DRIVING_MANEUVERS.md
   - Dead ends / route end: car eases to the **right edge** of the road and stops
-    there (DRIVING_MANEUVERS.md §1, "Variante: Sackgassenende / Route-Ende")
+    there (DRIVING_MANEUVERS.md §1, "Variant: Dead-end / route end")
   - Smooth segment transitions (no teleportation)
 
 ### Mode Switching
@@ -153,7 +163,7 @@ truth); the numbers below are the sedan class.
 - **Braking**: 10 m/s² (full ABS braking, ~1 g) - the physical maximum the
   car can still EXECUTE. The DRIVER model demands less (see
   `CarCollisions.ComfortBrakingMps2 = 5.0` m/s² + `ReactionTimeS = 1.0` s,
-  docs/Human Factor Model.md)
+  docs/HUMAN_FACTORS.md)
 - **Coasting (implemented)**: with the throttle off a car no longer holds
   its speed - it sails. Coasting deceleration is
   `Config.CoastDecel(v) = COAST_ROLL_DECEL + COAST_AERO_COEF·v²`
@@ -225,7 +235,7 @@ Two things make the formula trustworthy:
   rate at the apex and leaves the controller no authority to correct with;
   the reserve is what lets it pull back onto the line.
 
-#### The Driving Line (`src/raceline.py`)
+#### The Driving Line (`Raceline.LegalCorridor` + the banded solver)
 
 The car does not follow a fixed lane offset. The line is the solution to
 the driving rules, stated as an optimisation:
@@ -233,13 +243,17 @@ the driving rules, stated as an optimisation:
 | rule | how it is enforced |
 |------|--------------------|
 | 1. never leave the pavement | upper corridor bound: the paved polygon eroded by half the car's width plus `ROAD_EDGE_TOLERANCE_M` (so corner rounding is respected automatically) |
-| 2. never enter the oncoming lane | lower corridor bound: `CAR_WIDTH/2 + LANE_CENTRE_MARGIN_M` right of the centreline; lifted on one-way carriageways |
+| 2. never enter the oncoming lane | lower corridor bound: `CAR_WIDTH/2 + LANE_CENTRE_MARGIN_M` right of the centreline; lifted on one-way carriageways, and **relaxed conditionally** by `leftReliefM` where a manoeuvre needs the left half - an R32 pass of an obstruction inside its R36 window, a merge, a U-turn (`Raceline.LegalCorridor(network, …, double leftReliefM)`) |
 | 3. be as fast as possible | the objective - since `v = sqrt(a_lat/kappa)`, fastest means straightest, so minimise curvature |
 | 4. use a racing line | not a feature; it is what (3) produces |
 
-Rules 1 and 2 are **hard bounds**, so they cannot be traded away for
-speed: a legal line is guaranteed by construction rather than detected
-afterwards by a validator.
+Rule 1 is a **hard bound**: it cannot be traded away for speed, and the legal
+line is guaranteed by construction rather than detected afterwards by a
+validator. Rule 2 is a hard bound **outside** a manoeuvre that asks for the
+left half: the relief is granted per corridor by the caller that owns the
+commitment (R32/R36, `RIGHT_OF_WAY_NEGOTIATION.md` §7b/§7f), never by the
+solver loosening itself - and the lane guard (R33) counts any crossing the
+commitment does not explain as an error.
 
 The classic outside-apex-outside line is encoded nowhere. It emerges: on
 a right-hand bend the solver drives the offset to the centreline side on
@@ -316,7 +330,7 @@ predict).
 The renderer paints a white dot at every node of degree >= 3. Where the
 driving line must pass relative to that dot (straight/right: left of the
 dot; left turn: *voreinander*, i.e. right of it) is specified in
-[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §4 ("Kreuzungsmitte (der weiße Punkt)").
+[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §4 ("Crossing center (the white dot)").
 
 #### On-Road Check: Single Source of Truth
 
@@ -336,10 +350,11 @@ This is now unified:
   included).
 - `RoadNetwork.is_on_road(x, y)` and `Car.is_on_road()` (which now just
   delegates to it) both test against this polygon.
-- `raceline.legal_corridor()` derives the driving corridor from the
+- `Raceline.LegalCorridor()` derives the driving corridor from the
   same polygon, so the line cannot be planned off the pavement.
-- All three share one tolerance constant, `config.ROAD_EDGE_TOLERANCE_M`
-  (0.5m), instead of the planner silently allowing more slack than the
+- All three share one tolerance constant, `Config.ROAD_EDGE_TOLERANCE_M`
+  (**0.35 m**, `Config.cs`; 0.5 m in the Python original), instead of the
+  planner silently allowing more slack than the
   live check honored (which used to cause plans that passed validation
   to immediately register as off-road once actually driven).
 
@@ -401,15 +416,15 @@ roads still use the per-(highway,width) buffer.
 
 How a signaled turn is validated against the current speed and executed — or
 missed (drive straight through, blinker stays on, retry at the next junction)
-— is specified in [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §4 ("Abbiegen"
-→ "Erreichbarkeit"). The feasibility input is the curvature of the optimised
+— is specified in [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §4 ("Turning"
+→ "Reachability"). The feasibility input is the curvature of the optimised
 driving line, not a pre-computed circular arc.
 
 ### Route-End / Dead-End Approach (Right Edge)
 
 Pulling over to the right curb at a genuine dead end or an explicit
 destination and stopping there is a parking variant — specified in
-[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §1 ("Variante: Sackgassenende / Route-Ende").
+[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §1 ("Variant: Dead-end / route end").
 
 ### Turning
 - **FREE mode**: Turn rate depends on speed (slower at high speed)
@@ -628,7 +643,9 @@ position and heading every 0.1 s (max 500 points, oldest dropped first).
 - **Paint buckets on the wheels**: at each recorded position, a small
   filled marker (a "paint bucket") is placed at each of the car's four
   tire positions — the tire centers from the car sprite
-  (`assets/car_sprite.svg`: front axle 62/200 of the length ahead of
+  (`assets/car_blue.png` et al.; the proportions are the constants in
+  `Config.cs` - `FRONT_AXLE_OFFSET_M`, `REAR_AXLE_OFFSET_M`,
+  `TIRE_OUTBOARD_M`): front axle 62/200 of the length ahead of
   center, rear axle 58/200 behind, all tires 36/100 of the width
   outboard), transformed with the recorded center and heading:
   - **Front tires** (front-left, front-right): **yellow**
@@ -645,13 +662,23 @@ position and heading every 0.1 s (max 500 points, oldest dropped first).
 
 ## Coordinate System
 
+> **Current (C# / Godot):** the world frame **IS metres** - `x` east, `y`
+> north, EPSG:3857 projection, origin at the map's south-west corner. There is
+> **no pixel frame** in the sim or the API (`PIXELS_PER_METER` was deleted on
+> 2026-10-19); the Godot client chooses its own px/m at draw time (`--zoom`).
+> Godot's 2D y grows DOWN while the world y grows north, which is the one flip
+> the client does. The rule and the naming conventions:
+> [UNITS.md](UNITS.md). The listing below is the **pygame era**, kept as
+> history:
+
 - **World space**: EPSG:3857 projection (meters)
 - **Screen space**: Pixels
 - **Y-axis**: 
   - World: Y increases northward
   - Screen: Y increases downward
   - Camera handles transform
-- **PIXELS_PER_METER**: 10 (configurable)
+- **PIXELS_PER_METER**: 10 (configurable) — **history: no such constant exists
+  in the C# engine**
 
 ## Configuration (`config.py`)
 
@@ -793,42 +820,54 @@ car/
 - [x] Debug keys (B=breadcrumbs, R=random location, V=validator)
 
 #### Testing & API
-- [x] **REST API** for remote control (Flask, 10+ endpoints)
-  - GET /state - real-time game state
-  - POST /control - send input commands
-  - POST /teleport - move car
-  - GET /screenshot - capture frame
-  - Full thread-safe integration
-- [x] **Automated test suite**
-  - test_api.py - basic API tests
-  - test_turning.py - comprehensive turn tests (6 scenarios)
-  - Instant snap detection (>30° changes)
-  - Off-road violation detection
-  - Screenshot capture on failure
-- [x] 10 unit tests passing
+- [x] **REST API** for remote control — **ASP.NET Core / Kestrel**
+  (`DrivingGame.Api`, **34 handlers over 32 route templates**, both hosts;
+  `POST /focus` + `POST /test_result` added 2026-10-24 for the per-test camera
+  focus, see [REST_API.md](REST_API.md)).
+  The Flask implementation and `GET /screenshot` were the Python/early era:
+  Flask is gone and `/screenshot` was dropped at milestone M5 — a frame is
+  captured by the client itself (`--screenshot <path>`, see
+  [GODOT_FRONTEND.md](GODOT_FRONTEND.md)).
+  - `GET /state` — real-time game state
+  - `POST /control` — send input commands
+  - `POST /teleport` — move car
+  - Full thread-safe integration (command FIFO, see
+    [REST_API.md](REST_API.md))
+- [x] **Automated test suite** — the live e2e suite is `tests/test_turning.py`
+  (**27 numbered scenarios**, list + verdicts:
+  [TESTING.md §2a](TESTING.md#2a-the-scenario-list-generated-do-not-retype)).
+  Instant-snap (>30°) and off-road detection are its assertions; a failed run
+  leaves the scene frozen for a screenshot instead of shooting one blind.
+  `test_api.py` was the Python repo's — retired; endpoint behaviour is covered
+  by the C# xunit suite + the live suite.
+- [x] **91 unit tests passing / 2 skipped** (`DrivingGame.Sim.Tests/`, xunit;
+  the "10 unit tests" line counted the retired Python `test_road_network.py`)
 - [x] **Obstacle system, Part 1** (docs/OBSTACLES.md)
-  - Palette UI next to the minimap: drag & drop parked cars (blue/yellow/white)
+  - ~~Palette UI next to the minimap: drag & drop parked cars~~ — **dropped
+    with the pygame frontend**; obstacles are placed over REST
+    (`POST /obstacles`) and by the suite (R32 staging). The Godot client shows
+    them, it has no palette.
   - Paved-area-only placement; auto-alignment to lane direction — on curves
     and junctions it follows the local tangent of the smoothed centerline
   - Save/load obstacle layouts per map (`data/obstacles/<map>/<name>.json`)
   - REST API: `GET/POST /obstacles`, `DELETE /obstacles/<id>`
   - Stop on contact: full braking + no interpenetration, all driving modes
-  - `tests/test_obstacles.py` (36 headless tests) +
-    `scripts/verify_obstacles_live.py` (live REST verification)
+  - Verification: `SafetySystemsTests` (C# xunit) replaced the retired Python
+    `tests/test_obstacles.py` (36 tests) and `scripts/verify_obstacles_live.py`
 
 ### ✅ Turning physics — DONE (C# engine, 2026-10-19)
 
 The circular-arc planner above was replaced by the raceline optimisation
-(`docs/DRIVING_MANEUVERS.md` §4, `docs/TURN_REWORK_PLAN.md` §14) and the
-kinematic bicycle model. Current e2e state (run 2026-10-19, `--warp 4`,
-`scripts/run_e2e.sh`):
+(`docs/DRIVING_MANEUVERS.md` §4, `docs/SMOOTH_GEOMETRY_DESIGN.md`) and the
+kinematic bicycle model. Current e2e state: **[TESTING.md → "Current
+baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written)**
+(one place, one set of numbers — this section used to restate them and rotted).
+What is stable enough to say here:
 
-- **23/23 scenarios pass** (1 skipped: `fig8_stress`, spawn placement under
-  review) - 0 off-road, 0 instant heading snaps, 0 teleports, 0 wrong-side,
-  0 wrong end segment, 0 timeouts
-- both multi-car crossing scenarios (`fig8_xing` signed, `fig8_xing_plain`
-  right-before-left) survive their full 60 s window with 50 cars and keep
-  flowing (26-50 of 50 cars moving at the 10 s reports)
+- the single-car scenarios (1-24, incl. the negative detector test) are green
+- **three multi-car / long-hold scenarios are known-red** (`slow_pass_priority`,
+  `fig8_xing`, `fig8_xing_plain`) — the two crossings are NOT a solved problem,
+  whatever an older paragraph in this repo claims
 - C# unit tests: **91 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`)
   - skipped: `CrossingStress_NoContact_Within_15s` (the crossing bug in
     unit-test form) and `RebaselineReferenceFile` (manual tool)
@@ -861,7 +900,9 @@ kinematic bicycle model. Current e2e state (run 2026-10-19, `--warp 4`,
 
 These features were added on the verified C# engine AFTER the 1:1 port from
 Python was complete (the port itself is recorded in
-[C_SHARP_PORT_SPEC.md](C_SHARP_PORT_SPEC.md), now closed). Anything the
+the 1:1 port of the Python engine, closed 2026-09-08 — its record lives in
+`diary/` and git history, its forward-looking parts were moved here long ago).
+Anything the
 Python original already had is described elsewhere in this spec; this section
 is the home for the post-port additions and the forward roadmap.
 
@@ -869,7 +910,7 @@ is the home for the post-port additions and the forward roadmap.
 
 Seven real vehicle sprites (`blue` sedan, `silver`, `police`, `tan`,
 `tractor`, `pickup`, `mixer`), assigned per car as `CAR_COLORS[(uid-1) % 7]`
-(see [MULTI_CAR_PLAN.md](MULTI_CAR_PLAN.md)). Each has its own physical
+([REST_API.md → Multi-car](REST_API.md)). Each has its own physical
 footprint (`Config.VEHICLE_SIZES`, single source of truth for renderer + sim)
 and its own longitudinal/lateral dynamics (`Config.VEHICLE_CLASS_SPECS`):
 e.g. car 200 km/h / 2.8 m/s² / 4.5 m/s² lat vs truck 80 km/h / 1.3 / 3.5 vs
@@ -976,12 +1017,12 @@ The synthetic map can now carry real right-of-way furniture:
 - **Run tag** (`RunTag.cs`): every `POST /run_test` gets `T_001`, `T_002`,
   … persisted in `logs/run_counter`, so the suite log and every crash dump
   of that run share the prefix (`T_000` = no run: unit tests, manual drives).
-- **Cap persistence** (docs/Human Factor Model.md §3/§5): a brake decision is
+- **Cap persistence** (docs/HUMAN_FACTORS.md §3/§5): a brake decision is
   held for `ReleaseHoldTicks` = 0.5 s + deterministic per-uid jitter (0…0.5 s)
   before it may release, so boundary situations brake to rest instead of
   flickering on/off every few substeps.
 
-### Flat crossing maps & right-of-way stress — DONE
+### Flat crossing maps & right-of-way stress — BUILT, scenarios known-red
 
 `TestMaps.cs` carries two ground-level degree-4 fig-8 crossings on the
 `basic` map — tile (2,3) "Right-of-way figure-8" (WITH Vorfahrt signs) and
@@ -990,7 +1031,11 @@ truly interact at grade. e2e scenarios `fig8_xing` (signed) and
 `fig8_xing_plain` (no signs) run 50 cars (25/direction, all seven vehicle
 classes, alternating direction) for up to **60 s of sim time** (user
 decision 2026-10-19: surviving one minute = success; the old 300 s window
-ran "forever" on the wall clock) or until the first crash. Both pass.
+ran "forever" on the wall clock) or until the first crash.
+**Both are red today** - see
+[TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written);
+"DONE" below means the SCENARIOS and the crossing geometry exist and run, not
+that the fleet survives.
 (The older single-branch density probe `fig8_stress` is currently skipped
 pending a spawn-placement fix.)
 
@@ -1054,10 +1099,16 @@ driver style acts at follow time, so it never invalidates the line cache.
 
 **Truck left-turn encroachment (Flankieren):** on narrow two-way streets a
 Sattelschlepper can often only take a tight corner by pulling wide into the
-oncoming lane early. The centreline bound must become CONDITIONALLY relaxable
-for wide/long specs — a two-pass solve gated on a feasibility check (relax
-`lo` into the oncoming lane, bounded by its far curb, ONLY when the normal
-solve is infeasible for the class), never a style option. It needs
+oncoming lane early. The centreline bound **is** conditionally relaxable now:
+`Raceline.LegalCorridor(…, double leftReliefM)` grants the relief for a
+committed R32 pass inside its R36 window (and for a merge / on-site U-turn),
+bounded and re-claimed by the lane guard (R33/R36), never as a style option —
+see [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md) §7b/§7f and R36
+in [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8. What is still **open** is
+sizing that relief by VEHICLE CLASS: the corridor still erodes by the global
+`Config.CAR_WIDTH_M` (see "Per-vehicle raceline and kinematics geometry —
+PLANNED" below), so a 2.5 m truck and a 1.8 m sedan ask for the same window.
+The rest of the original argument stands: it needs
 yielding/right-of-way from the driver axis + collision avoidance, so it lands
 with the mixed-traffic work.
 
@@ -1124,10 +1175,13 @@ python -m src.main --map basic --api
 python tests/test_turning.py
 ```
 
-The default mode runs the **deterministic suite**: 18 named scenarios on the
-synthetic `basic` test map (90° corners, T-junction, Y-intersection, 4-way
+The default mode runs the **deterministic suite**: the numbered scenarios of
+the synthetic `basic` test map (90° corners, T-junction, Y-intersection, 4-way
 crossroads, one-way street, S-curve, hairpin, sweeping curve, roundabout,
-sliver junction). Each test:
+sliver junction, parking avenue, figure-8 crossings — the list with its
+numbering and windows:
+[TESTING.md §2a](TESTING.md#2a-the-scenario-list-generated-do-not-retype)).
+Each test:
 - Teleports to a KNOWN start point (exact position + heading)
 - Accelerates to target speed
 - Activates the turn signal (or none, for `straight`)
@@ -1211,6 +1265,12 @@ Either way, all completed scenario results are already saved to
 finishes), and the exit code is 130 (conventional "terminated by signal").
 
 ### REST API Endpoints
+
+> Python-era listing, inside the history block above. `GET /screenshot` **never
+> existed in the C# API** (a frame is shot by the client's own `--screenshot`),
+> and the current surface is **34 handlers over 32 route templates**
+> (the two newest are `POST /focus` and `POST /test_result`):
+> [REST_API.md](REST_API.md).
 
 Start with `--api` flag:
 ```bash
@@ -1396,8 +1456,9 @@ reference repo is history
 **Version**: 1.0 (kinematic bicycle model, raceline optimisation, smoothed
 chain geometry, multi-vehicle classes, car-to-car collision & avoidance,
 road signs + halt lines, crash forensics, embedded/HTTP dual pipeline)
-**Test Results**: e2e **23/23** at `--warp 4` (1 skipped: `fig8_stress`);
-C# unit suite **91 passed / 2 skipped**; both 50-car crossing scenarios
-survive their 60 s window clean
-**Lines of Code**: ~19.5k lines C# (sim + API + client + tests), ~3.9k lines
-Python (e2e suite + QA scripts)
+**Test Results**: see [TESTING.md → "Current baseline"](TESTING.md#current-baseline-the-one-place-a-number-is-written)
+— the suite verdicts are recorded there, in one place, per run; a number
+restated here is a number that will be stale.
+**Lines of Code**: **25,389 lines C#** (sim + API + client + tests, 38 tracked
+`.cs` files), **3,866 lines Python** (e2e suite + QA scripts) —
+`git ls-files '*.cs' | xargs cat | grep -c ''`

@@ -5,7 +5,8 @@ using System.Linq;
 namespace DrivingGame.Sim;
 
 /// <summary>
-/// Smoothed geometry — the §10 pipeline (docs/TURN_REWORK_PLAN.md §10).
+/// Smoothed geometry — the smoothed-curve pipeline
+/// (docs/SMOOTH_GEOMETRY_DESIGN.md).
 /// Ported from /Users/hauke/prj/car/src/smooth_geometry.py.
 ///
 /// "The graph is sacred; the curve is a function of the graph". The OSM node

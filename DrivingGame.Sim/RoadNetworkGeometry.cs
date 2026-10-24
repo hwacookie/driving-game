@@ -410,9 +410,6 @@ public static class RoadNetworkGeometry
         return (TrimAt(coords[0].X, coords[0].Y), TrimAt(coords[^1].X, coords[^1].Y));
     }
 
-    /// <summary>(start_trim, end_trim) in pixels for PAINTED lane markings:
-    /// where a line's end sits at a real junction, the paint stops half the
-    /// WIDEST arm's width plus CENTERLINE_JUNCTION_GAP_M before the node centre.</summary>
     /// <summary>The mouth of a junction per approach: the fillet tangent
     /// points that sit on that approach's two road edges. A normal approach
     /// gets two of them - one from each adjacent corner - and the line

@@ -226,8 +226,18 @@ def save_results(data: dict) -> None:
         print(yellow(f"⚠️  Could not save results to {RESULTS_FILE}: {e}"))
 
 
-def record_result(data: dict, result: dict) -> None:
-    """Record one scenario result (updates 'last' + appends to 'history')."""
+def record_result(data: dict, result: dict, test_no: int = 0) -> None:
+    """Record one scenario result (updates 'last' + appends to 'history').
+
+    `test_no` is the scenario's number in DETERMINISTIC_TESTS as the suite
+    loop counts it. It is NOT derivable from the result dict: the pair
+    (start_point, direction) is not unique (#3/#5 are both
+    'tjunction_from_top'/'left', #21/#24 both 'hairpin_exit'/'straight'), and
+    the crossing scenarios report direction='crossing' where the table says
+    'straight'. Deriving it by matching gave label 3/27 twice and no 5/27,
+    6/27 or 24/27 at all - and a verdict whose label differs from its focus
+    note can never be joined to it in the reviewer
+    (docs/TESTING.md "Camera focus")."""
     if not result.get("start_point"):
         return  # random-location runs have no stable scenario key
     key = f"{result['start_point']}|{result['direction']}"
@@ -243,6 +253,33 @@ def record_result(data: dict, result: dict) -> None:
     for extra in ("jitters", "worst_jump_m"):
         if result.get(extra) is not None:
             entry[extra] = result[extra]
+    # ...and told to the game, so the TAPE carries the verdict as well: a run
+    # reviewed later (host long gone) must still be able to answer "did the suite
+    # call this scenario green?" next to the frame under the cursor.
+    try:
+        num = test_no or next((i for i, t in enumerate(DETERMINISTIC_TESTS, 1)
+                               if t[0] == result["start_point"]
+                               and t[1] == result["direction"]), 0)
+        requests.post(f"{API_URL}/test_result", json={
+            "number": num,
+            "label": f"{num}/{len(DETERMINISTIC_TESTS)}" if num else key,
+            "scenario": result["start_point"],
+            "passed": bool(result["passed"]),
+            # describe_failure() answers None for a clean pass — the panel
+            # shows the verdict, not a reason, in that case.
+            "reason": (entry.get("reason") or "")[:160],
+            # The SAME numbers the run's results table prints, from the same
+            # dict — 'duration' is wall seconds, 'sim_duration_s' the sim window
+            # it watched, and the crossing/off-road counts are the per-scenario
+            # totals (docs/TESTING.md). One source, so the review panel can
+            # never disagree with the log.
+            "sim_s": result.get("sim_duration_s") or 0.0,
+            "wall_s": result.get("duration") or 0.0,
+            "crossings": result.get("centreline_crossings") or 0,
+            "off_road": result.get("off_road_hits") or 0,
+        }, timeout=3)
+    except requests.exceptions.RequestException:
+        pass        # cosmetic: a verdict still lands in the results file
     data["last"][key] = entry
     data.setdefault("history", []).append({"scenario": key, **entry})
 
@@ -386,6 +423,61 @@ START_POINT_NUMBER = {
 # hence its longer window. The parking-offset scenarios keep the full
 # parking approach (parking ramp + kerb drift + back-in + stop at the
 # flag), which is slower - 45 s covers them.
+# ---------------------------------------------------------------------------
+# Per-scenario CAMERA FOCUS — the single source of truth (docs/TESTING.md
+# "Camera focus for the obstruction scenarios"). What a scenario is ABOUT
+# decides what the window shows while it runs, and only the scenario author
+# knows that. Three kinds:
+#
+#   {"kind": "car"}                     → follow the PRIMARY car; fit the view to it
+#   {"kind": "named", "name": …}        → follow that named car of the cast
+#   {"kind": "loc", "x":…, "y":…, …}    → a PLACE: no car is followed at all
+#
+# A scenario that declares no focus gets "car". "loc" is what the crossing and
+# the pass tests need: following one car among 50 shows less than watching the
+# junction, and the pass of a parked car happens AT the obstruction, so a car
+# that drives away would carry the camera out of the story (user decision
+# 2026-10-24: if the test's focus is not a car, focus the LOCATION — never a
+# car on top of it).
+#
+# The two location derivations are the map's own vocabulary, so they survive a
+# rebuilt network: "node_prefix" averages the start points of every segment
+# that LEAVES a node of that family (the crossing of a fig-8, the mouth of a
+# T), "segment"+"t" is a fraction along a named segment (where the scenario
+# parks or slows its car). Both resolve through GET /segment_names +
+# /segment/{idx}, i.e. in metres.
+#
+# This table used to live in scripts/run_e2e.sh as two shell-embedded python
+# dicts, which meant (a) the focus could only ever be handed to the client as
+# ONE command-line argument for the whole window — so a full-suite run kept
+# showing the first scenario's framing — and (b) the Simulationsreviewer, which
+# has no runner, could not know it at all. It is scenario metadata now: the
+# suite resolves it per test, announces it with POST /focus, the sim exports it
+# in /state.focus and the tape records it, so the viewer follows it live and the
+# reviewer replays it frame-accurately.
+SCENARIO_FOCUS = {
+    # The pair meets AT the node — the junction is the subject, not one car.
+    'tjunction_from_top':  {"kind": "loc", "node_prefix": "tjunc_"},
+    # Both crossings: 50 cars through one degree-4 box.
+    'fig8_xing':           {"kind": "loc", "node_prefix": "xing_"},
+    'fig8_xing_plain':     {"kind": "loc", "node_prefix": "xingp_"},
+    # The pass happens at the parked car / at the crawler's start spot, on the
+    # two-lane straight — a place, because the subject never moves (17) or
+    # because the box must hold the whole squeeze (20).
+    'park_block_overtake': {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.5},
+    'slow_pass_priority':  {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.70},
+    # A CAR is the subject, but NOT the primary one: the camera stays on the
+    # obstruction / on the crawler the primary has to squeeze past.
+    'park_block_priority': {"kind": "named", "name": "parked_car"},
+    'slow_pass_overtake':  {"kind": "named", "name": "slow_car"},
+}
+
+# px/m the client holds at a declared focus. A PLACE gets the wide view (the
+# whole crossing has to be in the box); a NAMED car the close one; the default
+# "car" focus has no number here at all — the client fits the view to the car
+# (MapRenderer.CarFocusViewM).
+FOCUS_ZOOM_PXM = {"loc": 26.0, "named": 16.0}
+
 DETERMINISTIC_TESTS = [
     # --- Symbolic anchors -------------------------------------------------
     # expected_end_segment is a segment NAME ("startNode→endNode" - the
@@ -581,7 +673,7 @@ DETERMINISTIC_TESTS = [
      "NEGATIVE: spawn too close to the hairpin corner at 50 km/h - must "
      "slide into the oncoming lane and trigger the wrong-side detection",
      0.8, False, 0.5, True),
-    # MULTI-CAR STRESS (docs/MULTI_CAR_PLAN.md): N cars drive the figure-8
+    # MULTI-CAR STRESS (docs/TESTING.md 'fig8_stress'): N cars drive the figure-8
     # loop at once for 30 s (default phase: 150 cars - realtime-safe). No
     # flags - the metric is how often a car gets displaced jerkily (a
     # "ruckler"): per poll, any car that moves more than the suite's
@@ -628,7 +720,11 @@ class TurnTester:
     """Automated turn tester with detailed violation reporting."""
     
     def __init__(self):
-        self.test_results = []
+        self.test_results: list = []
+        # The scenario the suite loop is running RIGHT NOW, 1-based (0 =
+        # outside a numbered run). record_result's label comes from here
+        # because (start_point, direction) is not unique - see there.
+        self.test_no = 0
         self._time_warp = None   # announced by /state, fetched once
         # One persistent (keep-alive) connection for the stress scenario.
         # Flask serves each request on its own thread, so back-to-back
@@ -751,7 +847,110 @@ class TurnTester:
         """Show (or clear) a short text label in the game's HUD."""
         requests.post(f"{API_URL}/label", json={'text': text})
 
-    # --- Multi-car stress scenario (fig8_stress, docs/MULTI_CAR_PLAN.md) ---
+    # --- Camera focus of THIS scenario (SCENARIO_FOCUS, docs/TESTING.md) ----
+    def resolve_focus(self, key: str, seg_names: dict | None = None) -> dict:
+        """The scenario's focus as CONCRETE numbers (metres, px/m).
+
+        A declaration says WHAT the camera should hold on; only the loaded map
+        knows where that is. Resolution goes through the same symbolic anchors
+        the scenarios address their routes by (GET /segment_names,
+        GET /segment/{idx}) — so a rebuilt network moves the focus with the
+        road it names instead of silently pointing at grass."""
+        spec = dict(SCENARIO_FOCUS.get(key) or {"kind": "car"})
+        kind = spec.get("kind", "car")
+        out = {"kind": kind, "scenario": key,
+               "zoom": spec.get("zoom", FOCUS_ZOOM_PXM.get(kind))}
+        if kind == "named":
+            out["name"] = spec.get("name", "")
+            return out
+        if kind != "loc":
+            out.pop("zoom", None)     # "car": the client fits the view itself
+            return out
+        seg_names = seg_names if seg_names is not None else self.segment_names()
+        try:
+            if spec.get("segment"):
+                idx = seg_names.get(spec["segment"])
+                if idx is None:
+                    raise KeyError(spec["segment"])
+                sg = requests.get(f"{API_URL}/segment/{idx}", timeout=3).json()
+                t = float(spec.get("t", 0.5))
+                out["x"] = round(sg["x1"] + (sg["x2"] - sg["x1"]) * t, 2)
+                out["y"] = round(sg["y1"] + (sg["y2"] - sg["y1"]) * t, 2)
+            elif spec.get("node_prefix"):
+                # The mean of every segment that LEAVES a node of that family:
+                # for a fig-8 or a T that is the crossing / mouth itself.
+                pre = spec["node_prefix"]
+                xs = ys = n = 0.0
+                for i in range(len(seg_names) + 1024):
+                    try:
+                        r = requests.get(f"{API_URL}/segment/{i}", timeout=3)
+                        if r.status_code != 200:
+                            break
+                        sg = r.json()
+                    except (requests.exceptions.RequestException, ValueError):
+                        break
+                    if str(sg.get("start_node", "")).startswith(pre):
+                        xs += sg["x1"]; ys += sg["y1"]; n += 1
+                if n:
+                    out["x"] = round(xs / n, 2); out["y"] = round(ys / n, 2)
+        except (requests.exceptions.RequestException, KeyError, TypeError, ValueError):
+            pass
+        if "x" not in out:
+            # An unresolvable place is not a reason to hijack the camera onto a
+            # car — fall back to the scenario's own start point, which IS a
+            # place, and say so in the log.
+            out["kind"] = "car" if not spec.get("node_prefix") and not spec.get("segment") else "loc"
+            print(f"   ⚠ camera focus for '{key}': the road/prefix it names "
+                  f"could not be resolved against this map (no host, or it is "
+                  f"not on it) — falling back to following the primary car")
+            out["kind"] = "car"
+            out.pop("zoom", None)
+        return out
+
+    def segment_names(self) -> dict:
+        try:
+            return requests.get(f"{API_URL}/segment_names", timeout=3).json() or {}
+        except (requests.exceptions.RequestException, ValueError):
+            return {}
+
+    def announce_focus(self, key: str, label: str | None = None,
+                       seg_names: dict | None = None,
+                       desc: str | None = None,
+                       name_uid: int | None = None) -> dict:
+        """Tell the game (and thereby every client + the tape) what THIS test is
+        about to look at. One POST per scenario, at its start: the viewer
+        re-aims when it sees it, the recorder stamps the substep so the
+        reviewer can replay the same framing frame-accurately."""
+        f = self.resolve_focus(key, seg_names)
+        if label:
+            f["label"] = label
+        # The scenario's own sentence, so a review window can say WHAT is being
+        # watched and not only WHERE: "Parked car in one lane + a car from the
+        # opposite end: the UNBLOCKED car gets the passage…".
+        if desc:
+            f["desc"] = desc
+        # The PRIMARY car's uid, for whoever cannot ask (the reviewer reads a
+        # file, not a live /state). "the primary car" is a live binding in the
+        # viewer and a recorded fact on the tape — without it the review client
+        # could not tell the followed car from the 49 others.
+        if name_uid:
+            # WHICH car the role name belongs to. The scenario stages its cast
+            # AFTER the first announcement, so this arrives as a refinement of
+            # the same label (the tape replaces a re-announcement instead of
+            # stacking a second boundary): without it a replay has to look the
+            # name up, and roles are reused from test to test — '19/27' resolved
+            # to a slow_car from a later scenario and followed nothing.
+            f["name_uid"] = int(name_uid)
+        st = self.get_state()
+        if st and st.get("car_uid") is not None:
+            f["uid"] = st["car_uid"]
+        try:
+            requests.post(f"{API_URL}/focus", json=f, timeout=3)
+        except requests.exceptions.RequestException:
+            pass        # cosmetic: a suite must never fail over a camera
+        return f
+
+    # --- Multi-car stress scenario (fig8_stress, docs/TESTING.md) ---
     # Default phase is 51 cars: the figure-8 loop is only 723 m, and with
     # car-car collisions enabled (unlike the original pass-through design)
     # more than ~50 cars on it is a physical standstill - 150 cars meant
@@ -1211,7 +1410,7 @@ class TurnTester:
                 'worst_jump_m': round(worst_jump_m, 2),
                 'final_segment': None,
                 'expected_end_segment': None,
-            })
+            }, self.test_no)
             save_results(results)
 
             if phase_crashed or aborted:
@@ -1255,6 +1454,17 @@ class TurnTester:
         return raw
 
     # start_point name -> the loop's node-id prefix on the basic map.
+    # One line each, for the window that says what is being watched
+    # (the reviewer's Test panel). The DETERMINISTIC_TESTS tuple carries the
+    # same sentence for the numbered scenarios; the crossing runners are
+    # dispatched by start point and never see that tuple.
+    CROSSING_DESCRIPTIONS = {
+        'fig8_xing': "Right-of-way crossing WITH signs: 50 cars, 25 per "
+                     "direction, first crash or 60 s",
+        'fig8_xing_plain': "Crossing with NO signs (right before left): 50 "
+                           "cars, 25 per direction, first crash or 60 s",
+    }
+
     CROSSING_NODE_PREFIX = {
         'fig8_xing': 'xing_',        # tile (2,3): WITH Vorfahrt signs
         'fig8_xing_plain': 'xingp_', # tile (3,3): NO signs (right-before-left)
@@ -1327,6 +1537,11 @@ class TurnTester:
               f"{n_cars // 2}/direction, up to "
               f"{self.CROSSING_MAX_SIM_SECONDS:.0f} s or first crash")
         print(f"{'-'*60}")
+        # The crossing is the subject of this scenario, so the window belongs
+        # on the crossing box for the WHOLE run — announced here, once, exactly
+        # like the deterministic scenarios announce theirs.
+        self.announce_focus(start_point, label=label,
+                            desc=self.CROSSING_DESCRIPTIONS.get(start_point, ""))
 
         # Defensively UNFREEZE first: a previous crossing run may have left
         # the sim frozen on a crash (see the crash branch below).
@@ -1613,7 +1828,7 @@ class TurnTester:
             'aborted': aborted,
             'final_segment': None,
             'expected_end_segment': None,
-        })
+        }, self.test_no)
         save_results(results)
         # Quality metrics of this run (docs §8): the metres the fleet drove
         # over its own window, per car that was supposed to drive.
@@ -1987,11 +2202,20 @@ class TurnTester:
                 rolling = RUNNING_START_KMH / 3.6
             self.create_car_at_start_point(start_point, progress=start_progress,
                                            speed_mps=rolling)
-            # Label under the minimap: the current test number ("10/15")
+            # Label under the minimap: the current test number ("10/27"),
             # when running as part of a suite; standalone runs fall back
             # to the track number / start-point name.
             self.set_hud_label(label if label is not None
                                else str(START_POINT_NUMBER.get(start_point) or start_point))
+            # What the window should look at for THIS scenario (SCENARIO_FOCUS):
+            # announced before the cast is staged, so the camera is already
+            # aimed when the first frame of the test exists.
+            # (resolve_focus queries /segment_names itself when the caller has
+            # no map snapshot at hand — monitor_turn has none.)
+            # Kept so the cast staging below can REFINE it with the uid each
+            # role went to (announce_focus → POST /focus, docs/TESTING.md).
+            self._focus_decl = self.announce_focus(start_point, label=label,
+                                                   desc=description)
 
             # --- other cars in the same world (multi-car scenarios) --------
             # docs/DRIVING_MANEUVERS.md §8: the T-junction pair runs with a
@@ -2039,6 +2263,13 @@ class TurnTester:
                         print("   ❌ extra car never spawned - aborting scenario")
                         return self._aborted_result(start_point, direction, target_speed, results)
                     extra_uids.append(got)
+                    # Tell the game which car the ROLE went to, as soon as it
+                    # exists: the focus announcement at the scenario's start
+                    # could not know it (the cast is staged here, after it).
+                    if spec.get('name') and getattr(self, '_focus_decl', None):
+                        self._focus_decl = self.announce_focus(
+                            start_point, label=self._focus_decl.get('label'),
+                            desc=self._focus_decl.get('desc'), name_uid=got)
                     if spec.get('park'):
                         # A REAL parked car (docs §8 'Parked car'): the sim
                         # puts it into the nav's parked state - engine off,
@@ -2902,7 +3133,7 @@ class TurnTester:
         
         self.test_results.append(result)
         if results is not None:
-            record_result(results, result)
+            record_result(results, result, self.test_no)
             save_results(results)
         
         return result
@@ -3098,6 +3329,7 @@ class TurnTester:
                 pos += 1
                 continue
 
+            self.test_no = i
             _emit({'type': 'start', 'index': i, 'total': len(tests),
                    'start_point': start_point, 'direction': direction,
                    'speed_kmh': speed, 'description': description})
@@ -3340,6 +3572,23 @@ def main():
 
     # --list / --list-json: print the numbered scenario list and exit.
     # No game needed - used by humans and by the sim's GET /tests endpoint.
+    if '--focus-json' in sys.argv:
+        # --focus-json <number>: resolve ONE scenario's camera focus against the
+        # running map and print it. scripts/run_e2e.sh used to own this
+        # arithmetic in two embedded python blocks; the scenario does now, so
+        # the reviewer (no runner) and a human get the same answer. Exit 0 even
+        # for "no declaration": the default is a car focus, and that IS an
+        # answer.
+        i = sys.argv.index('--focus-json')
+        num = int(sys.argv[i + 1])
+        if not 1 <= num <= len(DETERMINISTIC_TESTS):
+            print(json.dumps({"error": f"no scenario {num}"}))
+            sys.exit(2)
+        # A real TurnTester: it owns the keep-alive session the resolution
+        # queries need, exactly as in a normal run.
+        print(json.dumps(TurnTester().resolve_focus(DETERMINISTIC_TESTS[num - 1][0])))
+        return
+
     if '--list' in sys.argv or '--list-json' in sys.argv:
         rows = []
         for i, t in enumerate(DETERMINISTIC_TESTS, 1):

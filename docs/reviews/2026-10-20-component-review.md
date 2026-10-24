@@ -1,5 +1,9 @@
 # Code Review — C# simulation + Godot client
 
+> **Dated snapshot, not a spec.** Written 2026-10-20 on
+> `fix/fig8-xing-car-contact`; the checkboxes below were updated 2026-10-23
+> where the item has since landed. Live rules live in `AGENTS.md` and `docs/`.
+
 Date: 2026-10-20 · Branch: `fix/fig8-xing-car-contact` · Scope: all 33 hand-written
 `.cs` files (`DrivingGame.Sim`, `DrivingGame.Api`, `DrivingGame.Server`, `DrivingGame.Sim.Tests`,
 `MapRenderer.cs`, `SimHost.cs`, `SharedFrameworkAssemblyLoader.cs`).
@@ -343,7 +347,7 @@ No code was modified. Every finding is a report item, not a patch.
 - [ ] **H3** Replace `SimEngine.GameState` + `StateSnapshot()` (`SimEngine.cs:173, 1240`) with an immutable typed snapshot handed out by reference; no per-frame dict copy, no `dict.update` merge.
 - [ ] **H4** Stop the stale-key leak in `/state`: emit a complete payload per tick instead of merging, so a removed car cannot leave `x`/`y`/`segment` behind.
 - [ ] **H5** Add a prepared-geometry form for the paved polygon (`RoadNetwork.cs:630`) and use it in `IsCarOnRoad`/`IsOnRoad` — the `RacelineSafePrep` idiom (`:106`, `Raceline.cs:441`) already exists in the project for this exact purpose.
-- [ ] **H6** Make `LaneGuard.Check` compute the signed centreline offset once (`:76`/`:83`) and index the centreline locally instead of scanning every vertex of the map.
+- [x] **H6** Make `LaneGuard.Check` compute the signed centreline offset once (`:76`/`:83`) and index the centreline locally instead of scanning every vertex of the map. — **done 2026-10-20/21**: `DrivingGame.Sim/LaneGeometry.cs` (per-segment lane structure as data, reached through `RoadNetwork.LaneGeometryCache` via `LaneGuard.Lanes(network)`) replaced the whole-map vertex walk; §5 of this file records the measurement. See also **R33** in `docs/DRIVING_MANEUVERS.md` §8.
 - [ ] **H7** Cache obstacle footprints on `Obstacle`; stop `ApplyContactStop` copying the obstacle list (`Obstacles.cs:530`) and allocating `BodyBox`/corner lists per SAT test (`:546-620`).
 - [ ] **H8** Build the broadphase grid once per substep and share it between `ComputeAvoidCaps` and `Resolve`; replace the 1089-cell square ring probe (`CarCollisions.cs:446, 567`) with a bounded neighbour walk into a reused buffer.
 - [ ] **H9** Precompute swept boxes per car per substep instead of 4 allocations per sweep sample per pair (`CarCollisions.cs:1854-1893`).
@@ -373,14 +377,14 @@ No code was modified. Every finding is a report item, not a patch.
 - [ ] **L6** Delete the dead client constants `MapRenderer.CarLengthM`/`CarWidthM` (`:122`) and fold `RearAxleOffsetM`/`TireOutboardM` (`:123-125`) back to `Config` so the two cannot drift.
 - [ ] **L7** Delete the `BicycleNav` debug accessors (`part1:274-278`) or gate them on the existing `RefLineMath.PARK_DEBUG` switch.
 - [ ] **L8** Move test-only API surface out of the shipped library: `Raceline.CacheStats` (`:792`), and call `Raceline.ClearCache` (`:797`) on network rebuild so the 1024-entry static cache is not map-scoped-by-accident.
-- [ ] **L9** Delete the two orphaned uid sidecars: `DrivingGame.Sim/Camera.cs.uid`, `DrivingGame.Sim.Tests/Fig8TwoWayDiagTests.cs.uid`.
-- [ ] **L10** Correct the stale unit comment `RoadSegment.X1…Y2 // world pixel coords` (`RoadNetwork.cs:17`) to metres, per `docs/UNITS.md`.
-- [ ] **L11** Rewrite the 7 pygame-parity comments (`MapRenderer.cs:359/821/1177/1211/1900/2259`, `SimEngine.cs:283`) to state the Godot reason, and drop the `docs/C_SHARP_PORT_SPEC.md (TODO, not implemented)` reference (`MapRenderer.cs:310`) — that spec is CLOSED.
+- [x] **L9** Delete the two orphaned uid sidecars: `DrivingGame.Sim/Camera.cs.uid`, `DrivingGame.Sim.Tests/Fig8TwoWayDiagTests.cs.uid`. — **done** (verified 2026-10-23: both files gone; the remaining `*.uid` files each have their `.cs`).
+- [x] **L10** Correct the stale unit comment `RoadSegment.X1…Y2 // world pixel coords` (`RoadNetwork.cs:17`) to metres, per `docs/UNITS.md`. — **done 2026-10-23** (`// world coords, METRES (x east, y north)`). Same pass: the orphaned `/// (start_trim, end_trim) in pixels …` doc comment in `RoadNetworkGeometry.cs` was deleted (a duplicate of the correct `in metres` summary 30 lines below it).
+- [x] **L11** Rewrite the 7 pygame-parity comments (`MapRenderer.cs:359/821/1177/1211/1900/2259`, `SimEngine.cs:283`) to state the Godot reason, and drop the `docs/C_SHARP_PORT_SPEC.md (TODO, not implemented)` reference (`MapRenderer.cs:310`) — that spec is CLOSED. — **done 2026-10-23.** The spec reference is gone (and the sentence next to it, which claimed the sim still collides with a sedan box, now states that `Config.VEHICLE_SIZES` is shared by renderer and sim); `--screenshot` is described as the AGENTS.md visual check, not a "parity check vs pygame". One historical mention remains on purpose: `MapRenderer.cs` "Drag the map with the left button (same as pygame)" — provenance, not a requirement (`grep -c "pygame parity" *.cs` = 0).
 - [ ] **L12** Compute `RouteSegments()` once in `BicycleNav.part2` (`:177-178`, `:360-361`, `:211/305/365`) and reuse `RouteSegSet`.
 - [ ] **L13** Keep running totals in `LaneGuard` instead of summing all-time maps (`:202-204`).
 - [ ] **L14** Reuse the band buffers in `Raceline.MinCurvatureOffsets` (`:144-260`) across active-set rounds; flatten the `double[][]` band.
 - [ ] **L15** Collapse the `geom.Geometries().Length > 0 ? … : new[] { geom }` idiom (`RoadNetwork.cs:596/646`, `RoadNetworkGeometry.cs:1245/1411`) into the helper.
-- [ ] **L16** Prune regenerated artifacts (`tests/run_test_*.log` ~150 files, `logs/`, `DrivingGame.csproj.old`) via a `scripts/setup.sh` step.
+- [ ] **L16** Prune regenerated artifacts (`tests/run_test_*.log` ~150 files, `logs/`, `DrivingGame.csproj.old`) via a `scripts/setup.sh` step. — **half done** (verified 2026-10-23): `DrivingGame.csproj.old` is gone and `.gitignore` covers `tests/run_test_*.log` + `logs/`; the prune step in `setup.sh` does not exist. Open question for the user: the ~100 committed `tests/tape_T_*.txt` are the same kind of regenerated artefact but are NOT ignored — see [RECORD_PLAYBACK.md → retention](../RECORD_PLAYBACK.md).
 
 **Suggested order:** H1 (latent crash) → H10/H11 (state ownership + debug removal, they touch the same files) → H2/H3/H4 (one snapshot redesign) → H5–H9 (one broadphase/geometry-index redesign) → M1–M3 → M4–M10 → L1–L16.
 

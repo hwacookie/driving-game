@@ -1,4 +1,4 @@
-# Car lights — current status (2026-10-19, code-verified)
+# Car lights — current status (2026-10-23 re-verified; measured 2026-10-19, code-verified)
 
 The car light system lives on both sides of the seam: the **sim** owns the
 state, the **Godot client** (`MapRenderer.cs`) draws it. This document

@@ -1,4 +1,10 @@
-# Godot Smoke/Steam Effect on Car Collision
+# Crash effect: a one-shot smoke puff in Godot — NOT implemented
+
+> **Status 2026-10-23:** still **NOT implemented** (re-verified: no
+> `GPUParticles2D`/`CPUParticles2D` anywhere in `MapRenderer.cs`).
+> Renamed 2026-10-23 from `CarVisuals.md`, which described neither: this page
+> is a how-to for a crash effect, not a description of how cars are drawn (that
+> is [GODOT_FRONTEND.md](GODOT_FRONTEND.md) §7 "Cars").
 
 > **Status 2026-10-19:** NOT implemented in this project. `MapRenderer.cs`
 > contains no `GPUParticles2D`/`CPUParticles2D` and no crash effect - a crash

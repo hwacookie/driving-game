@@ -1,6 +1,9 @@
 # Obstacles — Specification
 
-> **Status 2026-10-19 (code-verified):** Part 1 is implemented in
+> **Status 2026-10-23 (code-verified; restamped from 2026-10-19 — the
+> no-UI statements below were re-checked: `Move()` has no caller, `MapRenderer.cs`
+> contains no `Obstacle` reference, layout `Save`/`Load`/`ListLayouts` have no
+> REST endpoint).** Part 1 is implemented in
 > `DrivingGame.Sim/Obstacles.cs` (`Obstacle`, `ObstacleGeometry`,
 > `ObstacleManager`) and covered by `SafetySystemsTests`. Placement today
 > goes through the **REST API only** — the Godot client has no palette UI
@@ -147,10 +150,16 @@ DELETE /obstacles/<id>       → removes the obstacle; 404 if unknown id
 
 - `x`/`y` are world coordinates, same as in saved layouts.
 - Heading is never a client input — it is always computed from the road
-  geometry at the drop point (same rule as the palette).
-- Obstacles placed via API and via palette are the same world objects: both
-  appear in `GET /obstacles`, both can be dragged/trashed in the UI, both are
-  saved by SAVE.
+  geometry at the placement point (the retired pygame palette had the same rule).
+- API-placed obstacles are the same world objects as the retired palette's
+  were: they appear in `GET /obstacles`.
+  **Today there is no UI for any of it**: nothing can be dragged or trashed in
+  the Godot client (`ObstacleManager.Move()` has no caller), the client does not
+  draw obstacles at all, and layout persistence —
+  `ObstacleManager.Save(name)` / `Load(name, network)` / `ListLayouts()`,
+  `data/obstacles/<map>/<name>.json` — is implemented in the sim but has
+  **neither a REST endpoint nor a SAVE button**: only
+  `SafetySystemsTests` exercises it today.
 
 ## Stop on Contact (collision with obstacles)
 

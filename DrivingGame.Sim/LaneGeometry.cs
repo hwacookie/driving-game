@@ -4,7 +4,7 @@
 // walking every centreline vertex of the whole map for every car every
 // substep (measured: 405 us/car/step - 57 % of the sim step, and flat in car
 // count, because it does not depend on the traffic at all; see
-// review_2026-10-20.md §4). A car can only ever be in trouble with the road it
+// docs/reviews/2026-10-20-component-review.md §4). A car can only ever be in trouble with the road it
 // is ON, and the car already knows which road that is: Car.SegIdx.
 //
 // So this class states, per segment, the lane structure the segment DECLARES

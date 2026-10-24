@@ -8,7 +8,8 @@ using Xunit;
 namespace DrivingGame.Sim.Tests;
 
 /// <summary>
-/// Phase 2 gate (docs/C_SHARP_PORT_SPEC.md): the C# raceline port must
+/// Port-era gate (Phase 2 of the Python->C# port, closed 2026-09-08): the C#
+/// raceline port must
 /// reproduce the Python reference dump (car repo tools/raceline_reference.py)
 /// at ~1e-9 tolerance. The strict tests inject the PYTHON paved + eroded-safe
 /// polygons so both implementations solve on IDENTICAL geometry; a separate

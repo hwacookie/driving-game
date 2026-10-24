@@ -1,6 +1,17 @@
-# Human Factor Model — Driver Decision Timing & Experience Parameters
+# Driver Decision Timing & Experience Parameters (human factors)
 
-Supplementary notes for the fig-8 lemniscate crossing simulation ruleset. This document covers how to make car behavior feel human: decision frequency, perception-reaction latency, decision persistence, and experience-based parameterization (novice vs. expert drivers).
+> **Status 2026-10-23 (code-verified):** the measurements this model produced
+> are in the code and unchanged: `CarCollisions.ReactionTimeS = 1.0`,
+> `ComfortBrakingMps2 = 5.0`, `LookAheadMinM = 40` / `LookAheadMaxM = 300`,
+> `ReleaseHoldTicks = 30 + (uid · 14) % 31` (per-car persistence, §3/§5).
+> Referenced by rules **R7** and **R11** in
+> [DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) §8 and cited from
+> `CarCollisions.cs`. Renamed 2026-10-23 from `Human Factor Model.md` — a file
+> name with spaces can never be a working link.
+
+Supplementary notes for the driving ruleset — it grew out of the fig-8
+lemniscate crossing, but the model applies to every car: this document covers
+how to make car behavior feel human: decision frequency, perception-reaction latency, decision persistence, and experience-based parameterization (novice vs. expert drivers).
 
 ## 1. How often does a human "decide"?
 

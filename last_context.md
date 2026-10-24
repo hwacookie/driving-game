@@ -1,7 +1,24 @@
 # Carried-forward context (compacted)
 
+> ⚠ **DATED SNAPSHOT — 2026-10-19. NOT the current state.** This is a session
+> hand-off block, kept verbatim for continuity; every number, branch name and
+> `file:line` in it describes the tree on that date.
+> What has changed since (verified 2026-10-23): the work is on `main`
+> (`c827710`), `feat/unified-units` is merged; the review client
+> (`MapRenderer.review.cs`) and the right-of-way negotiation
+> (`Negotiation.cs`) did not exist yet; `MapRenderer.cs:199` is now
+> `MapRenderer.GodotGenFile` (the generation-file watch), `LookAheadMaxM` is
+> **300.0** (not 250.0) and the broadphase look-ahead ring is **16 cells**
+> (not 14); the build gate is "0 errors" (warning counts vary with
+> incremental vs full rebuild); and the e2e baseline is **not** 21/23 — the
+> suite has 27 numbered scenarios and the current verdict is
+> [docs/TESTING.md → "Current baseline"](docs/TESTING.md#current-baseline-the-one-place-a-number-is-written).
+> For live status read `README.md`, `docs/SPEC.md` and
+> [docs/reviews/](docs/reviews/) — not this file.
+
 Snapshot of where the work stands — carry this block forward as the new
-context. Written 2026-10-19 on branch `feat/unified-units` (pushed).
+context. Written 2026-10-19 on branch `feat/unified-units` (pushed, since
+merged into `main`).
 
 ## Goal
 
@@ -23,7 +40,8 @@ systems — **done, all three steps plus the final naming sweep.**
 - No pygame parity requirements — Godot idioms win.
 - **Never signal Godot** (SIGTERM → .NET abort + macOS crash window). Close
   a window by bumping `/tmp/driving_game_godot_gen` and polling until it
-  exits; the client watches that file (`MapRenderer.cs:199`) and calls
+  exits; the client watches that file (`MapRenderer.GodotGenFile` — line 199
+  on that date) and calls
   `GetTree().Quit()`. Signalling the .NET console host IS fine.
 - E2E: `scripts/run_e2e.sh`, default `--warp 4`, Godot window visible
   unless `--no-godot`, stream output.

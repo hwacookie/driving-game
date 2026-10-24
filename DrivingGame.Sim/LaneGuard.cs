@@ -61,7 +61,7 @@ public sealed class LaneGuard
     // window of samples around the car's own arc position. (The old whole-map
     // MultiLineString scan cost 405 us/car/step - 57 % of the sim step - and
     // could answer with the OTHER road's line at a crossing or under a bridge
-    // deck; see review_2026-10-20.md §4.)
+    // deck; see docs/reviews/2026-10-20-component-review.md §4.)
     public LaneGeometry Lanes(RoadNetwork network) =>
         network.LaneGeometryCache ??= new LaneGeometry(network);
 
