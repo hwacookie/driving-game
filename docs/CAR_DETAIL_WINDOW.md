@@ -1,12 +1,17 @@
 # Car detail window — the per-car inspector (both clients)
 
-> **Status 2026-10-24: specified, NOT built.** Every entry below is a binding
+> **Status 2026-10-24: the REVIEWER half is BUILT** — the window
+> (`CarDetailWindow.cs`), the right-click menu, the chain, the event list and
+> the `held_by` data layer it reads; `--test-slot-buttons` drives and measures
+> it (see §"Built in the reviewer"). **Not built:** the viewer's wiring, the
+> peek card and the session file.
+>
+> Every entry below is a binding
 > user decision taken in the discussion of 2026-10-24 (voice notes transcribed
 > into this document; where a wording was ambiguous the reading is stated as a
 > reading, never as a decision). It **supersedes** the three car slots of
-> [`SIMULATIONS_REVIEWER.md` § "Three car slots"](SIMULATIONS_REVIEWER.md) —
-> that section describes what is BUILT today and stays as the current state
-> until this is implemented.
+> [`SIMULATIONS_REVIEWER.md` § "Three car slots"](SIMULATIONS_REVIEWER.md),
+> which now describes the retired instrument.
 >
 > Neither the tape column nor the `/state` keys this needs exist yet. When
 > they land, [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md) and
@@ -273,6 +278,42 @@ Restore rules:
    is stored at all.
 4. The **live** client has no tape and no cursor: it persists `windows`,
    `camera` and `zoom` in a second section of the same file.
+
+## Built in the reviewer (2026-10-24)
+
+What exists, and how each claim was measured (`--test-slot-buttons`, which kept
+the flag of the slot test it replaces and now drives the window):
+
+| claim | the line the probe prints |
+|---|---|
+| a window per car, no cap | `DETAIL-OPEN #28 (oncoming_car) · 1 window(s) open · at (14, 206) size (620, 316)`, then a second `DETAIL-OPEN #27 … · open=2` |
+| right-click names the windows | `DETAIL-MENU car #26 (20/27) at (2510,1148) · 3 entries (2 window(s) already open)` — one per open window plus `New slot` |
+| the header fits a real car | `speed='0 km/h' rect=(94, 59), (122, 50) … pose='x 101.8 y 228.8 h 0°' rect=(377, 67), (231, 34) · head=(596, 72)` inside a 620 px window |
+| resizing grows ONLY the list | `resized +220px: header 176 -> 176 px (UNCHANGED) · list 90 -> 310 px (took the growth)` |
+| follow is the pin, riding the car | `DETAIL-FOLLOW #28 ON — the pin rides the car · followed=28` and `cam moved=(1.75,16.20) · pin=(101.75, -228.799)` — the pin IS the car's pose |
+| a step row jumps the tape | `DETAIL-SEEK step 17470 -> frame 17469/35482 (was 21000/35482) · SIM 291.172 s`, pressed on the row it names (`seek of #17470`) |
+
+Four things this work settled, each because a first attempt looked right and
+measured wrong:
+
+- **`RichTextLabel` in an `HBoxContainer` has no natural width.** The two lamp
+  dots as one bbcode label were squeezed to 1 px wide, wrapped into 124 px of
+  height, reported that as their minimum — and the window grew to 827 × 1200 px
+  for a car. Two `Label`s, one glyph each, is the container-friendly form.
+- **`ClipText = true` on a `Label` in a container collapsed the header row** to
+  1 px labels: the text was set, the row was 72 px high, and the picture showed
+  a sprite with nothing beside it. Clipping is the subwindow's job.
+- **The minimum a container reports is what its children WANT**, not what the
+  operator asked for. Deriving `MinSize` from it made the window demand the
+  width of the longest event line; the floor is a constant, and a longer line
+  scrolls (`HorizontalScrollMode` stays on).
+- **A pushed mouse event does not reach this client's `_Input` once satellite
+  windows exist** — measured: not ONE button event arrived at `_Input` across a
+  whole probe run, while presses aimed at a window's buttons were answered by
+  that window. So the probe feeds the pick a constructed `InputEventMouseButton`
+  and its own line says the delivery is Godot's, verified by hand; what is
+  measured is the client's half: the 12 m pick radius, the decline over the
+  instrument strip, and the menu the pick opens.
 
 ## Implementation surface
 

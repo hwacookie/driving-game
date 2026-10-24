@@ -79,7 +79,7 @@ public partial class MapRenderer : Node2D
     private StreamWriter _motionLog;
     private bool _testPan;
     private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
-    private bool _testSlotButtons;   // --test-slot-buttons: click a slot's two corner buttons
+    private bool _testSlotButtons;   // --test-slot-buttons: drive a car detail window
     private bool _testPanProbe;      // --test-pan-probe: log a scripted pan, twice
     private bool _testBarUi;         // --test-bar-ui: wheel-zoom + marker tooltip/click
     private bool _testFocusProbe;    // --test-focus-probe: review auto-focus + follow trace
@@ -515,7 +515,7 @@ public partial class MapRenderer : Node2D
                 _testBarPoint = new Vector2(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
                 i += 2;
             }
-            else if (args[i] == "--test-slot-buttons")
+            else if (args[i] == "--test-slot-buttons")   // retired name, see --test-detail
                 _testSlotButtons = true;
             else if (args[i] == "--test-pan-probe")
                 _testPanProbe = true;
@@ -635,7 +635,6 @@ public partial class MapRenderer : Node2D
                 GD.Print("!! review: no tape readable - falling back to the live view");
             }
             BuildReviewHud();
-            BuildReviewSlots();
             BuildRunPicker();
             // A review window draws the TAPE, so a live sim beside it is
             // irrelevant to the picture - and the live surface (speed label,
@@ -788,153 +787,13 @@ public partial class MapRenderer : Node2D
 
         if (_testSlotButtons)
         {
-            // Dev hook (same family as --test-seek / --test-window-out): drive
-            // the two corner buttons of slot 1 through the real input path -
-            // pick a car, toggle follow, centre, toggle back - and read the
-            // camera and the toggles back after each, so the decision is
-            // measured, not assumed.
-            GetTree().CreateTimer(2.0).Timeout += () =>
-            {
-                var vpS = GetTree().Root.GetVisibleRect().Size;
-                // Two picks, a hand's width apart, so two slot windows own a
-                // car and the "one car followed" rule has something to enforce.
-                foreach (var at in new[] { vpS / 2f, vpS / 2f + new Vector2(120f, 0f) })
-                {
-                    GetViewport().PushInput(new InputEventMouseButton
-                    {
-                        Position = at, GlobalPosition = at,
-                        ButtonIndex = MouseButton.Left, Pressed = true,
-                    });
-                    GetViewport().PushInput(new InputEventMouseButton
-                    {
-                        Position = at, GlobalPosition = at,
-                        ButtonIndex = MouseButton.Left, Pressed = false,
-                    });
-                }
-                GetTree().CreateTimer(0.6).Timeout += () =>
-                {
-                    if (_slots.Count == 0) return;
-                    var s = _slots[0];
-                    GD.Print($"SLOT-TEST after pick: uid={s.UidShown} visible={s.Win.Visible} " +
-                             $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2})");
-                    GetTree().CreateTimer(0.4).Timeout += () =>
-                    {
-                        // Click slot 1's FOLLOW button, in the window's lower-right
-                        // corner: the window's client origin plus the control's
-                        // own rect, which is window-local.
-                        var fr = s.FollowBtn.GetGlobalRect();
-                        var c = new Vector2(s.Win.Position.X + fr.Position.X + fr.Size.X / 2f,
-                                            s.Win.Position.Y + fr.Position.Y + fr.Size.Y / 2f);
-                        GetViewport().PushInput(new InputEventMouseButton
-                        {
-                            Position = c, GlobalPosition = c,
-                            ButtonIndex = MouseButton.Left, Pressed = true,
-                        });
-                        GetViewport().PushInput(new InputEventMouseButton
-                        {
-                            Position = c, GlobalPosition = c,
-                            ButtonIndex = MouseButton.Left, Pressed = false,
-                        });
-                        GetTree().CreateTimer(0.5).Timeout += () =>
-                        {
-                            GD.Print($"SLOT-TEST follow click: slot0 following={s.Following} " +
-                                     $"followed uid={SlotFollowUid()} button='{s.FollowBtn.Text}' " +
-                                     $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2})");
-                            // Then the CENTRE button - momentary.
-                            var cr = s.CenterBtn.GetGlobalRect();
-                            var c2 = new Vector2(s.Win.Position.X + cr.Position.X + cr.Size.X / 2f,
-                                                 s.Win.Position.Y + cr.Position.Y + cr.Size.Y / 2f);
-                            GetViewport().PushInput(new InputEventMouseButton
-                            {
-                                Position = c2, GlobalPosition = c2,
-                                ButtonIndex = MouseButton.Left, Pressed = true,
-                            });
-                            GetViewport().PushInput(new InputEventMouseButton
-                            {
-                                Position = c2, GlobalPosition = c2,
-                                ButtonIndex = MouseButton.Left, Pressed = false,
-                            });
-                            GetTree().CreateTimer(0.5).Timeout += () =>
-                            {
-                                GD.Print($"SLOT-TEST centre click: cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
-                                         $"mmAsk={_mmAsk != null} following={s.Following}");
-                                // And follow again - the toggle must switch OFF.
-                                GetViewport().PushInput(new InputEventMouseButton
-                                {
-                                    Position = c, GlobalPosition = c,
-                                    ButtonIndex = MouseButton.Left, Pressed = true,
-                                });
-                                GetViewport().PushInput(new InputEventMouseButton
-                                {
-                                    Position = c, GlobalPosition = c,
-                                    ButtonIndex = MouseButton.Left, Pressed = false,
-                                });
-                                GetTree().CreateTimer(0.5).Timeout += () =>
-                                {
-                                    GD.Print($"SLOT-TEST follow twice: slot0 following={s.Following} " +
-                                             $"followed uid={SlotFollowUid()} button='{s.FollowBtn.Text}'");
-                                    // Now the SECOND slot's follow - it must take
-                                    // the camera and switch the first back off.
-                                    if (_slots.Count < 2 || _slots[1].UidShown <= 0L)
-                                    {
-                                        // Re-assert the framing the panel just
-                                    // described, so the shot shows the SAME
-                                    // instrument state the log line reports.
-                                    ReviewMarkers();
-                                    if (_screenshotPath != null) SaveShot(_screenshotPath);
-                                        return;
-                                    }
-                                    var s2 = _slots[1];
-                                    var fr2 = s2.FollowBtn.GetGlobalRect();
-                                    var c3 = new Vector2(s2.Win.Position.X + fr2.Position.X + fr2.Size.X / 2f,
-                                                         s2.Win.Position.Y + fr2.Position.Y + fr2.Size.Y / 2f);
-                                    GetViewport().PushInput(new InputEventMouseButton
-                                    {
-                                        Position = c3, GlobalPosition = c3,
-                                        ButtonIndex = MouseButton.Left, Pressed = true,
-                                    });
-                                    GetViewport().PushInput(new InputEventMouseButton
-                                    {
-                                        Position = c3, GlobalPosition = c3,
-                                        ButtonIndex = MouseButton.Left, Pressed = false,
-                                    });
-                                    GetTree().CreateTimer(0.5).Timeout += () =>
-                                    {
-                                        GD.Print($"SLOT-TEST second follow: slot1 following={_slots[1].Following} " +
-                                                 $"slot0 following={s.Following} followed uid={SlotFollowUid()}");
-                                        // Turn the FIRST one on again while the
-                                        // second holds the camera - the rule
-                                        // "switching one on switches the others
-                                        // off" has to be measured, not assumed.
-                                        GetViewport().PushInput(new InputEventMouseButton
-                                        {
-                                            Position = c, GlobalPosition = c,
-                                            ButtonIndex = MouseButton.Left, Pressed = true,
-                                        });
-                                        GetViewport().PushInput(new InputEventMouseButton
-                                        {
-                                            Position = c, GlobalPosition = c,
-                                            ButtonIndex = MouseButton.Left, Pressed = false,
-                                        });
-                                        GetTree().CreateTimer(0.5).Timeout += () =>
-                                        {
-                                            GD.Print($"SLOT-TEST third follow: slot0 following={s.Following} " +
-                                                     $"slot1 following={_slots[1].Following} followed uid={SlotFollowUid()}");
-                                            // Re-assert the framing the panel just
-                                    // described, so the shot shows the SAME
-                                    // instrument state the log line reports.
-                                    ReviewMarkers();
-                                    if (_screenshotPath != null) SaveShot(_screenshotPath);
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
-            };
+            // --test-slot-buttons: the car detail window's own probe
+            // (docs/CAR_DETAIL_WINDOW.md). The name predates the window — it
+            // was the three slots' button test — and it keeps the flag while
+            // measuring the new instrument: open, follow, resize, seek, open a
+            // second. Each step prints the state it claims to have caused.
+            GetTree().CreateTimer(2.0).Timeout += () => DetailProbe();
         }
-
         if (_testPanProbe)
         {
             // DIAGNOSTIC ONLY — it changes no state a normal run sees. The
@@ -961,11 +820,11 @@ public partial class MapRenderer : Node2D
                 GD.Print($"PAN-PROBE {tag}: vp={vpS.X:F0}x{vpS.Y:F0} " +
                          $"cam=({_cam.GlobalPosition.X:F2},{_cam.GlobalPosition.Y:F2}) " +
                          $"zoom={_cam.Zoom.X:F2} pan=({_reviewPan.X:F2},{_reviewPan.Y:F2}) " +
-                         $"mmAsk={mmAsk} follow={SlotFollowUid()} " +
+                         $"mmAsk={mmAsk} follow={DetailFollowUid()} " +
                          $"override={(_overrideCenter == null ? "-" : "set")} " +
                          $"dragging={_dragging} stripDrag={_stripDrag} " +
                          $"barTop={_barTop:F0} band={_zoneTop:F0}..{_zoneBot:F0} " +
-                         $"obeys={(_review ? (SlotFollowUid() != 0L ? "slot-follow" : _mmAsk != null ? "HAND-PIN(pan ignored)" : "centroid+pan") : "camera direct")}");
+                         $"obeys={(_review ? (DetailFollowUid() != 0L ? "slot-follow" : _mmAsk != null ? "HAND-PIN(pan ignored)" : "centroid+pan") : "camera direct")}");
             }
             // One scripted grab at a FRACTION of the window height, so the
             // answer is "from which y down does a drag stop being a grab".
@@ -1064,44 +923,18 @@ public partial class MapRenderer : Node2D
             // pan is not broken - it is SHADOWED by the pin that wins.
             GetTree().CreateTimer(5.6).Timeout += () =>
             {
-                if (_slots.Count == 0 || _slots[0].UidShown <= 0L)
+                // The action the operator does all day: CENTRE the view on a
+                // car from its detail window — that is the hand-pin — then the
+                // SAME drag that worked above. If _reviewPan moves but the
+                // camera does not, the pan is not broken: it is SHADOWED by the
+                // pin that wins (this is the probe that proved it, 2026-10-24).
+                var win = ProbeDetailWindow();
+                if (win == null)
                 {
-                    var vp = GetViewport().GetVisibleRect().Size;
-                    Vector2 at = new Vector2(vp.X * 0.5f, vp.Y * 0.5f);
-                    if (_review && _cursor >= 0 && _cursor < _tape.Count && _tape[_cursor].Cars.Count > 0)
-                    {
-                        var c0 = _tape[_cursor].Cars[0];
-                        var world = CarPose(c0.Uid);
-                        if (world != null)
-                        {
-                            at = _cam.GetCanvasTransform() * world.Value;
-                            GD.Print($"PAN-PROBE pick uid {c0.Uid}: world " +
-                                     $"({world.Value.X:F1},{world.Value.Y:F1}) -> screen " +
-                                     $"({at.X:F0},{at.Y:F0})");
-                        }
-                    }
-                    GetViewport().PushInput(new InputEventMouseButton
-                    { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left, Pressed = true });
-                    GetViewport().PushInput(new InputEventMouseButton
-                    { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left, Pressed = false });
+                    GD.Print("PAN-PROBE centre step: no car on this frame - skipping");
+                    return;
                 }
-                GetTree().CreateTimer(0.5).Timeout += () =>
-                {
-                    if (_slots.Count == 0 || _slots[0].UidShown <= 0L)
-                    {
-                        GD.Print("PAN-PROBE centre step: no car picked — skipping the centre click");
-                        return;
-                    }
-                    var sq = _slots[0];
-                    var r = sq.CenterBtn.GetGlobalRect();
-                    var c = new Vector2(sq.Win.Position.X + r.Position.X + r.Size.X / 2f,
-                                        sq.Win.Position.Y + r.Position.Y + r.Size.Y / 2f);
-                    GD.Print($"PAN-PROBE clicking slot 1 CENTRE (uid {sq.UidShown}) at ({c.X:F0},{c.Y:F0})");
-                    GetViewport().PushInput(new InputEventMouseButton
-                    { Position = c, GlobalPosition = c, ButtonIndex = MouseButton.Left, Pressed = true });
-                    GetViewport().PushInput(new InputEventMouseButton
-                    { Position = c, GlobalPosition = c, ButtonIndex = MouseButton.Left, Pressed = false });
-                };
+                ClickInWindow(win, win.CentreButton, $"PAN-PROBE detail CENTRE uid {win.Uid}");
             };
             DragAt("#5-after-centre", 0.70, 7.0);   // the ONE band no satellite window covers
             GetTree().CreateTimer(8.2).Timeout += () =>
@@ -1222,7 +1055,7 @@ public partial class MapRenderer : Node2D
                              $"pan=({_reviewPan.X:F0},{_reviewPan.Y:F0}) " +
                              $"mmAsk={(_mmAsk == null ? "null" : "PIN")} " +
                              $"center={(_overrideCenter == null ? "null" : "SET")} " +
-                             $"slotFollow={SlotFollowUid()} playing={_playing}");
+                             $"slotFollow={DetailFollowUid()} playing={_playing}");
                 }
                 Guard("before");
                 ReviewButton("play");
@@ -2604,6 +2437,45 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>Zoom by f, keeping the world point under `at` fixed.</summary>
+    /// <summary>A scripted click on a control that lives in one of THIS
+    /// client's satellite windows: the control's own rect is window-local, so
+    /// the point is window origin + local centre. Probes drive the real input
+    /// path this way — no private method is called, the button answers like a
+    /// button.</summary>
+    /// <summary>A scripted click on a control that lives in one of THIS
+    /// client's satellite windows, driven through the real input path — a probe
+    /// that calls a private method proves nothing about what a hand does.
+    ///
+    /// Two coordinates, both measured rather than reasoned about:
+    ///   · `Window.Position` IS the client area's origin in the main window's
+    ///     space; the chrome sits OUTSIDE it (`OuterRect` subtracts 8/32 to get
+    ///     from one to the other). Adding the chrome "because a title bar is
+    ///     32 px" puts every press 32 px too LOW — measured: a follow press
+    ///     landed in the window's bottom frame and did nothing, while a row
+    ///     press five rows up still hit a DIFFERENT row's button and the probe
+    ///     reported a seek that had jumped somewhere else. A wrong answer that
+    ///     looks green is the reason this is written down.
+    ///   · the press goes to the ROOT viewport: a subwindow is a Viewport of
+    ///     its own whose (0,0) is its client corner, so pushing main-window
+    ///     numbers into `w.GetViewport()` puts the press outside that window
+    ///     and no control ever sees it (this is what the minimap probe does).</summary>
+    public void ClickInWindow(Window w, Control c, string tag)
+    {
+        var r = c.GetGlobalRect();
+        var at = new Vector2(w.Position.X + r.Position.X + r.Size.X / 2f,
+                             w.Position.Y + r.Position.Y + r.Size.Y / 2f);
+        GD.Print($"{tag}: click at ({at.X:F0},{at.Y:F0}) " +
+                 $"(window {w.Position} + local " +
+                 $"({r.Position.X + r.Size.X / 2f:F0},{r.Position.Y + r.Size.Y / 2f:F0}) " +
+                 $"· client {w.GetVisibleRect().Size})");
+        GetViewport().PushInput(new InputEventMouseButton
+        { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left,
+          ButtonMask = MouseButtonMask.Left, Pressed = true });
+        GetViewport().PushInput(new InputEventMouseButton
+        { Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left,
+          ButtonMask = MouseButtonMask.Left, Pressed = false });
+    }
+
     /// <summary>Absolute zoom (px/m), clamped like the wheel is. The declared
     /// per-test focus names a zoom, so it needs an absolute setter rather than
     /// a chain of relative notches.</summary>

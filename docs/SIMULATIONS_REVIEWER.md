@@ -52,7 +52,9 @@ Every flag the client parses (all after `--`):
 | `--crash-shot <path>` | one PNG 0.5 s after the crash camera latches |
 | `--run-test <number>` / `--quit-on-test-done` | launch one scenario through `POST /run_test`; close the window when a test run finishes |
 | `--motionlog <path>` | per-frame motion log (the `--test-*` diagnostics read this) |
-| `--test-pan`, `--test-seek <frac>`, `--test-scrub-drag <n>`, `--test-bar-point <x> <y>`, `--test-slot-buttons`, `--test-jog`, `--test-window-out`, `--test-minimap-pan <x> <y>` | scripted interactions, for reproducing a window/HUD defect without a hand on the mouse |
+| `--test-pan`, `--test-seek <frac>`, `--test-scrub-drag <n>`, `--test-bar-point <x> <y>`,
+`--test-slot-buttons` (the car detail window: open, follow, resize, seek —
+see [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)), `--test-jog`, `--test-window-out`, `--test-minimap-pan <x> <y>` | scripted interactions, for reproducing a window/HUD defect without a hand on the mouse |
 | `--resize <w> <h>` | grow the window shortly after start — the only scripted way to reproduce "HUD after maximize" |
 | `--test-bar-ui` | scripted probe for the bar's new layers: lands the cursor inside a scenario, zooms the range, hovers and clicks a marker, then prints the tooltip, the Test panel and `focus at cursor` — the deterministic check for boundaries/tooltip/zoom (Godot does not deliver **pushed** wheel or bare-motion events to handlers, so those two go through the same entry points a real event feeds) |
 | `--test-pan-probe` | scripted **pan** probe: the same grab at five window heights, then a slot CENTRE, then the grab again, printing `cam / zoom / _reviewPan / _mmAsk / which pin obeys` around each — the instrument that separated "panning is broken" from "panning is shadowed by the pin" (2026-10-24) |
@@ -152,12 +154,12 @@ slot filters its markers onto the marker lane and leaves the curve alone.
 
 ## Three car slots
 
-> **Superseded 2026-10-24, still what is BUILT.** The three-slot row is being
-> replaced by the per-car **car detail window** — unlimited windows, opened by
-> right-click only, shared with the live viewer, resizable with a real event
-> list, and remembered across sessions. Specified in
-> [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md) (**not built**); the section
-> below stays as the current state until that lands.
+> **RETIRED 2026-10-24.** The three-slot row is gone; the reviewer opens a
+> **car detail window** per car (`CarDetailWindow.cs`) — unlimited windows,
+> right-click to open, the real chain, a scrolling event list, resizable with
+> only the list growing. Spec and measured evidence:
+> [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md). The section below is kept as the
+> history of the instrument it replaced.
 
 | panel row | content | already available |
 |---|---|---|
@@ -511,7 +513,7 @@ above says what replaced them):
 | scrub bar + six buttons ▶ ⏸ ⏹ ● ◀ ▶▶ | inside the bar, dark strip |
 | ⚠ playback-rate buttons ½× 1× 2× 4× 8× | on the bar (rate was keyboard-only before) — replaced by the rate dropdown 2026-10-22 |
 | ⚠ two-line readout | tape · frame [cursor/len] · SIM time · map + hash · fluidity · mode / cam x y zoom · view · units — three lines in ONE box since 2026-10-22 |
-| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it). **Superseded 2026-10-24** by [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md): window per car, no cap, right-click to open, footprint dropped, held-by chain instead of the EndsWith guess, event LIST instead of one collapsed line, geometry + session remembered |
+| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it). **RETIRED 2026-10-24** — replaced by [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md): window per car, no cap, right-click to open, footprint dropped, the `held_by` chain instead of the EndsWith guess, a scrolling event LIST instead of one collapsed line. Session memory (geometry, cursor, camera) is the open part |
 | decision trail | count **plus the last two texts** with their frame numbers, clipped to the panel |
 | chart | cyan fleet curve, **yellow standstill blocks** (fleet-level band + per-car lane), **decision hairlines** under the curve, white cursor tick |
 | run picker | six newest tapes listed under the minimap; clicking one reloads that tape, rewinds, re-points the camera |

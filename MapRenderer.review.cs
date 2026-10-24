@@ -140,7 +140,6 @@ public partial class MapRenderer : Node2D
     private OptionButton _rateBtn;        // playback rate (a CHOICE, not a trigger)
     private Vector2 _hudBuiltAt;          // window size the HUD was laid out for
     private double _barTop = 1e9;         // top edge of the instrument strip
-    private float _slotRowY = -1e9f;        // readout bottom the slot row sits under
     private int _seekDbg;
     private int _fontDbg;       // calls until the font probe prints (text must exist by then)
     private int _readoutFont;     // the size the readout is laid out at
@@ -161,27 +160,16 @@ public partial class MapRenderer : Node2D
     /// TARGET is padded rather than the picture (the marker stays thin, the
     /// mouse gets MarkerHitPadPx on either side).</summary>
     const double MarkerHitPadPx = 7.0;
-    private readonly List<SlotWin> _slots = new();
-    private readonly List<long> _selected = new();   // last-clicked first
+    /// <summary>The open car detail windows, oldest first
+    /// (docs/CAR_DETAIL_WINDOW.md). No cap: the operator opens as many as they
+    /// want and closes each with its own x.</summary>
+    private readonly List<CarDetailWindow> _details = new();
+    private readonly List<long> _selected = new();   // = the open windows' cars
+    /// <summary>The car whose chain id the hand is holding down: a red box on
+    /// the map for as long as the button stays pressed.</summary>
+    private long _detailHighlight;
+    private Line2D _highlightBox;
     private readonly List<Line2D> _markTicks = new();
-
-    /// <summary>One car's detail window (#5 of the 2026-10-22 review list): a
-    /// real window with a title bar naming the car, draggable, closable,
-    /// resizable - plus what WE last asked of it, so the operator's own
-    /// placement is never fought by a relayout.</summary>
-    private sealed class SlotWin
-    {
-        public Window Win; public Label Lab; public ColorRect Bg;
-        public bool Closed;    // its × was used - only a new pick reopens it
-        public long UidShown = -1L;
-        // The two small controls in the window's LOWER-RIGHT corner (binding
-        // user decision 2026-10-23): follow is a TOGGLE - on, the camera
-        // follows this car, the same binding pressing F makes in the viewer,
-        // and turning one on turns the others off. centre is MOMENTARY - the
-        // press puts the view on this car and that is all it does.
-        public Button FollowBtn; public Button CenterBtn;
-        public bool Following;     // the follow toggle's own state
-    }
 
     static readonly List<double> Rates = new() { 0.5, 1.0, 2.0, 4.0, 8.0 };
 
@@ -657,8 +645,7 @@ public partial class MapRenderer : Node2D
         BuildReviewHud();
         BuildRunPicker();
         // The open windows follow the row, and the row follows the readout -
-        // which the loop in ReviewSlots does once the new size has settled.
-        _slotRowY = -1e9f;
+        // which the loop in UpdateDetails does once the new size has settled.
         GD.Print($"REVIEW-HUD rebuilt for {GetViewport().GetVisibleRect().Size} " +
                  "(fixed HUD sizes)");
     }
@@ -1180,7 +1167,7 @@ public partial class MapRenderer : Node2D
         ReviewHud();
         ReviewPoseCheck();
         ReviewCamera();
-        ReviewSlots();
+        UpdateDetails();
         ReviewMarkers();
         ReviewAxis();
     }
@@ -1455,10 +1442,15 @@ public partial class MapRenderer : Node2D
         }
     }
 
+    /// <summary>The pick. RIGHT-click asks which window should show this car
+    /// (docs/CAR_DETAIL_WINDOW.md: the only gesture that opens or re-points a
+    /// window). A LEFT press on a car is the peek card's, and the card is the
+    /// next step — until it exists, the left button on a map car does nothing
+    /// but keep its pan.</summary>
     private void ReviewSelect(InputEvent e)
     {
         if (!(e is InputEventMouseButton m) || !m.Pressed) return;
-        if (m.ButtonIndex != MouseButton.Left) return;
+        if (m.ButtonIndex != MouseButton.Right) return;
         var vp = GetViewport().GetVisibleRect();
         // A click on the instrument strip is the strip's business (seek, a
         // button, the dropdown) - never a pick. _Input runs BEFORE the GUI
@@ -1488,14 +1480,16 @@ public partial class MapRenderer : Node2D
         if (_clickDbg < 4)
         {
             _clickDbg++;
-            GD.Print($"REVIEW-PICK hit uid {best} at ({m.Position.X:F0},{m.Position.Y:F0})");
+            GD.Print($"REVIEW-PICK uid {best} at ({m.Position.X:F0},{m.Position.Y:F0})");
         }
-        var next = new List<long>();
-        next.Add(best);
-        foreach (var u in _selected)
-            if (u != best && next.Count < 3) next.Add(u);
-        _selected.Clear();
-        foreach (var u in next) _selected.Add(u);
+        // The menu decides WHAT shows this car — a window's content, or a new
+        // window (docs/CAR_DETAIL_WINDOW.md). The old tail of this function
+        // rebuilt `_selected` here (last-clicked first, three deep); that list
+        // is now DERIVED from the open windows, so a pick that rewrote it would
+        // silently re-point the marker lane and the chart behind the windows'
+        // backs — the kind of second source of truth the sync helper exists to
+        // prevent.
+        OpenDetailMenu(m.Position, best);
     }
 
     private void ReviewInput(InputEvent e)
@@ -1652,248 +1646,502 @@ public partial class MapRenderer : Node2D
                          $"delta=({dx:F2},{dy:F2}) m at frame {fr.Step}");
         }
     }
-    /// <summary>The three detail windows (docs/SIMULATIONS_REVIEWER.md): the
-    /// three last-clicked cars, and until anything is clicked the first three
-    /// by uid - the panels are useful before the first click.</summary>
-    private void BuildReviewSlots()
+    // --- the car detail windows (docs/CAR_DETAIL_WINDOW.md) -----------------
+    // One window per car, opened by RIGHT-click on the car and closed by its
+    // own ×. No cap and no fixed row: the operator places them, the shared
+    // guard keeps them inside the main window and 5 px clear of each other,
+    // and `_selected` — the marker lane and the chart — is simply the cars that
+    // have a window, in the order they were opened.
+    //
+    // What this replaces (the three-slot row): a fourth car could not be
+    // shown, a resized window fought its own stamped Label size, and a car's
+    // whole decision history — up to 953 events on a stress run — was one
+    // truncated line. The chain was a string match on the cap key, which is
+    // why `held_by` went onto the tape first (step 1 of that document).
+
+    /// <summary>Open a window for one car. Called by the right-click menu
+    /// ("New slot"), by a chain id clicked, and by the detail probe.</summary>
+    private CarDetailWindow OpenDetailWindow(long uid)
     {
-        // THREE REAL WINDOWS. Each car gets a window whose TITLE BAR names the
-        // car, with a close button of its own, draggable aside and resizable -
-        // an operator comparing two cars puts them next to each other instead
-        // of reading three fixed columns painted on the map.
-        //
-        // The earlier attempt at this gave up ("an embedded Window ignores the
-        // position asked of it, its children landed outside the frame"): the
-        // children had been placed in MAIN-window coordinates INSIDE the
-        // subwindow's own viewport. A subwindow is a Viewport - its children
-        // are positioned in ITS coordinates, and a full-rect anchor is what
-        // follows it when the operator resizes it.
-        SlotRowSize(out float slotW, out float slotH);   // the row's one rule
-        for (int i = 0; i < 3; i++)
+        var w = new CarDetailWindow
         {
-            var w = new Window
-            {
-                Title = "car —",
-                Transient = true,          // belongs to this window, not to the app
-                Visible = false,           // until a car owns the slot
-                Size = new Vector2I((int)slotW, (int)slotH),
-                Position = new Vector2I((int)(12.0f + i * slotW),
-                                        (int)(_hudLabelBottom + 10.0f)),
-            };
-            AddChild(w);
-            RegisterWindow(w);   // the guard in MapRenderer.cs keeps it inside
-            // the main window and WinGapPx from the other windows
-            var layer = new CanvasLayer { Layer = 1 };
-            w.AddChild(layer);
-            // The window's own background is the theme's; this is the panel
-            // colour the review surface uses everywhere.
-            var bg = new ColorRect
-            {
-                Color = new Color(14 / 255f, 16 / 255f, 22 / 255f, 250f / 255f),
-                MouseFilter = Control.MouseFilterEnum.Ignore,
-            };
-            bg.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-            layer.AddChild(bg);
-            var lab = new Label
-            {
-                Text = "—",
-                AutowrapMode = TextServer.AutowrapMode.WordSmart,
-                ClipText = true,
-            };
-            lab.AddThemeFontSizeOverride("font_size", SlotFontPx);
-            lab.AddThemeColorOverride("font_color", new Color(0.92f, 0.92f, 0.95f));
-            layer.AddChild(lab);
-            // The label keeps the bottom strip clear for the two corner
-            // controls - a decision line that ends under a button is a line
-            // that cannot be read.
-            lab.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
-            lab.Position = new Vector2(12f, 10f);
-            lab.Size = new Vector2((float)slotW - 24f,
-                                   (float)(slotH - (SlotBtnH + SlotBtnInset + 14f)));
-            // The two small controls in the LOWER-RIGHT corner - the corner
-            // farthest from the title bar the window is read by, and the one
-            // the decision trail never reaches (its lines are top-anchored).
-            // Anchored to the window's bottom-right, so a drag or a resize of
-            // the window carries them along instead of leaving them on the map
-            // - the same rule the panel inside uses.
-            var followBtn = new Button
-            {
-                Text = "follow",
-                TooltipText = "follow this car - on/off; only one car is followed",
-                FocusMode = Control.FocusModeEnum.None,
-            };
-            followBtn.SetAnchorsPreset(Control.LayoutPreset.BottomRight);
-            followBtn.OffsetLeft = -(SlotBtnW * 2f + SlotBtnGap + SlotBtnInset);
-            followBtn.OffsetRight = -(SlotBtnW + SlotBtnGap + SlotBtnInset);
-            followBtn.OffsetTop = -(SlotBtnH + SlotBtnInset);
-            followBtn.OffsetBottom = -SlotBtnInset;
-            followBtn.AddThemeFontSizeOverride("font_size", 17);
-            // The follow STATE is this window's own (SlotWin.Following), not
-            // the engine's pressed flag: this build's Button bindings expose
-            // neither one_shot nor a way to force another button's state, and
-            // the decision says switching one ON switches the OTHERS off -
-            // which only an owner-side loop can do. The button paints the
-            // state, so what you see and what the camera does cannot part.
-            var fIdx = i;
-            followBtn.Pressed += () => ToggleFollowSlot(fIdx);
-            layer.AddChild(followBtn);
-            var centerBtn = new Button
-            {
-                Text = "centre",
-                TooltipText = "put the view on this car (momentary)",
-                FocusMode = Control.FocusModeEnum.None,
-            };
-            // MOMENTARY by construction: the press runs CenterViewOnSlot once
-            // and the button keeps no state of its own, so holding it cannot
-            // do more than the first click did.
-            centerBtn.SetAnchorsPreset(Control.LayoutPreset.BottomRight);
-            centerBtn.OffsetLeft = -(SlotBtnW + SlotBtnInset);
-            centerBtn.OffsetRight = -SlotBtnInset;
-            centerBtn.OffsetTop = -(SlotBtnH + SlotBtnInset);
-            centerBtn.OffsetBottom = -SlotBtnInset;
-            centerBtn.AddThemeFontSizeOverride("font_size", 17);
-            var cIdx = i;
-            centerBtn.Pressed += () => CenterViewOnSlot(cIdx);
-            layer.AddChild(centerBtn);
-
-            var sw = new SlotWin
-            {
-                Win = w, Lab = lab, Bg = bg,
-                FollowBtn = followBtn, CenterBtn = centerBtn,
-            };
-            int idx = i;
-            w.CloseRequested += () => { _slots[idx].Closed = true; w.Visible = false; };
-            _slots.Add(sw);
-        }
-    }
-
-    /// <summary>Where the row goes: under the readout, three across what the
-    /// map window leaves.</summary>
-    private void SlotRowSize(out float slotW, out float slotH)
-    {
-        var vp = GetViewport().GetVisibleRect();
-        float slotFont = SlotFontPx;
-        slotW = Mathf.Max(300.0f, ((float)vp.Size.X - MmInsetWidth() - MmFrameBorder
-                                   - 36.0f) / 3.0f);
-        // Room for the eight lines a full slot can carry - a decision text
-        // that wraps must not be clipped away, it is the reason to look -
-        // plus the button strip under them, so the corner controls never eat
-        // a line of the reading.
-        slotH = slotFont * 12.0f + SlotBtnH + SlotBtnInset * 2f;
-    }
-
-    /// <summary>Place one slot window in the row. Asked for ON SHOW, not every
-    /// frame: an embedded window reports back a position that includes its own
-    /// decoration, so comparing the report against the request reads as a drag
-    /// that never happened - which is how the row used to come out scattered
-    /// (the old code's "a Window ignores the position asked of it").</summary>
-    private void PlaceSlot(int i)
-    {
-        SlotRowSize(out float slotW, out float slotH);
-        var s = _slots[i];
-        s.Win.Position = new Vector2I((int)(12.0f + i * slotW),
-                                      (int)(_hudLabelBottom + 10.0f));
-        s.Win.Size = new Vector2I((int)slotW, (int)slotH);
-        s.Lab.AddThemeFontSizeOverride("font_size", SlotFontPx);
-    }
-
-
-    private void ReviewSlots()
-    {
-        if (_slots.Count == 0) return;
-        // The row hangs under the readout, so it follows that box's height.
-        // The height is not known on the frame the window appears: the font
-        // loop needs a few frames to settle, and a window placed against a
-        // height that then grows ends up ON the address it should sit under.
-        // The one thing this must not do is fight a drag - which it cannot,
-        // because dragging moves a window, not the readout.
-        if (Mathf.Abs(_hudLabelBottom - _slotRowY) > 2.0f)
+            CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, "")),
+        };
+        AddChild(w);
+        RegisterWindow(w);          // inside the main window, 5 px from the others
+        w.Position = DetailSpot(_details.Count);
+        w.CloseRequested += () => CloseDetailWindow(w);
+        w.FollowAsked = ToggleDetailFollow;
+        w.CenterAsked = CenterDetail;
+        w.SwitchAsked = (win, other) =>
         {
-            _slotRowY = _hudLabelBottom;
-            for (int i = 0; i < _slots.Count; i++)
-                if (_slots[i].Win.Visible) PlaceSlot(i);
+            // "click an id, read about THAT car" — the window changes subject,
+            // which also drops its `show all` (that was an ask about the old car).
+            win.CarTexture = CarTexture(_carColors.GetValueOrDefault(other, ""));
+            win.ShowCar(other);
+            SyncSelectedFromDetails();
+            GD.Print($"DETAIL-SWITCH window → #{other} ({NameOf(other)})");
+        };
+        w.HighlightAsked = (win, other, on) =>
+        {
+            if (on) _detailHighlight = other;
+            else if (_detailHighlight == other) _detailHighlight = 0L;
+            SetMapHighlight(_detailHighlight);
+        };
+        w.SeekAsked = (win, step) => SeekToStep(step);
+        _details.Add(w);
+        w.ShowCar(uid);
+        SyncSelectedFromDetails();
+        GD.Print($"DETAIL-OPEN #{uid} ({NameOf(uid)}) · {_details.Count} window(s) open " +
+                 $"· at {w.Position} size {w.Size}");
+        return w;
+    }
+
+    /// <summary>Draw (or erase) the red box the map shows while the hand holds
+    /// a chain id. It hangs off the CAR's own node, so it rides the car without
+    /// a per-frame write and inherits the node's rotation (the body box is then
+    /// stated once, in the car's local metres).</summary>
+    private void SetMapHighlight(long uid)
+    {
+        if (uid == 0L || !_carNodes.TryGetValue(uid, out var node))
+        {
+            if (_highlightBox != null) _highlightBox.Visible = false;
+            return;
         }
+        if (_highlightBox == null)
+        {
+            _highlightBox = new Line2D
+            {
+                Width = 3f,
+                DefaultColor = new Color(1f, 0.25f, 0.22f, 0.95f),
+                Closed = true,
+                ZIndex = 20,
+            };
+        }
+        if (_highlightBox.GetParent() != node) node.AddChild(_highlightBox);
+        var color = _carColors.GetValueOrDefault(uid, "");
+        var (bw, bl) = DrivingGame.Sim.Config.SizeForColor(color);
+        float y0 = (float)(-DrivingGame.Sim.Config.REAR_AXLE_OFFSET_M - bl / 2.0);
+        float y1 = y0 + (float)bl, x0 = (float)(-bw / 2.0), x1 = x0 + (float)bw;
+        _highlightBox.Points = new[] { new Vector2(x0, y0), new Vector2(x1, y0),
+                                       new Vector2(x1, y1), new Vector2(x0, y1) };
+        _highlightBox.Visible = true;
+    }
+
+    private void CloseDetailWindow(CarDetailWindow w)
+    {
+        bool wasFollow = w.Following;
+        if (_detailHighlight != 0 && w.HighlightUid == _detailHighlight) _detailHighlight = 0L;
+        _details.Remove(w);
+        w.QueueFree();
+        SyncSelectedFromDetails();
+        GD.Print($"DETAIL-CLOSE #{w.Uid} · {_details.Count} window(s) left" +
+                 (wasFollow ? " · the follow went with it" : ""));
+    }
+
+    /// <summary>The marker lane and the chart draw for the cars that have a
+    /// window — one truth, no second selection list to keep in step.</summary>
+    private void SyncSelectedFromDetails()
+    {
+        _selected.Clear();
+        foreach (var d in _details)
+            if (d.Showing) _selected.Add(d.Uid);
+    }
+
+    /// <summary>Where a window with no remembered geometry goes: a cascade
+    /// under the readout. The guard would separate overlapping windows anyway
+    /// (`EnforceWindows`, the 5 px belt); asking for a free spot first is what
+    /// keeps them where they were put instead of being shoved.</summary>
+    private Vector2I DetailSpot(int n)
+    {
+        var vp = GetViewport().GetVisibleRect().Size;
+        int w = CarDetailWindow.DefaultWidthPx, h = CarDetailWindow.DefaultHeightPx();
+        int x = 14 + (n % 3) * (w / 3);
+        int y = (int)(_hudLabelBottom > 0 ? _hudLabelBottom + 12 : 140) + (n / 3) * 28;
+        x = Mathf.Clamp(x, 12, Mathf.Max(12, (int)vp.X - w - 12));
+        y = Mathf.Clamp(y, 12, Mathf.Max(12, (int)vp.Y - h - 160));
+        return new Vector2I(x, y);
+    }
+
+    /// <summary>The car the camera rides: the LAST window whose follow is on
+    /// (one car is followed, and the newest ask is the one the operator made).</summary>
+    private long DetailFollowUid()
+    {
+        for (var i = _details.Count - 1; i >= 0; i--)
+        {
+            var d = _details[i];
+            if (d.Following && d.Showing) return d.Uid;
+        }
+        return 0L;
+    }
+
+    private void ToggleDetailFollow(CarDetailWindow w)
+    {
+        w.Following = !w.Following;
+        if (w.Following)
+        {
+            // Only one car is followed: turning one on turns the others off
+            // (the same binding the slots carried), and the pin itself is
+            // re-anchored by ReviewCamera on the next frame.
+            foreach (var other in _details)
+                if (!ReferenceEquals(other, w)) other.Following = false;
+        }
+        GD.Print($"DETAIL-FOLLOW #{w.Uid} {(w.Following ? "ON — the pin rides the car" : "off")}" +
+                 $" · followed={DetailFollowUid()}");
+    }
+
+    private void CenterDetail(CarDetailWindow w)
+    {
+        var pose = CarPose(w.Uid);
+        if (pose == null)
+        {
+            GD.Print($"DETAIL-CENTRE #{w.Uid} not on this frame — the view stays");
+            return;
+        }
+        _mmAsk = ClampViewCentre(pose.Value, "detail centre");
+        _reviewPan = Vector2.Zero;      // CENTRE means dead centre, not centre+offset
+        _camPrinted = true;             // the one-shot camera line is spent; say more
+        GD.Print($"DETAIL-CENTRE #{w.Uid} -> view on " +
+                 $"({pose.Value.X:F2},{-pose.Value.Y:F2}) m (sim)");
+    }
+
+    /// <summary>Jump the cursor to a recorded substep. The event rows carry the
+    /// file's STEP; every internal list is an INDEX, and mixing the two is the
+    /// off-by-one that once threw per frame (docs/RECORD_PLAYBACK.md).</summary>
+    private void SeekToStep(long step)
+    {
+        long before = _cursor;
+        _cursor = Math.Clamp(IndexOfStep(step), 0, Math.Max(0, _tape.Count - 1));
+        GD.Print($"DETAIL-SEEK step {step} -> frame {_cursor}/{_tape.Count - 1} " +
+                 $"(was {before}/{_tape.Count - 1}) · SIM " +
+                 $"{SimOf(_tape[(int)_cursor].Step):F3} s");
+    }
+
+    /// <summary>A window for a probe: the first car on the frame under the
+    /// cursor, opened exactly the way the right-click menu opens one.</summary>
+    private CarDetailWindow ProbeDetailWindow()
+    {
+        if (_tape.Count == 0) return null;
         var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
-        if (_selected.Count == 0)
+        if (fr.Cars.Count == 0) return null;
+        foreach (var d in _details) if (d.Showing) return d;
+        return OpenDetailWindow(fr.Cars[0].Uid);
+    }
+
+    /// <summary>--test-slot-buttons (the name predates the window): every claim
+    /// the car detail window makes, measured through the real input path.
+    /// Open → follow → resize (does ONLY the list grow?) → seek → second
+    /// window. Each step prints the state it says it caused.</summary>
+    private void DetailProbe()
+    {
+        var w = ProbeDetailWindow();
+        if (w == null) { GD.Print("DETAIL-PROBE no car on this frame - nothing to open"); return; }
+        // Measure ONE FRAME LATER. Asked at open time the containers have not
+        // laid out and the frame loop has not painted yet, so the first probe
+        // run printed header=8px, rows=0 and the title "car —" for a window it
+        // had just filled — and then read "the header GREW on resize" off that
+        // baseline. A measured claim needs a settled measurement.
+        GetTree().CreateTimer(1.2).Timeout += () =>
         {
-            // The named car owns slot 1; the rest fill by uid order.
-            if (_reviewUid != 0L) _selected.Add(_reviewUid);
-            foreach (var cf in fr.Cars)
-            {
-                if (_selected.Count >= 3) break;
-                if (cf.Uid == _reviewUid) continue;
-                _selected.Add(cf.Uid);
-            }
-        }
-        else if (_reviewUid != 0L && _selected[0] != _reviewUid)
+        var head0 = w.HeaderHeightForProbe();
+        var size0 = w.Size;
+        GD.Print($"DETAIL-PROBE open #{w.Uid} ({NameOf(w.Uid)}) size={size0} " +
+                 $"header={head0:F0}px rows={w.RowCountForProbe()} " +
+                 $"title='{w.Title}' pos={w.Position}");
+        GD.Print($"DETAIL-PROBE header: {w.HeaderTextForProbe()}");
+        // THEN the resize, THEN the buttons: the first run asked for the
+        // follow press while the window was still too short for its own
+        // content, and read the silence as "the button does not answer".
+        GetTree().CreateTimer(0.4).Timeout += () =>
         {
-            // A named review keeps its subject in slot 1 for the whole scrub,
-            // whatever else was clicked along the way.
-            var keep = new List<long> { _reviewUid };
-            foreach (var s2 in _selected)
-                if (s2 != _reviewUid && keep.Count < 3) keep.Add(s2);
-            _selected.Clear();
-            foreach (var s2 in keep) _selected.Add(s2);
-        }
-        for (int i = 0; i < _slots.Count; i++)
-        {
-            var s = _slots[i];
-            if (i >= _selected.Count)
+            var headPre = w.HeaderHeightForProbe();
+            var listPre = w.ListHeightForProbe();
+            w.Size = new Vector2I(size0.X, size0.Y + 220);
+            GetTree().CreateTimer(0.6).Timeout += () =>
             {
-                // An empty slot is not an instrument: no car, no window.
-                s.Win.Visible = false;
-                s.UidShown = -1L;
-                continue;
-            }
-            var uid = _selected[i];
-            TapeCarRev cf = null;
-            foreach (var c2 in fr.Cars) if (c2.Uid == uid) cf = c2;
-            // A NEW car in this slot is an explicit ask: a window the operator
-            // closed with its × comes back for it, an old one stays closed.
-            bool shown = s.Win.Visible;
-            if (s.UidShown != uid) { s.UidShown = uid; s.Closed = false; }
-            s.Win.Visible = !s.Closed;
-            // A window that APPEARS appears in the row; one that was already
-            // open is the operator's to keep where they put it.
-            if (!shown && !s.Closed) PlaceSlot(i);
-            if (s.Closed) continue;                   // stays out of the way
-            // The content follows the window, not the other way round: the
-            // operator can resize it and the text reflows inside.
-            var inner = s.Win.GetVisibleRect().Size;
-            s.Lab.Position = new Vector2(10, 8);
-            s.Lab.Size = new Vector2(Mathf.Max(120.0f, inner.X - 20.0f),
-                                     Mathf.Max(40.0f, inner.Y - 16.0f));
-            if (cf == null)
-            {
-                s.Win.Title = $"#{uid}  — not on this frame";
-                s.Lab.Text = $"#{uid}  (not on this frame)";
-                continue;
-            }
-            var color = _carColors.GetValueOrDefault(uid, "");
-            var (w, l) = DrivingGame.Sim.Config.SizeForColor(color);
-            string cls = DrivingGame.Sim.Config.VEHICLE_CLASS.GetValueOrDefault(color, "car");
-            // Identity lives in the title bar - that is what a title bar is for.
-            s.Win.Title = $"#{uid} {OrText(NameOf(uid), color)} · {cls} · {l:F2} × {w:F2} m";
-            var holds = ""; var held = "";
-            foreach (var c3 in fr.Cars)
-            {
-                if (c3.CapKey.EndsWith(uid.ToString()) && c3.Uid != uid)
-                    holds = $"car {c3.Uid}  ({c3.CapKey})";
-                if (cf.CapKey.EndsWith(c3.Uid.ToString()) && c3.Uid != uid)
-                    held = $"car {c3.Uid}";
-            }
-            var lines = new List<string>
-            {
-                $"speed {cf.SpeedMps * 3.6:F1} km/h",
-                $"brake {GlyphOn(cf.Brake, "yes", "off")} · blink {GlyphOn((cf.Blinkers & 1) > 0, "left", GlyphOn((cf.Blinkers & 2) > 0, "right", "off"))}",
-                $"x {cf.X:F2}  y {cf.Y:F2}  h {cf.HeadingDeg:F1}°",
-                $"holds me: {OrText(holds, "-")}",
-                $"I hold:   {OrText(held, "-")}",
-                // _cursor, not fr.Step: DecisionTrail counts in tape indices.
-                $"decisions: {DecisionTrail(uid, _cursor)}",
+                var head1 = w.HeaderHeightForProbe();
+                GD.Print($"DETAIL-PROBE resized +220px: header {headPre:F0} -> {head1:F0} px " +
+                         $"({(Math.Abs(head1 - headPre) < 1.0 ? "UNCHANGED" : "GREW — wrong")}) " +
+                         $"· list {listPre:F0} -> {w.ListHeightForProbe():F0} px " +
+                         $"({(w.ListHeightForProbe() - listPre > 150 ? "took the growth" : "DID NOT take the growth — wrong")}) " +
+                         $"· rows={w.RowCountForProbe()}");
+                GD.Print($"DETAIL-PROBE layout after the resize: {w.LayoutForProbe()}");
+                var cam0 = _cam.GlobalPosition;
+                ClickInWindow(w, w.FollowButton, "DETAIL-PROBE follow");
+                GetTree().CreateTimer(0.8).Timeout += () =>
+                {
+                    GD.Print($"DETAIL-PROBE after follow: following={w.Following} " +
+                             $"followed={DetailFollowUid()} cam moved=" +
+                             $"({(_cam.GlobalPosition.X - cam0.X):F2},{(_cam.GlobalPosition.Y - cam0.Y):F2}) " +
+                             $"· pin={_mmAsk} · playing={_playing} " +
+                             $"· button rect={w.FollowButton.GetGlobalRect()}");
+                    // WHO ELSE is at that point? Every satellite window this
+                    // client owns, its outer rect, and whether the press landed
+                    // inside it: a click that changes nothing is usually a
+                    // click another window took first, and the log has to say
+                    // whose it was instead of leaving the reader to guess.
+                    foreach (var other in _windows)
+                    {
+                        if (!other.IsInsideTree() || !other.Visible) continue;
+                        var or = OuterRect(other);
+                        GD.Print($"   window '{other.Title}' outer={or} " +
+                                 $"covers the press={(or.HasPoint(new Vector2(64, 743)) ? "YES" : "no")}" +
+                                 (ReferenceEquals(other, w) ? "  <= the detail window itself" : ""));
+                    }
+                    var cam1 = _cursor;
+                    var stepBtn = w.FirstStepButtonForProbe();
+                    if (stepBtn != null)
+                    {
+                        // Name the row being pressed: a press that lands on
+                        // another row still seeks, and that must not read as a
+                        // pass (see MapRenderer.ClickInWindow).
+                        ClickInWindow(w, stepBtn, $"DETAIL-PROBE seek of {stepBtn.Text}");
+                        GetTree().CreateTimer(0.6).Timeout += () =>
+                        {
+                            GD.Print($"DETAIL-PROBE after seek: cursor {cam1} -> {_cursor} " +
+                                     $"· step {_tape[Math.Clamp((int)_cursor, 0, _tape.Count - 1)].Step}");
+                            ProbeSecondWindow(w);
+                        };
+                    }
+                    else ProbeSecondWindow(w);
+                };
             };
-            s.Lab.Text = string.Join("\n", lines);
+        };
+        };
+    }
+
+    /// <summary>The last probe step: a SECOND window — no cap any more, and a
+    /// place of its own — then the shot (SaveShot quits, so it comes last).</summary>
+    private void ProbeSecondWindow(CarDetailWindow first)
+    {
+        var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+        long other = 0;
+        foreach (var cf in fr.Cars) if (cf.Uid != first.Uid) { other = cf.Uid; break; }
+        if (other != 0)
+        {
+            var w2 = OpenDetailWindow(other);
+            GD.Print($"DETAIL-PROBE second window #{other} at {w2.Position} " +
+                     $"(first at {first.Position}) · open={_details.Count} " +
+                     $"· markers/chart cars={_selected.Count}");
         }
+        // The gesture the whole window hangs on: a RIGHT-click on a car opens
+        // the menu that names the windows. Pushed through the input path, so
+        // what is measured is the pick radius, the button filter and the entry
+        // list - not a private call.
+        // Only a car the eye can see can be clicked: after the follow step the
+        // camera sits on `first` at 26 px/m, and a car 100 m away is off the
+        // screen entirely (measured: the first version of this step addressed a
+        // press at (2469,4208) in a 2560 x 1378 window and reported no menu —
+        // which was not a broken gesture, it was a press on empty country).
+        var vpR = GetViewport().GetVisibleRect();
+        var fr2 = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+        long target = 0;
+        Vector2 targetAt = Vector2.Zero;
+        foreach (var cf in fr2.Cars)
+        {
+            var wp = CarPose(cf.Uid);
+            if (wp == null) continue;
+            var sp = _cam.GetCanvasTransform() * wp.Value;
+            if (!vpR.HasPoint(sp)) continue;
+            // And clear of the instrument strip: a press inside its band is the
+            // strip's business by rule (ReviewSelect declines it — the same rule
+            // that keeps a scrub from doubling as a map grab), so aiming a
+            // car-click there measures nothing about the pick.
+            if (sp.Y > _barTop - 60.0) continue;
+            target = cf.Uid; targetAt = sp;
+            if (cf.Uid != first.Uid) break;      // prefer a car WITHOUT a window
+        }
+        if (target == 0)
+            GD.Print($"DETAIL-PROBE right-click: no car in the clickable area " +
+                     $"(view {vpR.Size}, strip starts at y={_barTop:F0}) - nothing to click");
+        other = target;
+        if (other != 0)
+        {
+            {
+                var at = targetAt;
+                // Driven as a CONSTRUCTED event, not a pushed one, and the
+                // line says so. A pushed mouse event aimed at the map never
+                // reached this client's _Input in a run where satellite
+                // windows existed (measured: not ONE button event arrived at
+                // _Input across the whole probe run — the subwindows take
+                // the event first, which is exactly how the presses aimed
+                // at their buttons got answered). So the gesture's DELIVERY
+                // is Godot's, verified by a hand; what this step measures is
+                // the client's own half: the pick radius, the decline over
+                // the instrument strip, and the menu the pick opens.
+                var ev = new InputEventMouseButton
+                {
+                    Position = at, GlobalPosition = at,
+                    ButtonIndex = MouseButton.Right, Pressed = true,
+                };
+                ReviewSelect(ev);
+                GD.Print($"DETAIL-PROBE right-click on #{other} at " +
+                         $"({at.X:F0},{at.Y:F0}) fed straight to the pick " +
+                         $"(delivery is Godot's) · windows open {_details.Count}");
+            }
+        }
+        GetTree().CreateTimer(0.6).Timeout += () =>
+        {
+            if (_screenshotPath != null) SaveShot(_screenshotPath);
+        };
+    }
+
+    /// <summary>Paint every open window from the frame the cursor sits on.</summary>
+    private void UpdateDetails()
+    {
+        if (_details.Count == 0 || _tape.Count == 0) return;
+        var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+        // One pass over the cast for the holder relation — the chain's other
+        // direction is a walk over THIS map, not a scan per car per frame.
+        var holderOf = new Dictionary<long, long>();
+        foreach (var cf in fr.Cars) if (cf.HeldBy != 0) holderOf[cf.Uid] = cf.HeldBy;
+        foreach (var w in _details)
+        {
+            if (!w.Showing) continue;
+            w.CarTexture = CarTexture(_carColors.GetValueOrDefault(w.Uid, ""));
+            w.Update(BuildDetailData(w.Uid, fr, holderOf, w.ShowAll));
+        }
+        // The highlighted car may have left the frame (or the window that asked
+        // for it may be gone): the box follows the FACT, not the last click.
+        if (_detailHighlight != 0L)
+        {
+            bool onFrame = false;
+            foreach (var cf in fr.Cars) if (cf.Uid == _detailHighlight) onFrame = true;
+            if (!onFrame) { _detailHighlight = 0L; SetMapHighlight(0L); }
+        }
+    }
+
+    private CarDetailData BuildDetailData(long uid, TapeFrameRev fr,
+                                          Dictionary<long, long> holderOf, bool showAll)
+    {
+        var d = new CarDetailData
+        {
+            Uid = uid,
+            Name = NameOf(uid),
+            Seekable = true,          // a tape can seek; a live run cannot
+        };
+        foreach (var cf in fr.Cars)
+            if (cf.Uid == uid)
+            {
+                string color = _carColors.GetValueOrDefault(uid, cf.Color);
+                d.VehicleClass = DrivingGame.Sim.Config.VEHICLE_CLASS
+                    .GetValueOrDefault(color, "car");
+                d.SpeedKmh = cf.SpeedMps * 3.6;
+                d.Brake = cf.Brake;
+                d.BlinkLeft = (cf.Blinkers & 1) > 0;
+                d.BlinkRight = (cf.Blinkers & 2) > 0;
+                d.X = cf.X; d.Y = cf.Y; d.HeadingDeg = cf.HeadingDeg;
+                d.CapKey = cf.CapKey;
+            }
+        d.Following = AnyFollowOn(uid);
+
+        // LEFT: every car whose holder is me. RIGHT: my holder, then the walk
+        // away from me — with a visited set from the FIRST hop, because two
+        // cars holding each other is ordinary negotiation (7 788 substeps of it
+        // in one suite tape), not a deadlock.
+        foreach (var cf in fr.Cars)
+            if (cf.Uid != uid && holderOf.GetValueOrDefault(cf.Uid, 0L) == uid)
+                d.HoldsUp.Add(cf.Uid);
+        d.HoldsUp.Sort();
+        var seen = new HashSet<long> { uid };
+        long at = holderOf.GetValueOrDefault(uid, 0L);
+        while (at != 0L && seen.Add(at) && d.HeldUpBy.Count < 12)
+        {
+            d.HeldUpBy.Add(at);
+            at = holderOf.GetValueOrDefault(at, 0L);
+        }
+        // A walk that closes back on me is a CYCLE; it is printed as R28's
+        // LOCKDOWN only when the car's own history says R28 said so — the two
+        // are different facts (docs/CAR_DETAIL_WINDOW.md).
+        if (at == uid) d.Lockdown = HasLockdownNote(uid);
+
+        BuildDetailRows(uid, d, showAll);
+        return d;
+    }
+
+    bool AnyFollowOn(long uid)
+    {
+        foreach (var w in _details) if (w.Following && w.Uid == uid) return true;
+        return false;
+    }
+
+    bool HasLockdownNote(long uid)
+    {
+        var dec = _decSteps.TryGetValue(uid, out var l) ? l : null;
+        if (dec == null) return false;
+        foreach (var i in dec)
+        {
+            var m = _decMsg.GetValueOrDefault($"{uid}:{i}", "");
+            if (m.Contains("LOCKDOWN")) return true;
+        }
+        return false;
+    }
+
+    /// <summary>The car's events at or before the cursor, NEWEST FIRST. The
+    /// whole history is handed over (a stress run's worst car has 953 of them)
+    /// and the window caps what it RENDERS at `show all`'s discretion — the
+    /// stamp keeps a rebuild to the frames where a new event actually appeared.
+    /// The live client fills the same struct from `GET /car/{uid}/decisions`,
+    /// which the sim caps at 100 entries in memory — that is what
+    /// <see cref="CarDetailData.TruncatedNote"/> is for.</summary>
+    private void BuildDetailRows(long uid, CarDetailData d, bool showAll)
+    {
+        var dec = _decSteps.TryGetValue(uid, out var l) ? l : null;
+        if (dec == null || dec.Count == 0) return;
+        int upto = 0;
+        while (upto < dec.Count && dec[upto] <= _cursor) upto++;
+        d.RowsTotal = upto;
+        int max = showAll ? upto : Math.Min(upto, CarDetailWindow.RowCap * 4);
+        for (int k = upto - 1; k >= 0 && (upto - k) <= max; k--)
+        {
+            long idx = dec[k];
+            d.Rows.Add(new CarDetailRow
+            {
+                Step = _tape[(int)idx].Step,
+                // The SAME clock the readout prints (absolute tape step ×
+                // dt_fixed) — two numbers for one instant on one screen is how
+                // a review report starts lying.
+                SimS = SimOf(_tape[(int)idx].Step),
+                Msg = _decMsg.GetValueOrDefault($"{uid}:{idx}", "(no text)"),
+            });
+        }
+        d.RowsLeft = Math.Max(0, upto - d.Rows.Count);
+        d.TruncatedNote = "events are held back until you ask for them";
+    }
+
+    /// <summary>The right-click menu (docs/CAR_DETAIL_WINDOW.md): no window
+    /// open → just "New slot"; windows open → one entry per window (labelled
+    /// with the car it shows, which is what the operator is looking at) and
+    /// then "New slot". Picking a window REPLACES its car — nothing swaps.</summary>
+    private void OpenDetailMenu(Vector2 atPointer, long uid)
+    {
+        var acts = new List<System.Action>();
+        var pm = new PopupMenu();
+        foreach (var w in _details)
+        {
+            long shown = w.Uid;
+            pm.AddItem($"#{shown} {NameOf(shown)}", acts.Count);
+            acts.Add(() =>
+            {
+                w.CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, ""));
+                w.ShowCar(uid);
+                SyncSelectedFromDetails();
+                GD.Print($"DETAIL-REPLACE window #{shown} -> #{uid} ({NameOf(uid)})");
+            });
+        }
+        pm.AddItem("New slot", acts.Count);
+        acts.Add(() => OpenDetailWindow(uid));
+        pm.Position = new Vector2I((int)atPointer.X, (int)atPointer.Y);
+        pm.IndexPressed += i =>
+        {
+            int at = (int)i;
+            if (at >= 0 && at < acts.Count) acts[at]();
+        };
+        pm.PopupHide += () => pm.QueueFree();
+        AddChild(pm);
+        pm.Popup();
+        GD.Print($"DETAIL-MENU car #{uid} ({NameOf(uid)}) at ({atPointer.X:F0},{atPointer.Y:F0}) " +
+                 $"· {acts.Count} entries ({_details.Count} window(s) already open)");
     }
 
     /// <summary>The role the scenario gave this car ("slow_car", "parked_car")
@@ -2198,7 +2446,7 @@ public partial class MapRenderer : Node2D
         if (lbl.Length == 0 || lbl == _lastFocusLabel) return;
         _lastFocusLabel = lbl;
         var f = _focusAtCursor.Value;
-        if (SlotFollowUid() != 0L)
+        if (DetailFollowUid() != 0L)
         {
             GD.Print($"REVIEW-FOCUS '{lbl}': a slot's FOLLOW keeps the view (declared " +
                      $"{f.Kind} takes over when the slot stops following)");
@@ -2557,22 +2805,6 @@ public partial class MapRenderer : Node2D
         _testWin.Position = new Vector2I((int)x, (int)y);
     }
 
-    /// <summary>The car a slot window is following right now (0 = none): the
-    /// slot's own toggle button is the state, so the three toggles cannot
-    /// disagree about who is followed - a click on one releases the others,
-    /// and the last one standing is the camera's car.</summary>
-    private long SlotFollowUid()
-    {
-        for (var i = 0; i < _slots.Count; i++)
-        {
-            var s = _slots[i];
-            if (s.FollowBtn == null || !s.Following) continue;
-            if (s.UidShown <= 0L) continue;
-            return s.UidShown;
-        }
-        return 0L;
-    }
-
     /// <summary>The pose a slot's car has AT THE FRAME UNDER THE CURSOR, in
     /// Godot world metres - the pin both the follow toggle and the centre
     /// button aim at.</summary>
@@ -2583,73 +2815,6 @@ public partial class MapRenderer : Node2D
         foreach (var cf in fr.Cars)
             if (cf.Uid == uid) return W((float)cf.X, (float)cf.Y);
         return null;
-    }
-
-    /// <summary>The centre button: one press puts the view dead on this
-    /// window's car and nothing else. It reuses the hand-pin the minimap's
-    /// inset writes, because that is already "centre here, do not follow" -
-    /// and it is clamped like every other pin, so a car parked outside the
-    /// roads plus 100 m cannot drag the view into empty country.</summary>
-    private void CenterViewOnSlot(int i)
-    {
-        if (i < 0 || i >= _slots.Count) return;
-        var uid = _slots[i].UidShown;
-        var pose = CarPose(uid);
-        if (pose == null)
-        {
-            GD.Print($"SLOT-CENTRE slot {i + 1} has no car at this frame - nothing to centre on");
-            return;
-        }
-        _mmAsk = ClampViewCentre(pose.Value, "slot centre");
-        _reviewPan = Vector2.Zero;    // CENTRE is dead centre; a drag from here
-                                      // offsets the pin (see ReviewCamera)
-        _camPrinted = true;   // the one-shot log line is spent; the button says more
-        GD.Print($"SLOT-CENTRE slot {i + 1} · car {uid} -> view on ({_mmAsk.Value.X:F2},{-_mmAsk.Value.Y:F2}) m (sim)");
-    }
-
-    /// <summary>The follow TOGGLE: a click flips this window's car between
-    /// followed and not. Turning one ON switches the others off (binding
-    /// user decision 2026-10-23), because the camera has one car to follow -
-    /// two windows both insisting is not a thing the view can do.</summary>
-    private void ToggleFollowSlot(int i)
-    {
-        if (i < 0 || i >= _slots.Count) return;
-        var s = _slots[i];
-        if (s.UidShown <= 0L)
-        {
-            // The buttons belong to a CAR window: an empty slot has no car to
-            // follow, so its toggle must not claim the camera - and must not
-            // switch the others off either, or it would silently steal a
-            // followed car.
-            GD.Print($"SLOT-FOLLOW slot {i + 1} has no car - nothing to follow (pick one first)");
-            return;
-        }
-        s.Following = !s.Following;
-        if (s.Following)
-        {
-            for (var other = 0; other < _slots.Count; other++)
-                if (other != i && _slots[other].Following)
-                {
-                    _slots[other].Following = false;
-                    PaintFollow(_slots[other]);
-                    GD.Print($"SLOT-FOLLOW displaced slot {other + 1} (only one car is followed)");
-                }
-            GD.Print($"SLOT-FOLLOW slot {i + 1} ON · car {s.UidShown} · the view pins on it for the whole scrub");
-        }
-        else
-            GD.Print($"SLOT-FOLLOW slot {i + 1} OFF");
-        PaintFollow(s);
-    }
-
-    /// <summary>The button wears its state: an ON follow reads "ON" in the
-    /// text colour the followed car uses everywhere, an OFF one stays dim -
-    /// so the camera's one car and the corner you look at agree by paint.</summary>
-    private void PaintFollow(SlotWin s)
-    {
-        if (s.FollowBtn == null) return;
-        s.FollowBtn.Text = s.Following ? "follow ON" : "follow";
-        s.FollowBtn.AddThemeColorOverride("text_color",
-            s.Following ? new Color(1f, 0.85f, 0.3f) : new Color(0.62f, 0.62f, 0.68f));
     }
 
     private void ReviewCamera()
@@ -2703,7 +2868,7 @@ public partial class MapRenderer : Node2D
         // the anchor, `_reviewPan` the offset), and what stops the view from
         // jumping back when the follow is released: the pin simply keeps the
         // last pose it was given.
-        var followUid = SlotFollowUid();
+        var followUid = DetailFollowUid();
         if (followUid != 0L) src = $"window FOLLOW uid={followUid}";
         // The hierarchy of "what the view is on", strongest first:
         //   1. the HAND — a minimap pin, a window's CENTRE, a map drag, or a
