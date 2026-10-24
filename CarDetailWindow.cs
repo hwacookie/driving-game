@@ -34,7 +34,6 @@ public sealed class CarDetailData
 {
     public long Uid;
     public string Name = "";
-    public string VehicleClass = "";
     public double SpeedKmh;
     public bool Brake;
     public bool BlinkLeft, BlinkRight;
@@ -59,17 +58,34 @@ public sealed class CarDetailData
 /// <summary>A small rotated sprite: the car's own PNG, nose along its heading.
 /// <c>TextureRect</c> cannot rotate, and re-minting a <c>Sprite2D</c> per frame
 /// inside a Control tree is the wrong tool — one <c>DrawSetTransform</c> is.</summary>
+/// <summary>The car's own PNG in the window's header, at the car's OWN
+/// proportions and rotated to its heading.</summary>
 public partial class CarSpriteView : Control
 {
     public Texture2D Tex;
     public float AngleDeg;
+    /// <summary>The vehicle's physical footprint in metres. Drawing the texture
+    /// into the square box (the first build) stretched a 4.4 × 1.8 m car to
+    /// 1:1 — the icon read as a bus, and the truck as a squashed van
+    /// (reported 2026-10-24: "the icons of the cars are stretched").</summary>
+    public double WidthM = 1.8;
+    public double LengthM = 4.4;
 
     public override void _Draw()
     {
         if (Tex == null) return;
         var sz = GetSize();
+        double len = LengthM > 0.01 ? LengthM : 4.4;
+        double wid = WidthM > 0.01 ? WidthM : 1.8;
+        // Fit the FOOTPRINT into the box (the long side along the box height:
+        // the sprite's nose is its top edge), so every class keeps its shape
+        // and a tractor still looks longer than a sedan.
+        float scale = (float)(sz.Y / len);
+        float maxW = (float)(sz.X / wid);
+        if (maxW < scale) scale = maxW;
+        var box = new Vector2((float)wid * scale, (float)len * scale);
         DrawSetTransform(sz / 2.0f, Mathf.DegToRad(AngleDeg), Vector2.One);
-        DrawTextureRect(Tex, new Rect2(-sz / 2.0f, sz), false,
+        DrawTextureRect(Tex, new Rect2(-box / 2.0f, box), false,
                         new Color(1, 1, 1, 0.95f));
     }
 }
@@ -77,16 +93,25 @@ public partial class CarSpriteView : Control
 public partial class CarDetailWindow : Window
 {
     // --- the one place the window's sizes are written (see the header) -----
-    public const int BodyFontPx = 24;      // class, chain, rows, status
-    public const int HeadFontPx = 36;      // the header row: 1.5 × body
+    public const int BodyFontPx = 24;      // pose, status, footers
+    public const int HeadFontPx = 36;      // the speed: 1.5 × body
+    /// <summary>The chain and the event list are what an operator reads while
+    /// deciding something, so they are NOT the small print of the window: at
+    /// the 24 px the first build used, the review of a real run read as
+    /// footnotes and the complaint was "too small fonts" (2026-10-24).</summary>
+    public const int ChainFontPx = 32;
+    public const int EventFontPx = 30;
+    public const int StepFontPx = 26;      // the address column, a step smaller
+    public const int TimeFontPx = 24;
     public const int BtnFontPx = 17;
+    public const int IconPx = 22;          // the two status buttons' glyphs
     public const int RowCap = 100;         // newest rows shown before `show all`
     public const int MarginPx = 12;
     /// <summary>Width a window asks for when the operator has not sized it.
     /// The header row of a real car (sprite, speed, two dots, x/y/h) measures
     /// ~570 px at these fonts; the probe's first 560 px default overflowed it.</summary>
     public const int DefaultWidthPx = 620;
-    public const int RowHeightPx = BodyFontPx + 6;
+    public const int RowHeightPx = EventFontPx + 10;
     /// <summary>Rows the window is high enough for by default (user decision:
     /// "the static part plus exactly three event rows").</summary>
     public const int DefaultVisibleRows = 3;
@@ -114,13 +139,16 @@ public partial class CarDetailWindow : Window
     public System.Action<CarDetailWindow, long> SeekAsked;       // step clicked
     public System.Action<CarDetailWindow, bool> ShowAllAsked;
 
-    private readonly Label _class;
     private readonly CarSpriteView _sprite;
     private readonly Label _speed;
     private readonly Label _brakeDot;
     private readonly Label _blinkDot;
     private readonly Label _pose;
     private readonly RichTextLabel _chain;
+    /// <summary>How a car is ADDRESSED in the chain: the client answers the
+    /// role the scenario gave it, or `#uid` when it has none (2026-10-24:
+    /// "prefer the cars' names over their number").</summary>
+    public System.Func<long, string> ChainName;
     private readonly VBoxContainer _rows;
     private readonly VBoxContainer _rowBox;
     private readonly ScrollContainer _scroll;
@@ -145,6 +173,15 @@ public partial class CarDetailWindow : Window
     {
         get => _sprite.Tex;
         set { _sprite.Tex = value; _sprite.QueueRedraw(); }
+    }
+
+    /// <summary>The car's footprint, so the icon keeps the vehicle's shape
+    /// instead of the sprite's pixel box.</summary>
+    public void SetCarSize(double widthM, double lengthM)
+    {
+        _sprite.WidthM = widthM;
+        _sprite.LengthM = lengthM;
+        _sprite.QueueRedraw();
     }
 
     public CarDetailWindow()
@@ -187,8 +224,9 @@ public partial class CarDetailWindow : Window
         box.GrowVertical = Control.GrowDirection.Both;
         AddChild(box);        // after the background, so it paints on top
 
-        _class = MkLabel(box, BodyFontPx, new Color(0.72f, 0.76f, 0.84f));
-
+        // NO class line (user decision 2026-10-24): the sprite IS the class —
+        // a tractor, a mixer, a pickup — and a word under it repeated what the
+        // picture already said.
         // --- the header row, 1.5 × the body font ---------------------------
         var head = new HBoxContainer();
         head.AddThemeConstantOverride("separation", 10);
@@ -227,7 +265,7 @@ public partial class CarDetailWindow : Window
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             MouseFilter = Control.MouseFilterEnum.Stop,
         };
-        _chain.AddThemeFontSizeOverride("normal_font_size", BodyFontPx);
+        _chain.AddThemeFontSizeOverride("normal_font_size", ChainFontPx);
         _chain.MetaClicked += meta => OnChainClicked(meta);
         _chain.MetaHoverStarted += meta => _hoverUid = ParseUid(meta);
         _chain.MetaHoverEnded += _ => { _hoverUid = 0; ReleaseHighlight(); };
@@ -266,6 +304,8 @@ public partial class CarDetailWindow : Window
         _followBtn = new Button
         {
             Text = "follow",
+            Icon = LoadIcon("res://assets/ic_follow.svg"),
+            IconAlignment = HorizontalAlignment.Left,
             TooltipText = "the camera rides this car - on/off (only one car is followed)",
             FocusMode = Control.FocusModeEnum.None,
         };
@@ -275,6 +315,8 @@ public partial class CarDetailWindow : Window
         _centreBtn = new Button
         {
             Text = "centre",
+            Icon = LoadIcon("res://assets/ic_centre.svg"),
+            IconAlignment = HorizontalAlignment.Left,
             TooltipText = "put the view on this car (momentary)",
             FocusMode = Control.FocusModeEnum.None,
         };
@@ -290,9 +332,8 @@ public partial class CarDetailWindow : Window
     // and the chain's wrapped line, asked for 293 px, and the window opened
     // too short for its own header — the header then "grew by 12 px on a
     // resize", which was the overflow settling, not the resize doing anything).
-    const int ClassRowPx = BodyFontPx + 10;        // 34
     const int HeadRowPx = HeadFontPx * 2;          // 72 (the sprite is the tall one)
-    const int ChainRowPx = BodyFontPx + 10;        // 34
+    const int ChainRowPx = ChainFontPx + 10;       // 42
     const int SepPx = 6;                           // the divider
     const int StatusRowPx = BtnFontPx * 2 - 2;     // 32
     const int BoxSeparationPx = 6;
@@ -302,7 +343,7 @@ public partial class CarDetailWindow : Window
     /// (user decision) — stated so the window never opens smaller than the
     /// header it must always show.</summary>
     public static int DefaultHeightPx() =>
-        MarginPx + ClassRowPx + BoxSeparationPx + HeadRowPx + BoxSeparationPx
+        MarginPx + HeadRowPx + BoxSeparationPx
         + ChainRowPx + SepPx + BoxSeparationPx
         + DefaultVisibleRows * RowHeightPx + BoxSeparationPx
         + StatusRowPx + MarginPx;
@@ -325,7 +366,7 @@ public partial class CarDetailWindow : Window
     public string LayoutForProbe() =>
         $"client={GetVisibleRect().Size} box={_box.Size} boxMin={_box.GetCombinedMinimumSize()} " +
         $"list={_scroll.Size} listMin={_scroll.GetCombinedMinimumSize()} " +
-        $"status={_statusBox.Size} · parts class={_class.Size.Y:F0} " +
+        $"status={_statusBox.Size} · parts " +
         $"head={(_speed.GetParent() as Control)?.Size.Y:F0} chain={_chain.Size.Y:F0}";
 
     /// <summary>The header row as the window actually holds it: text, rect and
@@ -350,6 +391,34 @@ public partial class CarDetailWindow : Window
             foreach (var c in line.GetChildren())
                 if (c is Button b && b.Text.StartsWith("#")) return b;
         return null;
+    }
+
+    /// <summary>The status-line glyphs, sized here rather than baked: two
+    /// 24 px SVGs in `assets/`, client-owned because Godot's own icon set is an
+    /// editor resource (`GD.GetEditorIcons()`) and a run from the command line
+    /// is not the editor. They take the button's modulate, so a followed
+    /// window lights icon and word together.</summary>
+    static Texture2D LoadIcon(string path)
+    {
+        var t = GD.Load<Texture2D>(path);
+        if (t == null)
+        {
+            // An icon that failed to import must not take the button with it:
+            // the word is still there, and the console says why.
+            GD.PrintErr($"detail window: no icon at {path} (import it with " +
+                        "`Godot --headless --path . --import`)");
+            return null;
+        }
+        // AtlasTexture is the non-destructive way to resize a texture: the SVG
+        // is rasterised at the size the button needs, not stretched at draw.
+        var sz = t.GetSize();
+        float k = CarDetailWindow.IconPx / Mathf.Max(1f, Mathf.Max(sz.X, sz.Y));
+        return new AtlasTexture
+        {
+            Atlas = t,
+            Region = new Rect2(Vector2.Zero, sz * k),
+            FilterClip = false,
+        };
     }
 
     static Label MkLabel(Node parent, int px, Color col)
@@ -395,8 +464,9 @@ public partial class CarDetailWindow : Window
     public void Update(CarDetailData d)
     {
         if (!Showing || d == null || d.Uid != Uid) return;
-        Title = $"#{d.Uid} {(d.Name.Length > 0 ? d.Name : d.VehicleClass)}";
-        _class.Text = d.VehicleClass.Length > 0 ? d.VehicleClass : "car";
+        // Identity in the title bar, name first: "#27 slow_car", and the
+        // number alone when the cast was never named.
+        Title = d.Name.Length > 0 ? $"#{d.Uid} {d.Name}" : $"#{d.Uid}";
         _speed.Text = $"{d.SpeedKmh:F0} km/h";
         // The two dots are the LAMPS, not the car's colour: the sprite beside
         // them already carries the colour, so a chip would repeat it.
@@ -410,7 +480,11 @@ public partial class CarDetailWindow : Window
         _pose.Text = $"x {d.X:F1}  y {d.Y:F1}  h {d.HeadingDeg:F0}°";
         _sprite.AngleDeg = (float)d.HeadingDeg;
         _followBtn.Text = d.Following ? "following" : "follow";
-        _followBtn.Modulate = d.Following ? new Color(1f, 0.86f, 0.35f) : Colors.White;
+        // The paint and the state are one decision: the followed window's
+        // button (icon included) wears the highlight colour.
+        _followBtn.Modulate = d.Following ? new Color(1f, 0.86f, 0.35f)
+                                         : new Color(0.78f, 0.80f, 0.86f);
+        _centreBtn.Modulate = new Color(0.78f, 0.80f, 0.86f);
         _status.Text = d.CapKey.Length > 0 ? d.CapKey : "free";
 
         string cStamp = ChainStamp(d);
@@ -440,21 +514,29 @@ public partial class CarDetailWindow : Window
         $"{string.Join(",", d.HoldsUp)}|{string.Join(",", d.HeldUpBy)}|{d.Lockdown}";
 
     /// <summary>`whom I hold up → me → who holds me up`, one list per side
-    /// (docs/CAR_DETAIL_WINDOW.md). Every id is a meta token, so the engine
-    /// does the hit testing and the hand can grab one.</summary>
-    static string ChainBbcode(CarDetailData d)
+    /// (docs/CAR_DETAIL_WINDOW.md). Every entry is a meta token carrying the
+    /// uid, so the engine does the hit testing and the hand can grab one —
+    /// while what is READ is the car's name ("the slow car", not "#27").</summary>
+    string ChainBbcode(CarDetailData d)
     {
         string Left() => d.HoldsUp.Count == 0 ? "[color=#7d8494]—[/color]" : IdList(d.HoldsUp);
         string Right() => d.HeldUpBy.Count == 0 ? "[color=#7d8494]—[/color]" : IdList(d.HeldUpBy);
         string arrow = "[color=#9aa3b2] → [/color]";
+        // `me` is the car whose window this is — the only static word on the
+        // line, and the reference the two sides are read from.
         string tail = d.Lockdown ? "  [color=#ff6b6b]LOCKDOWN[/color]" : "";
         return $"{Left()}{arrow}[b]me[/b]{arrow}{Right()}{tail}";
     }
 
-    static string IdList(List<long> uids)
+    string IdList(List<long> uids)
     {
         var parts = new List<string>(uids.Count);
-        foreach (var u in uids) parts.Add($"[url=#{u}]#{u}[/url]");
+        foreach (var u in uids)
+        {
+            string label = ChainName?.Invoke(u);
+            if (string.IsNullOrEmpty(label)) label = $"#{u}";
+            parts.Add($"[url=#{u}][color=#8cc8ff]{label}[/color][/url]");
+        }
         return string.Join("[color=#7d8494], [/color]", parts);
     }
 
@@ -494,19 +576,19 @@ public partial class CarDetailWindow : Window
             };
             long step = r.Step;
             b.Pressed += () => SeekAsked?.Invoke(this, step);
-            b.AddThemeFontSizeOverride("font_size", BodyFontPx - 3);
+            b.AddThemeFontSizeOverride("font_size", StepFontPx);
             b.AddThemeColorOverride("font_color", new Color(0.55f, 0.78f, 1f));
             line.AddChild(b);
         }
         else
         {
-            var l = MkLabel(line, BodyFontPx - 3, new Color(0.55f, 0.78f, 1f));
+            var l = MkLabel(line, StepFontPx, new Color(0.55f, 0.78f, 1f));
             l.Text = $"#{r.Step}";
         }
-        MkLabel(line, BodyFontPx - 3, new Color(0.55f, 0.58f, 0.66f)).Text =
+        MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text =
             $"{r.SimS:F2} s";
-        var msg = MkLabel(line, BodyFontPx, newest ? new Color(0.98f, 0.98f, 1f)
-                                                   : new Color(0.80f, 0.82f, 0.86f));
+        var msg = MkLabel(line, EventFontPx, newest ? new Color(0.98f, 0.98f, 1f)
+                                                    : new Color(0.80f, 0.82f, 0.86f));
         msg.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
         msg.Text = r.Msg;
     }
@@ -517,11 +599,11 @@ public partial class CarDetailWindow : Window
         _rowBox.AddChild(line);
         if (onClick == null)
         {
-            MkLabel(line, BodyFontPx - 3, new Color(0.55f, 0.58f, 0.66f)).Text = text;
+            MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text = text;
             return;
         }
         var b = new Button { Text = text, Flat = true, FocusMode = Control.FocusModeEnum.None };
-        b.AddThemeFontSizeOverride("font_size", BodyFontPx - 3);
+        b.AddThemeFontSizeOverride("font_size", TimeFontPx);
         b.AddThemeColorOverride("font_color", new Color(0.55f, 0.78f, 1f));
         b.Pressed += () => onClick();
         line.AddChild(b);

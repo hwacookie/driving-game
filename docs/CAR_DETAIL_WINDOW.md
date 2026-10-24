@@ -65,13 +65,32 @@ values.
 
 | # | row | content | font |
 |---|---|---|---|
-| 0 | native title bar | `#65 slow_car` — identity only. Class and footprint left the title bar; **the footprint is dropped entirely** (2026-10-24). | OS |
-| 1 | class line | the vehicle class (`Config.VEHICLE_CLASS[color]`), left-aligned, its own line above the header | body |
-| 2 | header row | `[sprite]` · **`65 km/h`** · ●brake ●blinker · `x y h` right-aligned | **1.5 × body** |
-| 3 | chain | `whom I hold up → me → who holds me up` — see below | body |
+| 0 | native title bar | `#65 slow_car` — identity only, name first and the number alone when the cast was never named. **The footprint is dropped entirely** (2026-10-24). | OS |
+| 1 | header row | `[sprite]` · **`65 km/h`** · ●brake ●blinker · `x y h` right-aligned | **1.5 × body** (`HeadFontPx` 36) |
+| 2 | chain | `whom I hold up → me → who holds me up` — see below | `ChainFontPx` 32 |
 | — | divider | | |
-| 4 | event list | `#8803  brake: yield sign: car 26 (19 m out)`, newest FIRST, older ones below (scroll down into the past) | body |
-| 5 | status line | `follow` · `centre` | body |
+| 3 | event list | `#8803  146.85 s  brake: yield sign: car 26 (19 m out)`, newest FIRST, older ones below (scroll down into the past) | `EventFontPx` 30 (address column 26, seconds 24) |
+| 4 | status line | `follow` · `centre`, each with its own glyph | `BtnFontPx` 17 + `IconPx` 22 |
+
+There is **no class line** and the constants are the state after the first
+operator review (below) — the window opened with a class word, a 24 px chain
+and a 24 px event list, and all three were wrong.
+
+## Changed by the first operator review (2026-10-24, from the live window)
+
+The reviewer ran, the operator looked at it and said what was wrong; all six
+were true of the build, and each is now what the table above states.
+
+| complaint | what it was | the fix |
+|---|---|---|
+| "the icons of the cars are stretched" | `CarSpriteView` drew every sprite into its SQUARE box, so a 4.4 × 1.8 m sedan came out as a bus and the truck as a squashed van | the window is handed the vehicle's footprint (`Config.SizeForColor`) and draws the TEXTURE into a rect of that aspect, long side along the row, rotated to the heading |
+| "the chain uses too small fonts" | the chain ran at the 24 px body size under a 36 px speed | `ChainFontPx` 32 |
+| "increase the font-size of the event log" | rows at 24 px read as footnotes | `EventFontPx` 30 (address 26, seconds 24) |
+| "prefer the cars' names over their number" | the chain said `#27 → me → #61` | each entry is the **role the scenario gave it** (`slow_car`, `oncoming_car`) — the uid stays inside the token for the click/hold; a car the run never named keeps its number, and a test label like `20/27` is NOT a name (it would read as noise in a chain), so those fall back to `#uid` too |
+| "find icons for the follow and centre buttons" | two bare words | `assets/ic_follow.svg` (crosshair, centre taken, motion chevrons) and `assets/ic_centre.svg` (plain crosshair), rasterised to `IconPx` through an `AtlasTexture`; the word stays, because an icon nobody has to learn is an icon nobody learns. Godot's own icon set is an editor resource (`GD.GetEditorIcons()`), so the client owns these two |
+| "omit the class name of the car" | a line reading `heavy_truck` above the sprite | gone — the sprite IS the class |
+
+## Why the big number and the dots are what they are
 
 - **The big number is speed in km/h**; the red dot is the brake engaged, the
   yellow dot a blinker (confirmed 2026-10-24). The car's identity colour needs

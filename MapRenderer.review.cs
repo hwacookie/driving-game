@@ -1666,7 +1666,13 @@ public partial class MapRenderer : Node2D
         var w = new CarDetailWindow
         {
             CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, "")),
+            // A chain reads as the cast the scenario named, not as a column of
+            // numbers: "slow_car → me → oncoming_car". A car the run never
+            // named keeps its number — an invented name would be worse than
+            // the uid (user decision 2026-10-24).
+            ChainName = ChainLabel,
         };
+        ApplyCarSize(w, _carColors.GetValueOrDefault(uid, ""));
         AddChild(w);
         RegisterWindow(w);          // inside the main window, 5 px from the others
         w.Position = DetailSpot(_details.Count);
@@ -1678,6 +1684,7 @@ public partial class MapRenderer : Node2D
             // "click an id, read about THAT car" — the window changes subject,
             // which also drops its `show all` (that was an ask about the old car).
             win.CarTexture = CarTexture(_carColors.GetValueOrDefault(other, ""));
+            ApplyCarSize(win, _carColors.GetValueOrDefault(other, ""));
             win.ShowCar(other);
             SyncSelectedFromDetails();
             GD.Print($"DETAIL-SWITCH window → #{other} ({NameOf(other)})");
@@ -1859,9 +1866,12 @@ public partial class MapRenderer : Node2D
             w.Size = new Vector2I(size0.X, size0.Y + 220);
             GetTree().CreateTimer(0.6).Timeout += () =>
             {
+                // ±2 px is the container rounding on its own (a FitContent
+                // line of 42 measures 41.5); the claim under test is that the
+                // header does not take the +220, not that it is bit-exact.
                 var head1 = w.HeaderHeightForProbe();
                 GD.Print($"DETAIL-PROBE resized +220px: header {headPre:F0} -> {head1:F0} px " +
-                         $"({(Math.Abs(head1 - headPre) < 1.0 ? "UNCHANGED" : "GREW — wrong")}) " +
+                         $"({(Math.Abs(head1 - headPre) <= 2.0 ? "UNCHANGED" : "GREW — wrong")}) " +
                          $"· list {listPre:F0} -> {w.ListHeightForProbe():F0} px " +
                          $"({(w.ListHeightForProbe() - listPre > 150 ? "took the growth" : "DID NOT take the growth — wrong")}) " +
                          $"· rows={w.RowCountForProbe()}");
@@ -1987,6 +1997,26 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>Paint every open window from the frame the cursor sits on.</summary>
+    /// <summary>Hand the window the vehicle's footprint, so the header icon
+    /// keeps the class's shape: the first build drew every sprite into a square
+    /// box and a 4.4 × 1.8 m car came out as a bus (reported 2026-10-24).</summary>
+    private static void ApplyCarSize(CarDetailWindow w, string color)
+    {
+        var (cw, cl) = DrivingGame.Sim.Config.SizeForColor(color);
+        w.SetCarSize(cw, cl);
+    }
+
+    /// <summary>How a chain addresses a car: the ROLE the scenario gave it
+    /// ("slow_car"), and nothing else — a test label like "20/27" is identity
+    /// for the title bar, but in a chain it reads as noise, and the fallback
+    /// is the number.</summary>
+    private string ChainLabel(long uid)
+    {
+        var n = _tapeNames.GetValueOrDefault(uid, "");
+        if (n.Length == 0 || n.Contains("/")) return "";
+        return n.Length > 16 ? n.Left(16) : n;
+    }
+
     private void UpdateDetails()
     {
         if (_details.Count == 0 || _tape.Count == 0) return;
@@ -2023,9 +2053,6 @@ public partial class MapRenderer : Node2D
         foreach (var cf in fr.Cars)
             if (cf.Uid == uid)
             {
-                string color = _carColors.GetValueOrDefault(uid, cf.Color);
-                d.VehicleClass = DrivingGame.Sim.Config.VEHICLE_CLASS
-                    .GetValueOrDefault(color, "car");
                 d.SpeedKmh = cf.SpeedMps * 3.6;
                 d.Brake = cf.Brake;
                 d.BlinkLeft = (cf.Blinkers & 1) > 0;
@@ -2124,6 +2151,7 @@ public partial class MapRenderer : Node2D
             acts.Add(() =>
             {
                 w.CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, ""));
+                ApplyCarSize(w, _carColors.GetValueOrDefault(uid, ""));
                 w.ShowCar(uid);
                 SyncSelectedFromDetails();
                 GD.Print($"DETAIL-REPLACE window #{shown} -> #{uid} ({NameOf(uid)})");
