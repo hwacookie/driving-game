@@ -65,7 +65,7 @@ values.
 
 | # | row | content | font |
 |---|---|---|---|
-| 0 | native title bar | `#65 slow_car` — identity only, name first and the number alone when the cast was never named. **The footprint is dropped entirely** (2026-10-24). | OS |
+| 0 | native title bar | `#65 slow_car` — identity only. **A car the scenario never named reads `#65 no-name`**: a test label (`24/27`) is not a name, it says which scenario the car belongs to, and the readout and the Test panel already say that (user decision 2026-10-24). **The footprint is dropped entirely.** | OS |
 | 1 | header row | `[sprite]` · **`65 km/h`** · ●brake ●blinker · `x y h` right-aligned | **1.5 × body** (`HeadFontPx` 36) |
 | 2 | chain | `whom I hold up → me → who holds me up` — see below | `ChainFontPx` 32 |
 | — | divider | | |
@@ -115,6 +115,40 @@ size = the static part plus **exactly three event rows**.
 That means a real layout (`VBoxContainer`: fixed rows at their natural height,
 the `ScrollContainer` around the list with `Expand | Fill` vertically) instead
 of the slots' per-frame `Label.Size` stamp from `GetVisibleRect()`.
+
+## Copying an event out for analysis
+
+**Right-click an event row** and the whole address of that event goes to the
+clipboard (user decision 2026-10-24, three sentences that turn out to be one
+rule):
+
+```
+tape_T_249_0_20261024_204743.txt -> #32 -> #34291  571.53 s  [R1] off-road at (579, 1128)
+└───────────── tape ─────────────┘   └ car ┘   └────────── the row, as painted ──────────┘
+```
+
+- **The tape comes first** because a line without its run cannot be re-watched —
+  the point of copying one is to ask *why it happened*, and an answer has to be
+  able to go back and look.
+- **The car id** (`#32`, plus the role name when the cast has one) came from the
+  operator's own correction: *"you are right, we also need the car id."* A row
+  about "the parked car" is useless without saying which car that was in the
+  run. `no-name` stays off the clipboard: a filler word in an analysis line is
+  noise, and the uid is the fact.
+- **The row is spelled exactly as the window paints it** — address, seconds,
+  text — so a paste can be found again by eye in the window.
+- The window's status corner answers `copied → clipboard` for a moment: the hand
+  that clicked needs to know it worked, and the tape is on the clipboard rather
+  than on the screen.
+
+Measured (the probe right-clicks the anchored row through the real input path and
+prints what the clipboard holds):
+
+```
+DETAIL-PROBE open #32 (no-name) … title='#32 no-name'
+DETAIL-PROBE right-clicked the current row; clipboard now reads:
+  tape_T_249_0_20261024_204743.txt -> #32 -> #34291  571.53 s  [R1] off-road at (579, 1128)
+```
 
 ## The peek card (left-press)
 

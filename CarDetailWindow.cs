@@ -147,6 +147,12 @@ public partial class CarDetailWindow : Window
     public int Page;
     /// <summary>The event the list is centred on, in <see cref="CarDetailData.Rows"/>.</summary>
     public int AnchorIndex { get; private set; } = -1;
+    /// <summary>A row was RIGHT-clicked: the client puts it on the clipboard.
+    /// The window cannot do that itself — it does not know which tape the row
+    /// came from, and an address without it is not reproducible
+    /// (docs/CAR_DETAIL_WINDOW.md, "Copying an event out for analysis").</summary>
+    public System.Action<CarDetailWindow, string> CopyAsked;
+    private ulong _copyFlashUntilMs;
     /// <summary>The chain id the pointer is over while a button is held — the
     /// highlight the client draws on the map (docs: press-and-hold an id).</summary>
     public long HighlightUid;
@@ -420,6 +426,15 @@ public partial class CarDetailWindow : Window
     /// <summary>Rows currently in the list (the page plus its footers).</summary>
     public int RowCountForProbe() => _rowBox.GetChildCount();
 
+    /// <summary>The row the list is centred on, for the probe to right-click.</summary>
+    public Control CurrentRowForProbe()
+    {
+        foreach (var child in _rowBox.GetChildren())
+            if (child is PanelContainer band && band.GetChildCount() > 0)
+                return band;          // the anchored row is the one wrapped in a band
+        return null;
+    }
+
     /// <summary>The paging controls, for the probe to press as a hand does.</summary>
     public Button PagingButtonForProbe(string which) => which switch
     {
@@ -559,7 +574,12 @@ public partial class CarDetailWindow : Window
         // The paint and the state are one decision: the followed window's
         // button (icon included) wears the highlight colour.
         _centreBtn.Modulate = new Color(0.80f, 0.82f, 0.88f);
-        _status.Text = d.CapKey.Length > 0 ? d.CapKey : "free";
+        // The same corner carries the copy confirmation for a moment: the
+        // hand that right-clicked needs to know it worked, and the tape is
+        // already on the clipboard, not on the screen.
+        _status.Text = Time.GetTicksMsec() < _copyFlashUntilMs
+            ? "copied → clipboard"
+            : (d.CapKey.Length > 0 ? d.CapKey : "free");
 
         string cStamp = ChainStamp(d);
         if (cStamp != _chainStamp)
@@ -652,6 +672,10 @@ public partial class CarDetailWindow : Window
 
     void AddRow(CarDetailRow r, bool seekable, bool current, int index, int lo)
     {
+        // The line as it is DISPLAYED — the clipboard copy and the picture must
+        // not be two formats that can drift.
+        string line = RowLine(r);
+
         // The anchor row is a PANEL, so it can carry a band of colour behind
         // the text: "this is the reason the car behaves as it does at this
         // frame" has to be seen, not inferred from position.
@@ -669,11 +693,16 @@ public partial class CarDetailWindow : Window
             _rowBox.AddChild(band);
             parent = band;
         }
-        var line = new HBoxContainer();
-        line.AddThemeConstantOverride("separation", 8);
-        parent.AddChild(line);
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 8);
+        // A right-click anywhere on the line is the gesture, so the row takes
+        // the event itself: PASS would let it through to whatever is behind.
+        row.MouseFilter = Control.MouseFilterEnum.Pass;
+        string copied = line;
+        row.GuiInput += e => OnRowGuiInput(e, copied);
+        parent.AddChild(row);
         if (current)
-            MkLabel(line, EventFontPx, new Color(1f, 0.86f, 0.35f)).Text = "▸";
+            MkLabel(row, EventFontPx, new Color(1f, 0.86f, 0.35f)).Text = "▸";
         // Column 1 is the ADDRESS, so it is the thing you press. In the live
         // client there is nothing to jump to, and the number is drawn as text
         // rather than styled as a link and doing nothing (docs: inert).
@@ -690,14 +719,14 @@ public partial class CarDetailWindow : Window
             b.Pressed += () => SeekAsked?.Invoke(this, step);
             b.AddThemeFontSizeOverride("font_size", StepFontPx);
             b.AddThemeColorOverride("font_color", new Color(0.55f, 0.78f, 1f));
-            line.AddChild(b);
+            row.AddChild(b);
         }
         else
         {
-            var l = MkLabel(line, StepFontPx, new Color(0.55f, 0.78f, 1f));
+            var l = MkLabel(row, StepFontPx, new Color(0.55f, 0.78f, 1f));
             l.Text = $"#{r.Step}";
         }
-        MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text =
+        MkLabel(row, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text =
             $"{r.SimS:F2} s";
         // Past the anchor, later events are the FUTURE of the frame on screen:
         // shown (that is what one scrubs towards), but dimmed so "ahead of
@@ -708,9 +737,23 @@ public partial class CarDetailWindow : Window
         Color msgCol = current ? new Color(1f, 1f, 1f)
                  : index < AnchorIndex ? new Color(0.78f, 0.80f, 0.86f)
                                        : new Color(0.55f, 0.57f, 0.63f);
-        var msg = MkLabel(line, EventFontPx, msgCol);
+        var msg = MkLabel(row, EventFontPx, msgCol);
         msg.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
         msg.Text = r.Msg;
+    }
+
+    /// <summary>One row of the list as text, exactly as the window paints it:
+    /// address, seconds, then the event itself.</summary>
+    static string RowLine(CarDetailRow r) => $"#{r.Step}  {r.SimS:F2} s  {r.Msg}";
+
+    /// <summary>Right-click on a row = "I am about to ask what this event
+    /// MEANT", so hand the whole address to the client for the clipboard.</summary>
+    void OnRowGuiInput(InputEvent e, string line)
+    {
+        if (e is not InputEventMouseButton mb || !mb.Pressed ||
+            mb.ButtonIndex != MouseButton.Right) return;
+        CopyAsked?.Invoke(this, line);
+        _copyFlashUntilMs = Time.GetTicksMsec() + 1500;
     }
 
     /// <summary>A line of the list that is not an event: how much of the

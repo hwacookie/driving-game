@@ -1696,6 +1696,7 @@ public partial class MapRenderer : Node2D
             SetMapHighlight(_detailHighlight);
         };
         w.SeekAsked = (win, step) => SeekToStep(step);
+        w.CopyAsked = (win, row) => CopyEventRow(win, row);
         w.Paged = (win, page) => GD.Print($"DETAIL-PAGE #{win.Uid} " +
                                           $"{(page == 0 ? "back to the current event" : page.ToString() + " rows off the anchor")}");
         _details.Add(w);
@@ -1916,6 +1917,25 @@ public partial class MapRenderer : Node2D
                             // Paging is the other half of the list: the rest of
                             // the history stays reachable without ever dumping
                             // it on screen.
+                            // Right-click the row that is CURRENT: the ask is
+                            // "copy this event out so I can ask why it
+                            // happened", and the answer has to name the tape,
+                            // the car and the line.
+                            var cur = w.CurrentRowForProbe();
+                            if (cur != null)
+                            {
+                                var rr = cur.GetGlobalRect();
+                                GetViewport().PushInput(new InputEventMouseButton
+                                {
+                                    Position = new Vector2(w.Position.X + rr.Position.X + rr.Size.X / 2f,
+                                                           w.Position.Y + rr.Position.Y + rr.Size.Y / 2f),
+                                    GlobalPosition = new Vector2(w.Position.X + rr.Position.X + rr.Size.X / 2f,
+                                                                 w.Position.Y + rr.Position.Y + rr.Size.Y / 2f),
+                                    ButtonIndex = MouseButton.Right, Pressed = true,
+                                });
+                                GD.Print("DETAIL-PROBE right-clicked the current row; " +
+                                         $"clipboard now reads: {DisplayServer.ClipboardGet()}");
+                            }
                             var foot = w.PagingButtonForProbe("earlier");
                             if (foot == null) { ProbeSecondWindow(w); return; }
                             ClickInWindow(w, foot, "DETAIL-PROBE page earlier");
@@ -2018,6 +2038,19 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>Paint every open window from the frame the cursor sits on.</summary>
+    /// <summary>Right-click on an event row → that row on the clipboard, as a
+    /// REPRODUCIBLE address: tape · car · row (user decision 2026-10-24: "copy
+    /// the current tape filename, ' -> ' and the whole row of the event viewer
+    /// … we also need the car id" — the use is asking WHY the event happened,
+    /// and an answer needs the run, the car and the line). The row is spelled
+    /// exactly as the window paints it, so a paste can be found again by eye.</summary>
+    private void CopyEventRow(CarDetailWindow win, string row)
+    {
+        string clip = $"{_tapeName} -> {CarIdentity(win.Uid)} -> {row}";
+        DisplayServer.ClipboardSet(clip);
+        GD.Print($"DETAIL-COPY {clip}");
+    }
+
     /// <summary>Hand the window the vehicle's footprint, so the header icon
     /// keeps the class's shape: the first build drew every sprite into a square
     /// box and a 4.4 × 1.8 m car came out as a bus (reported 2026-10-24).</summary>
@@ -2028,9 +2061,8 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>How a chain addresses a car: the ROLE the scenario gave it
-    /// ("slow_car"), and nothing else — a test label like "20/27" is identity
-    /// for the title bar, but in a chain it reads as noise, and the fallback
-    /// is the number.</summary>
+    /// ("slow_car"), and nothing else — a test label is not a name at all
+    /// (see <see cref="NameOf"/>), and the fallback in a chain is the number.</summary>
     private string ChainLabel(long uid)
     {
         var n = _tapeNames.GetValueOrDefault(uid, "");
@@ -2209,15 +2241,31 @@ public partial class MapRenderer : Node2D
     /// <summary>The role the scenario gave this car ("slow_car", "parked_car")
     /// from the tape header - empty when the cast was never named. The number
     /// the suite shows for the primary is not a role, so it stays out.</summary>
+    /// <summary>The name a window shows for a car: the ROLE the scenario gave
+    /// it ("slow_car", "parked_car"), or <c>no-name</c> when it never got one.
+    ///
+    /// A test label ("24/27") is NOT a name (user decision 2026-10-24: "it
+    /// makes no sense to use the test number as a replacement for the car's
+    /// name — if there is no name, use no-name"): it says which scenario the
+    /// car belongs to, and the readout and the Test panel already say that.
+    /// What is left of the old reasoning — never let the colour stand as a
+    /// name, because "#1 blue" reads as a sentence — is exactly why the
+    /// fallback is a word that says nothing rather than a token that says
+    /// something else.</summary>
     private string NameOf(long uid)
     {
         var n = _tapeNames.TryGetValue(uid, out var v) ? v : "";
-        if (n == "") return "";
-        // A test label ("17/27") IS identity - it is just not a role. Dropping
-        // it left the colour as the car's name, which reads as "#1 blue".
-        // Quoted, so a label and a role cannot be confused on screen.
-        if (n.Contains("/")) return n.Length > 14 ? n.Left(14) : n;
+        if (n.Length == 0 || n.Contains("/")) return "no-name";
         return n.Length > 14 ? n.Left(14) : n;
+    }
+
+    /// <summary>The car's identity for a clipboard line: the number always, the
+    /// role name when the cast has one. "no-name" stays out of a paste — an
+    /// analysis line should not carry a filler word, and the uid is the fact.</summary>
+    private string CarIdentity(long uid)
+    {
+        var role = ChainLabel(uid);
+        return role.Length > 0 ? $"#{uid} {role}" : $"#{uid}";
     }
 
     private static string GlyphOn(bool on, string yes, string no)
