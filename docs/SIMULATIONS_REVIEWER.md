@@ -152,9 +152,12 @@ slot filters its markers onto the marker lane and leaves the curve alone.
 
 ## Three car slots
 
-Up to **three detail panels**, the three last-clicked cars; **until anything is
-clicked, the first three cars by uid** — the panels are useful before the first
-click.
+> **Superseded 2026-10-26, still what is BUILT.** The three-slot row is being
+> replaced by the per-car **car detail window** — unlimited windows, opened by
+> right-click only, shared with the live viewer, resizable with a real event
+> list, and remembered across sessions. Specified in
+> [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md) (**not built**); the section
+> below stays as the current state until that lands.
 
 | panel row | content | already available |
 |---|---|---|
@@ -501,7 +504,7 @@ above says what replaced them):
 | scrub bar + six buttons ▶ ⏸ ⏹ ● ◀ ▶▶ | inside the bar, dark strip |
 | ⚠ playback-rate buttons ½× 1× 2× 4× 8× | on the bar (rate was keyboard-only before) — replaced by the rate dropdown 2026-10-22 |
 | ⚠ two-line readout | tape · frame [cursor/len] · SIM time · map + hash · fluidity · mode / cam x y zoom · view · units — three lines in ONE box since 2026-10-22 |
-| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it) |
+| ⚠ three detail slots | identity → class → per-class footprint → speed/brake/blinker → pose → who holds me / whom I hold → decision trail — three real WINDOWS since 2026-10-22 (identity in the title bar, footprint on the second line of it). **Superseded 2026-10-26** by [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md): window per car, no cap, right-click to open, footprint dropped, held-by chain instead of the EndsWith guess, event LIST instead of one collapsed line, geometry + session remembered |
 | decision trail | count **plus the last two texts** with their frame numbers, clipped to the panel |
 | chart | cyan fleet curve, **yellow standstill blocks** (fleet-level band + per-car lane), **decision hairlines** under the curve, white cursor tick |
 | run picker | six newest tapes listed under the minimap; clicking one reloads that tape, rewinds, re-points the camera |
