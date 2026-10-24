@@ -19,7 +19,7 @@ sources are *recorded or live state*, never a second model of the car.
 | | |
 |---|---|
 | **Simulationsviewer** | the Godot window we run today (`Main.tscn` + `MapRenderer.cs`). It shows the **live** sim: the map, the cars, the camera following the car or pinned on a hotspot |
-| **Simulationsreviewer** | a **separate client, its own window** — **built** (`MapRenderer.review.cs`, a `partial` half of the same `MapRenderer` node, specified 2026-10-21, in use since). It shows a **tape frame at a cursor**: play, pause, stop, record, rewind, fast-forward, its own zoom and crop, a scrub bar with the fluidity chart and its event markers, detail panels for up to three cars, a **readout label** naming the tape, the frame, the sim time and the camera (`tape_T_…txt · frame 743/828 · SIM 12.383 s · ▶ 4× · head 828` / `cam x y zoom · view · units`) and a **whole-window screenshot** named against the tape and the frame. See [docs/SIMULATIONS_REVIEWER.md](docs/SIMULATIONS_REVIEWER.md) |
+| **Simulationsreviewer** | a **separate client, its own window** — **built** (`MapRenderer.review.cs`, a `partial` half of the same `MapRenderer` node, specified 2026-10-21, in use since). It shows a **tape frame at a cursor**: play, pause, stop, record, rewind, fast-forward, its own zoom and crop, a scrub bar with the fluidity chart and its event markers, a **car detail window** per car (right-click to open, no cap, its own event list and holding chain, right-click an event row to copy its address, plus a **readout label** naming the tape, the frame, the sim time and the camera (`tape_T_…txt · frame 743/828 · SIM 12.383 s · ▶ 4× · head 828` / `cam x y zoom · view · units`) and a **whole-window screenshot** named against the tape and the frame. See [docs/SIMULATIONS_REVIEWER.md](docs/SIMULATIONS_REVIEWER.md) |
 
 They are independent and long-lived: a new run is a new tape, not a new process.
 Neither client restarts because the sim host restarted — a dead host is a
@@ -49,7 +49,7 @@ dotnet run  --project DrivingGame.Server -- --map basic --warp 4   # REST API on
       --source embedded --map basic --port 5001 --zoom 14
 # THE REVIEWER — a second window on a tape (path optional: without one it
 # opens the newest tape in tests/). --review-at parks the cursor on a step,
-# --review-name picks which car a slot follows by spawn name.
+# --review-name aims the camera at the car with that spawn name.
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
       --source embedded --map basic --port 5032 \
       --review tests/tape_T_240_0_20261022_032831.txt --review-at 3308 --maximized
@@ -121,7 +121,7 @@ multi-car run fits (see [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md)).
 | [docs/UNITS.md](docs/UNITS.md) | which unit which name carries |
 | [docs/REST_API.md](docs/REST_API.md) | the API surface **and the multi-car contract** (`uid`, primary/followed car, per-car channels, the `cars` array) |
 | [docs/TESTING.md](docs/TESTING.md) | the e2e workflow, the scenario list, **the baseline** |
-| [docs/SIMULATIONS_REVIEWER.md](docs/SIMULATIONS_REVIEWER.md) | **the review client** — controls, scrub bar, the fluidity chart with its event markers, the three car slots, the connection layer |
+| [docs/SIMULATIONS_REVIEWER.md](docs/SIMULATIONS_REVIEWER.md) | **the review client** — controls, scrub bar, the fluidity chart with its event markers, the car detail windows, the connection layer |
 | [docs/CAR_DETAIL_WINDOW.md](docs/CAR_DETAIL_WINDOW.md) | the **per-car inspector** both clients share — right-click to open, unlimited windows, the held-by chain, the event list, session memory. **Reviewer half built 2026-10-24** (`CarDetailWindow.cs`, `--test-slot-buttons`); the viewer, the peek card and the session file are open. Supersedes the three car slots |
 | [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md) | the tape, the clock, the endpoints, the per-substep fluidity |
 | [docs/GODOT_FRONTEND.md](docs/GODOT_FRONTEND.md) | the client's architecture (its phase log below the header is history) |

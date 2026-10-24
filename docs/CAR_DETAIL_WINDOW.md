@@ -15,7 +15,7 @@
 >
 > Neither the tape column nor the `/state` keys this needs exist yet. When
 > they land, [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md) and
-> [REST_API.md](REST_API.md) must be updated from §"The chain (row 3) and what
+> [REST_API.md](REST_API.md) must be updated from §"The chain (row 2) and what
 > it requires" and §"What this costs the sim, the tape and the API" below —
 > those documents describe what exists, so they are deliberately untouched
 > now.
@@ -159,7 +159,7 @@ car and see it, release the button and it is gone.
 |---|---|
 | trigger | **left button DOWN on a car** → the card appears at the cursor; **button UP → gone**, wherever the pointer ended up. Movement past the hand-over threshold retires it (§"The card and the pan"). |
 | shape | a `Window` with **`Borderless`** — no title bar, no status line, no scrollbar, no buttons, not resizable. Nothing has to be re-implemented, because there is nothing to re-implement: it is undraggable, unresizable, and the hand holding the button is its close button. |
-| content | exactly the **top section of the detail window**: class line · header row (sprite, `65 km/h`, ●brake ●blinker, `x y h`) · chain line · divider · **one event line** — the newest event at or before the cursor (live: the newest). No list, no older entries. |
+| content | exactly the **static section of the detail window**: header row (sprite at the vehicle's own proportions, `65 km/h`, ●brake ●blinker, `x y h`) · chain line · divider · **one event line** — the event the car is acting under at the frame (live: the newest). No list, no older entries, no paging controls. |
 | size / place | fits its content; anchored beside the cursor, flipped when it would run past an edge; registered with the window guard, so it stays inside the main window. |
 | lifetime | never in the session file, never one of the persisted `windows`, never a marker-lane or chart subject. It observes; it does not select. |
 | both clients | identical in viewer and reviewer (the binding rule). |
@@ -190,7 +190,7 @@ start on a car flashes the card for a frame or two; making every deliberate peek
 wait ~80 ms to avoid that is the worse trade (assistant's recommendation,
 accepted with "c").
 
-## The chain (row 3) and what it requires
+## The chain (row 2) and what it requires
 
 Read left → right: **whom I hold up → me → who holds me up** (the operator's
 wording: "ganz links: wen halte ich auf … ganz rechts: durch wen werde ich
@@ -242,12 +242,12 @@ holding up: #71, #68        me        held up by: #59 → #61 → #44
   flake, the fallback is one small `Button` per id in an `HBoxContainer` — more
   nodes, but the hit area is Godot's own.
 
-## The event list (row 4)
+## The event list (row 3)
 
 | rule | decision |
 |---|---|
 | column 1 | **the tape's `step`** — the host's absolute substep counter, what you would quote in a bug report. Displayed with the run-relative time beside it, `(step − firstStep) × dt_fixed`, because that is the number the scrub bar shows and an absolute step means nothing without it. |
-| order | newest at the TOP; older entries below, reached by scrolling down. |
+| order | **neither**: the list is centred on the event the car is acting under at the frame on screen, `AroundEvents` (10) before it and 10 after — see the row-cap row below. |
 | click on the step number | **seek** the tape to that frame (reviewer only; inert in the live viewer). Step → index is the existing binary search over the tape index. |
 | scope | this car's own decisions **and the events that come from outside** — explicitly including "someone drove into me" (2026-10-24). |
 | list model | **not a dump**: a window of `AroundEvents` (10) events on each side of **the event the car is acting under at the frame on screen** — the newest at or before the cursor. The operator reads the story around the moment they are looking at, and pages through the rest with the ↑/↓/◎ controls in the status line. Supersedes the "newest 100 + `show all`" plan (user decision 2026-10-24, from the live window: "do NOT show all events — give the user the chance to see the events AROUND the currently selected frame/time"). For the numbers that sized the old plan: median 6 events per car, a suite run peaks at 32, the record 953. |
@@ -402,12 +402,18 @@ measured wrong:
 - `SIMULATIONS_REVIEWER.md`: §"Three car slots" and the ⚠ row in
   §"Implementation status" are replaced by a pointer here; the marker-lane
   sentence ("clicking a car slot") becomes "opening a car detail window".
-- `RECORD_PLAYBACK.md`: the per-car column and generation 4 — now due, the
-  field is written.
-- `REST_API.md`: `/state` per-car `held_by` + `cap_key` in both builders, and
-  `step` in `/car/{uid}/decisions` — both now due, they are built.
-- `GODOT_FRONTEND.md` § "What the client draws today": the viewer gains the
-  windows.
-- `TESTING.md`: the reviewer's identity-line example (title bar now reads
-  `#2 slow_car`), and the probe list.
-- `AGENTS.md`: nothing — no rule changes.
+Status of each, 2026-10-24:
+
+- ✅ `RECORD_PLAYBACK.md` — the `heldBy` column and generation 4 are documented.
+- ✅ `REST_API.md` — `/state` per-car `held_by` + `cap_key` (both builders),
+  `step` in `/car/{uid}/decisions`, `held_by` in `POST /tape/frame`.
+- ✅ `SIMULATIONS_REVIEWER.md` — the slot section is marked retired, the camera
+  precedence lists the follow as the hand's pin, the probe list names what
+  `--test-slot-buttons` drives now.
+- ✅ `TESTING.md` — "the hand always outranks the run" and the identity-line
+  example (`#2 slow_car`; an unnamed car reads `#2 no-name`).
+- ⏳ `GODOT_FRONTEND.md` § "What the client draws today" — waits for the
+  viewer's windows (they do not exist yet, and that list is code-verified).
+- ✅ `README.md` — the reviewer's description says a window per car, and the doc
+  index points here.
+- `AGENTS.md`: nothing — no rule changed.

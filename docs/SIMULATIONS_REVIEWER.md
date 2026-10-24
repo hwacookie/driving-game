@@ -47,7 +47,7 @@ Every flag the client parses (all after `--`):
 | `--focus <name\|role>` | bind the camera to a car by `"name"` from `/teleport`, or by role (`parked`, `slow`) |
 | `--review [path]` | open the **reviewer** instead of the viewer (`NewestTape` in `tests/` when no path) |
 | `--review-at <step>` | start the cursor at that substep |
-| `--review-name <name>` | slot 1 + camera follow the car with that spawn name (from the tape header `names=`) |
+| `--review-name <name>` | the camera aims at the car with that spawn name (from the tape header `names=`). It opens **no detail window** — that is a known gap, [TODO.md §5](../TODO.md) |
 | `--screenshot <path>` / `--delay <s>` | one-shot viewport PNG `--delay` seconds after the map is ready, then quit (never with `--headless`: the dummy renderer has no viewport texture) |
 | `--crash-shot <path>` | one PNG 0.5 s after the crash camera latches |
 | `--run-test <number>` / `--quit-on-test-done` | launch one scenario through `POST /run_test`; close the window when a test run finishes |
@@ -57,7 +57,7 @@ Every flag the client parses (all after `--`):
 see [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)), `--test-jog`, `--test-window-out`, `--test-minimap-pan <x> <y>` | scripted interactions, for reproducing a window/HUD defect without a hand on the mouse |
 | `--resize <w> <h>` | grow the window shortly after start — the only scripted way to reproduce "HUD after maximize" |
 | `--test-bar-ui` | scripted probe for the bar's new layers: lands the cursor inside a scenario, zooms the range, hovers and clicks a marker, then prints the tooltip, the Test panel and `focus at cursor` — the deterministic check for boundaries/tooltip/zoom (Godot does not deliver **pushed** wheel or bare-motion events to handlers, so those two go through the same entry points a real event feeds) |
-| `--test-pan-probe` | scripted **pan** probe: the same grab at five window heights, then a slot CENTRE, then the grab again, printing `cam / zoom / _reviewPan / _mmAsk / which pin obeys` around each — the instrument that separated "panning is broken" from "panning is shadowed by the pin" (2026-10-24) |
+| `--test-pan-probe` | scripted **pan** probe: the same grab at five window heights, then a window's CENTRE, then the grab again, printing `cam / zoom / _reviewPan / _mmAsk / which pin obeys` around each — the instrument that separated "panning is broken" from "panning is shadowed by the pin" (2026-10-24) |
 
 Godot's **own** options go *before* the `--` (that is where `--fullscreen`
 lives; `scripts/run_e2e.sh --maximized` / `--watch` translates to it).
@@ -126,6 +126,9 @@ there. **Step mode never smooths**, at any ramp speed.
 | **single click ◀ / ▶** | exactly **one frame** |
 | **hold ◀ / ▶** | the rate ramps while held and ramps back on release: `0.0 s → 1`, `0.3 s → 6`, `0.8 s → 20`, `1.5 s → 60`, cap `120` frames/s. Same curve both directions |
 | **`,` and `.`** | one substep back / forward — the two keys **right of M** on a German layout. Bound by **physical position** (Godot `keycode`, not `unicode`), so the gesture survives other layouts |
+| **right-click a car** | opens the **car detail window** menu: one entry per open window (picking one hands it the clicked car) plus `New slot`. The ONLY gesture that opens or re-points a window — a left press does not select anything any more. [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md) |
+| **right-click an event row** | copies that event's whole address to the clipboard: `tape → #uid [role] → #step  seconds  text`, so a line you want to ask about carries its run and its car with it |
+| **↑ / ↓ / ◎ under the list** | page the event list through the car's history and back to the event it is acting under at this frame — paging is in the status line because a footer at either end of a centred list is off-screen |
 | **bar click** | a click or a **drag on the scrub bar IS a seek**: x maps linearly onto the tape's substeps, so the moment you aim at is the moment you get. It **pauses** ▶ play — a lerp one frame past your click is not that frame (`ReviewScrubZone` → `ReviewSeek`) |
 | **playback rate box** | an `OptionButton` (0.5x … 8x). Choosing a rate sets the rate **only** — the old row of five buttons each did `_playRate = r; _playing = true`, so asking "what does 4x look like" started the tape running. ▶ is what plays |
 | **guards** | the cursor never passes the **tape head** (that would invent), never below step 0 |
@@ -150,7 +153,9 @@ sim's own R31 standstill error uses a 180 s wall window and must not be
 confused with it.
 
 The curve is **fleet-level**; the markers are **per-car**, so clicking a car
-slot filters its markers onto the marker lane and leaves the curve alone.
+opening a car detail window filters its markers onto the marker lane and
+leaves the curve alone (the marker lane and the chart draw for the cars that
+have a window — `_selected` is derived from the open windows).
 
 ## Three car slots
 
@@ -230,7 +235,7 @@ has it.
 
 ## The Test panel — what is being watched, and how it ended
 
-One more window (`test`, an OS window like the readout and the three slots). Its
+One more window (`test`, an OS window like the readout and the car detail windows). Its
 content follows **the scenario the cursor is inside**, so scrubbing into the next
 test turns the page:
 
@@ -244,7 +249,7 @@ focus: the PLACE (100, 275) m @ 26 px/m — no car followed
 
 It sits in the **top-right column, stacked under the minimap** (both are
 transient OS windows of their own, and nothing orders them: parked in the
-top-left they came out buried under the readout and a car slot — a window whose
+top-left they came out buried under the readout and a car window — a window whose
 whole job is to be read, unreadable).
 
 Two different nothings are named apart, because they call for different actions:
@@ -538,7 +543,9 @@ do not chase that one. See [TESTING.md → "Current baseline"](TESTING.md#curren
 --review-name slow_car        # the reviewer selects by ROLE, from the tape header
 ```
 
-The named car owns **slot 1 for the whole scrub** and the camera pins on **its**
+The named car is what **the camera pins on for the whole scrub** — owning no
+slot (the slots are retired, see [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)),
+it only aims **its**
 pose rather than the cast centroid — a review of "the pass of the parked car"
 stays on the parked car at every frame. Same handle as the live client's
 `--focus <name>`; the reviewer resolves it from the header's `names=` map
@@ -556,8 +563,11 @@ holds me: car 8 (avoid#9)           holds me: -
 I hold:   -                         I hold:   -
 ```
 
-Slot text now **wraps inside the panel** (`AutowrapMode.WordSmart` + `ClipText`)
-instead of spilling into the next slot, and the decision line carries one entry
+Slot text once **wrapped inside the panel** (`AutowrapMode.WordSmart` +
+`ClipText`) instead of spilling into the next slot — the car detail window
+replaced wrapping with a **scrolling list** (2026-10-24), so a long decision
+line scrolls sideways instead of pushing the layout. And the decision line
+carries one entry
 plus the count.
 
 ## Clipboard: text only, settled (2026-10-21)

@@ -888,7 +888,7 @@ naming beats the predicates the client would otherwise guess.
 | `/state` | per car `"hud_label": "parked_car"` |
 | tape header | `names=1:19/27,2:slow_car` — once per run, not per frame |
 | client | `--focus slow_car` (a name), `--focus parked` (a role fallback) |
-| reviewer | the slot's identity line: `#2 slow_car silver · compact` |
+| reviewer | a car detail window's title bar: `#2 slow_car` (a car the scenario never named reads `#2 no-name`) |
 
 ```
 CAM-FOCUS name=parked_car -> uid 2      # test 18

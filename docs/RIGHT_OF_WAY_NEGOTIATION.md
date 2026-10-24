@@ -257,6 +257,12 @@ Deliberately ordered so that every number is measured before it is fitted.
 11. **The courtesy signal** last: it is a display of an object that must already
     be correct. Export `active_cap_key` + resource extent in the per-car payload,
     add `courtesy_flash`, draw the cone in `MapRenderer`.
+    **Status 2026-10-24 (partly built):** `/state` answers `cap_key` and
+    `held_by` per car in BOTH payload builders (the car detail window is why —
+    see [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)), `courtesy_for` +
+    `courtesy_kind` are exported and `MapRenderer` draws the cone from them.
+    The **resource extent** is still not in the payload, and there is no
+    `courtesy_flash` field: the cone is driven off the courtesy pair.
 
 Step 5 is the first one with a visible payoff; steps 1–4 are plumbing and
 evidence-free. If 5 does not fix 17/18, stop before 6 — the corridor is the
