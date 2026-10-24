@@ -127,6 +127,7 @@ multi-car run fits (see [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md)).
 | [docs/GODOT_FRONTEND.md](docs/GODOT_FRONTEND.md) | the client's architecture (its phase log below the header is history) |
 | [docs/OBSTACLES.md](docs/OBSTACLES.md) | static obstructions: placement rules, contact stop, REST |
 | [docs/HUMAN_FACTORS.md](docs/HUMAN_FACTORS.md) | the human-factor model behind reaction, comfort braking and cap persistence (R7, R11) |
+| [docs/godot_web_rendering_architecture.md](docs/godot_web_rendering_architecture.md) | **reference note, not a spec**: the two ways to put a Godot sim in a browser — WASM web export (with the `SharedArrayBuffer` headers threads need) vs server-side WebRTC pixel streaming. Added 2026-10-24; neither path is built or decided |
 | [docs/lights_report.md](docs/lights_report.md) | measured light geometry (blinkers, hazard, stop lines) |
 | [docs/CRASH_EFFECT_SMOKE.md](docs/CRASH_EFFECT_SMOKE.md) | how a one-shot crash smoke puff would be built in Godot — **NOT implemented** |
 | [AGENTS.md](AGENTS.md) | the project rules that bind every change |

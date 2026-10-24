@@ -97,11 +97,12 @@ moves the cursor). Spec:
 
 ## 6. Loose ends that are not about the window
 
-- [ ] `docs/godot_web_rendering_architecture.md` — untracked, **not written by
-      this session** (dated 2026-10-24 20:16, a Godot web-export/streaming
-      reference). Deliberately left out of the commits so far: nobody said keep
-      or delete, and burying someone else's document inside an unrelated commit
-      is how provenance gets lost. Keep (and commit) or delete — someone's call.
+- [x] ~~`docs/godot_web_rendering_architecture.md` — keep or delete?~~ **Kept
+      and committed on its own** (2026-10-24, operator's instruction), with a
+      README index row calling it what it is: a reference note on browser
+      delivery, neither path built or decided. It was not written by this
+      session — that is why it went in alone rather than inside an unrelated
+      commit.
 - [ ] `tests/tape_T_250_19_20261024_220134.txt` — untracked single-scenario
       tape, judged not evidence worth keeping; delete or commit.
 - [ ] e2e baseline: **3 red** — #20 `slow_pass_priority` (times out crawling),
