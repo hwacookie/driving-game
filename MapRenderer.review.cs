@@ -2131,6 +2131,19 @@ public partial class MapRenderer : Node2D
         }
         pm.AddItem("New slot", acts.Count);
         acts.Add(() => OpenDetailWindow(uid));
+        // SCREEN SPACE, and explicitly sized. Hung off this Node2D the popup
+        // inherits the WORLD canvas — whose transform is the camera — and the
+        // zoom multiplies its font: measured at 39.5 px/m, the entry "New slot"
+        // came out roughly 1300 px wide and filled a third of the screen. The
+        // HUD's own CanvasLayer is where every screen-space instrument lives
+        // (the readout, the strip, the tape picker), so the menu belongs there
+        // too, with the same font size the picker uses.
+        pm.AddThemeFontSizeOverride("font_size", PickerFontPx);
+        pm.AddThemeConstantOverride("v_separation", 4);
+        pm.AddThemeConstantOverride("h_separation", 8);
+        pm.AddThemeConstantOverride("item_start_padding", 12);
+        pm.AddThemeConstantOverride("item_end_padding", 16);
+        pm.AddThemeConstantOverride("separator_separation", 4);
         pm.Position = new Vector2I((int)atPointer.X, (int)atPointer.Y);
         pm.IndexPressed += i =>
         {
@@ -2138,7 +2151,7 @@ public partial class MapRenderer : Node2D
             if (at >= 0 && at < acts.Count) acts[at]();
         };
         pm.PopupHide += () => pm.QueueFree();
-        AddChild(pm);
+        (_hudLayer ?? (Node)this).AddChild(pm);
         pm.Popup();
         GD.Print($"DETAIL-MENU car #{uid} ({NameOf(uid)}) at ({atPointer.X:F0},{atPointer.Y:F0}) " +
                  $"· {acts.Count} entries ({_details.Count} window(s) already open)");
