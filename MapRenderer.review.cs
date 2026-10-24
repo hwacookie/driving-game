@@ -1696,6 +1696,8 @@ public partial class MapRenderer : Node2D
             SetMapHighlight(_detailHighlight);
         };
         w.SeekAsked = (win, step) => SeekToStep(step);
+        w.Paged = (win, page) => GD.Print($"DETAIL-PAGE #{win.Uid} " +
+                                          $"{(page == 0 ? "back to the current event" : page.ToString() + " rows off the anchor")}");
         _details.Add(w);
         w.ShowCar(uid);
         SyncSelectedFromDetails();
@@ -1909,8 +1911,27 @@ public partial class MapRenderer : Node2D
                         GetTree().CreateTimer(0.6).Timeout += () =>
                         {
                             GD.Print($"DETAIL-PROBE after seek: cursor {cam1} -> {_cursor} " +
-                                     $"· step {_tape[Math.Clamp((int)_cursor, 0, _tape.Count - 1)].Step}");
-                            ProbeSecondWindow(w);
+                                     $"· step {_tape[Math.Clamp((int)_cursor, 0, _tape.Count - 1)].Step}" +
+                                     $" · list rows={w.RowCountForProbe()} page={w.Page}");
+                            // Paging is the other half of the list: the rest of
+                            // the history stays reachable without ever dumping
+                            // it on screen.
+                            var foot = w.PagingButtonForProbe("earlier");
+                            if (foot == null) { ProbeSecondWindow(w); return; }
+                            ClickInWindow(w, foot, "DETAIL-PROBE page earlier");
+                            GetTree().CreateTimer(0.6).Timeout += () =>
+                            {
+                                GD.Print($"DETAIL-PROBE after paging: page={w.Page} " +
+                                         $"rows={w.RowCountForProbe()}");
+                                var back = w.PagingButtonForProbe("current");
+                                if (back != null)
+                                    ClickInWindow(w, back, "DETAIL-PROBE page reset");
+                                GetTree().CreateTimer(0.5).Timeout += () =>
+                                {
+                                    GD.Print($"DETAIL-PROBE after reset: page={w.Page}");
+                                    ProbeSecondWindow(w);
+                                };
+                            };
                         };
                     }
                     else ProbeSecondWindow(w);
@@ -2029,7 +2050,7 @@ public partial class MapRenderer : Node2D
         {
             if (!w.Showing) continue;
             w.CarTexture = CarTexture(_carColors.GetValueOrDefault(w.Uid, ""));
-            w.Update(BuildDetailData(w.Uid, fr, holderOf, w.ShowAll));
+            w.Update(BuildDetailData(w.Uid, fr, holderOf));
         }
         // The highlighted car may have left the frame (or the window that asked
         // for it may be gone): the box follows the FACT, not the last click.
@@ -2042,7 +2063,7 @@ public partial class MapRenderer : Node2D
     }
 
     private CarDetailData BuildDetailData(long uid, TapeFrameRev fr,
-                                          Dictionary<long, long> holderOf, bool showAll)
+                                          Dictionary<long, long> holderOf)
     {
         var d = new CarDetailData
         {
@@ -2082,7 +2103,7 @@ public partial class MapRenderer : Node2D
         // are different facts (docs/CAR_DETAIL_WINDOW.md).
         if (at == uid) d.Lockdown = HasLockdownNote(uid);
 
-        BuildDetailRows(uid, d, showAll);
+        BuildDetailRows(uid, d);
         return d;
     }
 
@@ -2104,36 +2125,36 @@ public partial class MapRenderer : Node2D
         return false;
     }
 
-    /// <summary>The car's events at or before the cursor, NEWEST FIRST. The
-    /// whole history is handed over (a stress run's worst car has 953 of them)
-    /// and the window caps what it RENDERS at `show all`'s discretion — the
-    /// stamp keeps a rebuild to the frames where a new event actually appeared.
-    /// The live client fills the same struct from `GET /car/{uid}/decisions`,
-    /// which the sim caps at 100 entries in memory — that is what
-    /// <see cref="CarDetailData.TruncatedNote"/> is for.</summary>
-    private void BuildDetailRows(long uid, CarDetailData d, bool showAll)
+    /// <summary>The car's WHOLE event history, in time order, plus the index
+    /// of the event it is acting under at the frame on screen — the anchor the
+    /// window centres its list on. Two things this buys that a "newest first,
+    /// 100 rows" list could not: the events AFTER the cursor are visible (that
+    /// is what one scrubs towards), and jumping from one event to the next
+    /// forward or back is the way the story is read (user decision 2026-10-24).
+    ///
+    /// The tape's event index is keyed by TAPE INDEX, not by the file's step
+    /// column — mixing the two is the off-by-one that once threw a
+    /// KeyNotFoundException per frame per slot (docs/RECORD_PLAYBACK.md).</summary>
+    private void BuildDetailRows(long uid, CarDetailData d)
     {
         var dec = _decSteps.TryGetValue(uid, out var l) ? l : null;
         if (dec == null || dec.Count == 0) return;
-        int upto = 0;
-        while (upto < dec.Count && dec[upto] <= _cursor) upto++;
-        d.RowsTotal = upto;
-        int max = showAll ? upto : Math.Min(upto, CarDetailWindow.RowCap * 4);
-        for (int k = upto - 1; k >= 0 && (upto - k) <= max; k--)
+        long first = _tape.Count > 0 ? _tape[0].Step : 1L;
+        for (int k = 0; k < dec.Count; k++)
         {
             long idx = dec[k];
+            if (idx < 0 || idx >= _tape.Count) continue;
             d.Rows.Add(new CarDetailRow
             {
                 Step = _tape[(int)idx].Step,
                 // The SAME clock the readout prints (absolute tape step ×
-                // dt_fixed) — two numbers for one instant on one screen is how
+                // dt_fixed): two numbers for one instant on one screen is how
                 // a review report starts lying.
                 SimS = SimOf(_tape[(int)idx].Step),
                 Msg = _decMsg.GetValueOrDefault($"{uid}:{idx}", "(no text)"),
             });
+            if (idx <= _cursor) d.AnchorIndex = d.Rows.Count - 1;
         }
-        d.RowsLeft = Math.Max(0, upto - d.Rows.Count);
-        d.TruncatedNote = "events are held back until you ask for them";
     }
 
     /// <summary>The right-click menu (docs/CAR_DETAIL_WINDOW.md): no window

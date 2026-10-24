@@ -42,17 +42,25 @@ public sealed class CarDetailData
     public List<long> HoldsUp = new();         // left of the chain: their holder is me
     public List<long> HeldUpBy = new();        // right: me → …, the walk away from me
     public bool Lockdown;                      // R28's own verdict, not "cycle seen"
-    public List<CarDetailRow> Rows = new();    // NEWEST FIRST
-    public int RowsTotal;                      // rows the car has (>= Rows.Count)
-    public string TruncatedNote = "";          // what RowsLeft says was dropped
-    public int RowsLeft;
+    /// <summary>The car's events in TIME ORDER, oldest first — the whole
+    /// history, so the window can show what SURROUNDS the frame on screen
+    /// rather than a list that always starts at the newest (user decision
+    /// 2026-10-24: do not show all of them, give the chance to see the events
+    /// around the currently selected one).</summary>
+    public List<CarDetailRow> Rows = new();
+    /// <summary>Index in <see cref="Rows"/> of the event this car is ACTING
+    /// under at the frame on screen — the newest one at or before the cursor.
+    /// The list is centred on it and that row is painted as current; -1 when
+    /// the car has no event yet.</summary>
+    public int AnchorIndex = -1;
     public bool Following;
     public bool Seekable;                      // a tape can seek, a live run cannot
     /// <summary>What the row list is keyed on: anything that would change the
     /// rows. Recomputing 100 rows every frame is how the review window once
     /// ran at 2 fps — stamp it and rebuild on change only.</summary>
     public string RowStamp =>
-        $"{Uid}|{Rows.Count}|{RowsTotal}|{RowsLeft}|{(Rows.Count > 0 ? Rows[0].Step : 0)}";
+        $"{Uid}|{Rows.Count}|{AnchorIndex}|" +
+        $"{(AnchorIndex >= 0 && AnchorIndex < Rows.Count ? Rows[AnchorIndex].Step : 0)}";
 }
 
 /// <summary>A small rotated sprite: the car's own PNG, nose along its heading.
@@ -104,8 +112,18 @@ public partial class CarDetailWindow : Window
     public const int StepFontPx = 26;      // the address column, a step smaller
     public const int TimeFontPx = 24;
     public const int BtnFontPx = 17;
-    public const int IconPx = 22;          // the two status buttons' glyphs
-    public const int RowCap = 100;         // newest rows shown before `show all`
+    /// <summary>The status glyphs are the button: at 22 px they were the
+    /// smallest thing in the window and the complaint was "too small"
+    /// (2026-10-24). Text comes off too — the tooltip says what the glyph is,
+    /// and the two shapes are different enough to learn.</summary>
+    public const int IconPx = 34;
+    public const int StatusBtnPx = 52;
+    /// <summary>Rows shown on EACH SIDE of the current event. The list is a
+    /// window onto the car's story around the frame you are looking at, not a
+    /// dump of it (user decision 2026-10-24: "do NOT show all events — give the
+    /// user the chance to see the events AROUND the currently selected frame").
+    /// Everything further away stays reachable by paging.</summary>
+    public const int AroundEvents = 10;
     public const int MarginPx = 12;
     /// <summary>Width a window asks for when the operator has not sized it.
     /// The header row of a real car (sprite, speed, two dots, x/y/h) measures
@@ -123,9 +141,12 @@ public partial class CarDetailWindow : Window
     /// on switches the others off — only one car can be followed, and the
     /// window that asks cannot know about its siblings.</summary>
     public bool Following;
-    /// <summary>`show all` was pressed: the cap is off for this window until
-    /// it shows a different car.</summary>
-    public bool ShowAll;
+    /// <summary>How far the visible slice has been paged away from the current
+    /// event (0 = centred on it). Reset when the window takes a different car,
+    /// and by "back to the current event".</summary>
+    public int Page;
+    /// <summary>The event the list is centred on, in <see cref="CarDetailData.Rows"/>.</summary>
+    public int AnchorIndex { get; private set; } = -1;
     /// <summary>The chain id the pointer is over while a button is held — the
     /// highlight the client draws on the map (docs: press-and-hold an id).</summary>
     public long HighlightUid;
@@ -137,7 +158,9 @@ public partial class CarDetailWindow : Window
     public System.Action<CarDetailWindow, long> SwitchAsked;     // chain id clicked
     public System.Action<CarDetailWindow, long, bool> HighlightAsked;  // held / released
     public System.Action<CarDetailWindow, long> SeekAsked;       // step clicked
-    public System.Action<CarDetailWindow, bool> ShowAllAsked;
+    /// <summary>The list was paged (how far from the current event it sits
+    /// now) — the client only logs it, the window owns the view.</summary>
+    public System.Action<CarDetailWindow, int> Paged;
 
     private readonly CarSpriteView _sprite;
     private readonly Label _speed;
@@ -157,6 +180,9 @@ public partial class CarDetailWindow : Window
     private readonly Label _status;
     private readonly Button _followBtn;
     private readonly Button _centreBtn;
+    private readonly Button _earlierBtn;
+    private readonly Button _laterBtn;
+    private readonly Button _nowBtn;
     private string _rowStamp = "";
     private bool _showAllStamp;
     private long _hoverUid;                 // meta the pointer sits on
@@ -303,26 +329,38 @@ public partial class CarDetailWindow : Window
         box.AddChild(status);
         _followBtn = new Button
         {
-            Text = "follow",
             Icon = LoadIcon("res://assets/ic_follow.svg"),
-            IconAlignment = HorizontalAlignment.Left,
             TooltipText = "the camera rides this car - on/off (only one car is followed)",
             FocusMode = Control.FocusModeEnum.None,
+            CustomMinimumSize = new Vector2(StatusBtnPx, StatusBtnPx),
         };
-        _followBtn.AddThemeFontSizeOverride("font_size", BtnFontPx);
         _followBtn.Pressed += () => FollowAsked?.Invoke(this);
         status.AddChild(_followBtn);
         _centreBtn = new Button
         {
-            Text = "centre",
             Icon = LoadIcon("res://assets/ic_centre.svg"),
-            IconAlignment = HorizontalAlignment.Left,
             TooltipText = "put the view on this car (momentary)",
             FocusMode = Control.FocusModeEnum.None,
+            CustomMinimumSize = new Vector2(StatusBtnPx, StatusBtnPx),
         };
-        _centreBtn.AddThemeFontSizeOverride("font_size", BtnFontPx);
         _centreBtn.Pressed += () => CenterAsked?.Invoke(this);
         status.AddChild(_centreBtn);
+        status.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+        // Paging lives in the STATUS LINE, not at the ends of the list. A
+        // footer button inside the scrolled list is off-screen whenever the
+        // list is centred on the current event — measured: the probe's press
+        // for "earlier events" landed at local y = -192, above the window, and
+        // paging never happened. Controls that must always be reachable do not
+        // live inside the thing they scroll.
+        _earlierBtn = MkIconBtn(status, "res://assets/ic_earlier.svg",
+                                "earlier events of this car");
+        _earlierBtn.Pressed += () => PageBy(-(CarDetailWindow.AroundEvents * 2 + 1));
+        _laterBtn = MkIconBtn(status, "res://assets/ic_later.svg",
+                              "later events of this car");
+        _laterBtn.Pressed += () => PageBy(AroundEvents * 2 + 1);
+        _nowBtn = MkIconBtn(status, "res://assets/ic_now.svg",
+                            "back to the event this car is acting under at this frame");
+        _nowBtn.Pressed += () => PageBy(0, absolute: true);
         status.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
         _status = MkLabel(status, BtnFontPx + 3, new Color(0.62f, 0.66f, 0.74f));
     }
@@ -335,7 +373,7 @@ public partial class CarDetailWindow : Window
     const int HeadRowPx = HeadFontPx * 2;          // 72 (the sprite is the tall one)
     const int ChainRowPx = ChainFontPx + 10;       // 42
     const int SepPx = 6;                           // the divider
-    const int StatusRowPx = BtnFontPx * 2 - 2;     // 32
+    const int StatusRowPx = StatusBtnPx;           // 52 (the icon buttons)
     const int BoxSeparationPx = 6;
 
     /// <summary>Height the window asks for when the operator has not sized it:
@@ -379,8 +417,17 @@ public partial class CarDetailWindow : Window
         $"pose='{_pose.Text}' rect={_pose.GetGlobalRect()} " +
         $"head={(_speed.GetParent() as Control)?.Size}";
 
-    /// <summary>Rows currently in the list (cap applied or not).</summary>
+    /// <summary>Rows currently in the list (the page plus its footers).</summary>
     public int RowCountForProbe() => _rowBox.GetChildCount();
+
+    /// <summary>The paging controls, for the probe to press as a hand does.</summary>
+    public Button PagingButtonForProbe(string which) => which switch
+    {
+        "earlier" => _earlierBtn,
+        "later" => _laterBtn,
+        "current" => _nowBtn,
+        _ => null,
+    };
 
     /// <summary>The newest row's step button — the thing a hand presses to
     /// jump the tape there. Null when there is no row or the client cannot
@@ -421,6 +468,28 @@ public partial class CarDetailWindow : Window
         };
     }
 
+    static Button MkIconBtn(Node parent, string icon, string tooltip)
+    {
+        var b = new Button
+        {
+            Icon = LoadIcon(icon),
+            TooltipText = tooltip,
+            FocusMode = Control.FocusModeEnum.None,
+            CustomMinimumSize = new Vector2(StatusBtnPx, StatusBtnPx),
+        };
+        parent.AddChild(b);
+        return b;
+    }
+
+    /// <summary>Move the visible slice through the car's history. 0 (and
+    /// absolute) recentres it on the current event.</summary>
+    void PageBy(int delta, bool absolute = false)
+    {
+        Page = absolute ? 0 : Page + delta;
+        Paged?.Invoke(this, Page);
+        if (_last != null) BuildRows(_last);
+    }
+
     static Label MkLabel(Node parent, int px, Color col)
     {
         var l = new Label
@@ -444,7 +513,7 @@ public partial class CarDetailWindow : Window
     /// car is a new cast, and `show all` was an ask about the OLD one).</summary>
     public void ShowCar(long uid)
     {
-        if (Uid != uid) ShowAll = false;
+        if (Uid != uid) Page = 0;      // a new car is a new story
         Uid = uid;
         Visible = true;
         _rowStamp = "";                 // force the rows to be rebuilt
@@ -454,7 +523,7 @@ public partial class CarDetailWindow : Window
     public void HideCar()
     {
         Uid = 0;
-        ShowAll = false;
+        Page = 0;
         Visible = false;
         ReleaseHighlight();
     }
@@ -479,12 +548,17 @@ public partial class CarDetailWindow : Window
         _blinkDot.AddThemeColorOverride("font_color", blinkCol);
         _pose.Text = $"x {d.X:F1}  y {d.Y:F1}  h {d.HeadingDeg:F0}°";
         _sprite.AngleDeg = (float)d.HeadingDeg;
-        _followBtn.Text = d.Following ? "following" : "follow";
+        // A button with no word wears its state entirely in the glyph's
+        // colour: amber = this window is the one the camera rides.
+        // No word on these two, so the tint carries the state: amber = this
+        // window is the one the camera rides. (Modulate, not the theme's
+        // icon_modulate — it is a theme PROPERTY in Godot 4 and C# reaches it
+        // through AddThemeColorOverride; tinting the button is the same look.)
+        _followBtn.Modulate = d.Following ? new Color(1f, 0.86f, 0.35f)
+                                          : new Color(0.80f, 0.82f, 0.88f);
         // The paint and the state are one decision: the followed window's
         // button (icon included) wears the highlight colour.
-        _followBtn.Modulate = d.Following ? new Color(1f, 0.86f, 0.35f)
-                                         : new Color(0.78f, 0.80f, 0.86f);
-        _centreBtn.Modulate = new Color(0.78f, 0.80f, 0.86f);
+        _centreBtn.Modulate = new Color(0.80f, 0.82f, 0.88f);
         _status.Text = d.CapKey.Length > 0 ? d.CapKey : "free";
 
         string cStamp = ChainStamp(d);
@@ -493,7 +567,7 @@ public partial class CarDetailWindow : Window
             _chainStamp = cStamp;
             _chain.Text = ChainBbcode(d);
         }
-        string stamp = d.RowStamp + (ShowAll ? "|all" : "");
+        string stamp = d.RowStamp + "|page" + Page;
         if (stamp != _rowStamp) { _rowStamp = stamp; BuildRows(d); }
 
         // NO auto-fitted MinSize taken from the content minimum: measured,
@@ -540,28 +614,66 @@ public partial class CarDetailWindow : Window
         return string.Join("[color=#7d8494], [/color]", parts);
     }
 
+    /// <summary>The list around the CURRENT event: a page before it, a page
+    /// after it, and the row itself painted as the one this car is acting
+    /// under. Paging walks the whole history without ever dumping it, and a
+    /// jump back to the anchor is one button — because once the operator has
+    /// paged away, "where was I?" is the question they ask next.</summary>
+    CarDetailData _last;
+
     void BuildRows(CarDetailData d)
     {
+        _last = d;
         foreach (var child in _rowBox.GetChildren()) child.QueueFree();
-        int shown = ShowAll ? d.Rows.Count : Mathf.Min(d.Rows.Count, RowCap);
-        for (int i = 0; i < shown; i++) AddRow(d.Rows[i], d.Seekable, i == 0);
-        if (d.Rows.Count > shown)
-            AddFooter($"{shown} of {d.RowsTotal} · show all ({d.Rows.Count - shown} more)",
-                      () => { ShowAll = true; ShowAllAsked?.Invoke(this, true); BuildRows(d); });
-        else if (ShowAll && d.Rows.Count > CarDetailWindow.RowCap)
-            AddFooter($"all {d.Rows.Count} rows · back to the newest {RowCap}",
-                      () => { ShowAll = false; ShowAllAsked?.Invoke(this, false); BuildRows(d); });
-        else if (d.RowsLeft > 0)
-            AddFooter($"… {d.RowsLeft} older {d.TruncatedNote}", null);
-        else if (d.Rows.Count == 0)
-            AddFooter("no decision, no event: this car has never been held", null);
+        AnchorIndex = d.AnchorIndex;
+        _nowBtn.Modulate = Page == 0 ? new Color(0.36f, 0.38f, 0.44f)
+                                    : new Color(1f, 0.86f, 0.35f);
+        int n = d.Rows.Count;
+        if (n == 0)
+        {
+            AddFooter("no decision, no event: this car has never been held");
+            return;
+        }
+        int anchor = Mathf.Clamp(d.AnchorIndex < 0 ? n - 1 : d.AnchorIndex, 0, n - 1);
+        int centre = Mathf.Clamp(anchor + Page, 0, n - 1);
+        int lo = Mathf.Max(0, centre - AroundEvents);
+        int hi = Mathf.Min(n - 1, centre + AroundEvents);
+        if (lo > 0) AddFooter($"↑ {lo} earlier events (the up arrow below)");
+        for (int i = lo; i <= hi; i++) AddRow(d.Rows[i], d.Seekable, i == anchor, i, lo);
+        if (hi < n - 1) AddFooter($"↓ {n - 1 - hi} later events (the down arrow below)");
+        if (Page != 0) AddFooter($"· not centred any more ·");
+        // The current row, not the top of the list: the window has to open on
+        // what the car is doing NOW at this frame.
+        _scroll.SetDeferred(ScrollContainer.PropertyName.ScrollVertical,
+                            Mathf.Max(0, anchor - lo - 1) * RowHeightPx);
     }
 
-    void AddRow(CarDetailRow r, bool seekable, bool newest)
+
+
+    void AddRow(CarDetailRow r, bool seekable, bool current, int index, int lo)
     {
+        // The anchor row is a PANEL, so it can carry a band of colour behind
+        // the text: "this is the reason the car behaves as it does at this
+        // frame" has to be seen, not inferred from position.
+        Control parent = _rowBox;
+        if (current)
+        {
+            var band = new PanelContainer();
+            var sb = new StyleBoxFlat
+            {
+                BgColor = new Color(0.30f, 0.44f, 0.72f, 0.42f),
+                ContentMarginLeft = 4, ContentMarginRight = 4,
+                ContentMarginTop = 2, ContentMarginBottom = 2,
+            };
+            band.AddThemeStyleboxOverride("panel", sb);
+            _rowBox.AddChild(band);
+            parent = band;
+        }
         var line = new HBoxContainer();
         line.AddThemeConstantOverride("separation", 8);
-        _rowBox.AddChild(line);
+        parent.AddChild(line);
+        if (current)
+            MkLabel(line, EventFontPx, new Color(1f, 0.86f, 0.35f)).Text = "▸";
         // Column 1 is the ADDRESS, so it is the thing you press. In the live
         // client there is nothing to jump to, and the number is drawn as text
         // rather than styled as a link and doing nothing (docs: inert).
@@ -587,26 +699,29 @@ public partial class CarDetailWindow : Window
         }
         MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text =
             $"{r.SimS:F2} s";
-        var msg = MkLabel(line, EventFontPx, newest ? new Color(0.98f, 0.98f, 1f)
-                                                    : new Color(0.80f, 0.82f, 0.86f));
+        // Past the anchor, later events are the FUTURE of the frame on screen:
+        // shown (that is what one scrubs towards), but dimmed so "ahead of
+        // here" reads without a label saying it.
+        // Past the anchor the lines are the FUTURE of this frame — dim grey,
+        // deliberately not the blue of the address column, or "later" would
+        // look like a link the way the step numbers do (seen in the shot).
+        Color msgCol = current ? new Color(1f, 1f, 1f)
+                 : index < AnchorIndex ? new Color(0.78f, 0.80f, 0.86f)
+                                       : new Color(0.55f, 0.57f, 0.63f);
+        var msg = MkLabel(line, EventFontPx, msgCol);
         msg.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
         msg.Text = r.Msg;
     }
 
-    void AddFooter(string text, System.Action onClick)
+    /// <summary>A line of the list that is not an event: how much of the
+    /// history is off-screen, or that there is none. Paging is a control in the
+    /// status line, so these stay plain text (a footer button inside a scrolled
+    /// list is unreachable exactly when the list is centred where it should be).</summary>
+    void AddFooter(string text)
     {
         var line = new HBoxContainer();
         _rowBox.AddChild(line);
-        if (onClick == null)
-        {
-            MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text = text;
-            return;
-        }
-        var b = new Button { Text = text, Flat = true, FocusMode = Control.FocusModeEnum.None };
-        b.AddThemeFontSizeOverride("font_size", TimeFontPx);
-        b.AddThemeColorOverride("font_color", new Color(0.55f, 0.78f, 1f));
-        b.Pressed += () => onClick();
-        line.AddChild(b);
+        MkLabel(line, TimeFontPx, new Color(0.55f, 0.58f, 0.66f)).Text = text;
     }
 
     // --- the chain's hand interactions -------------------------------------

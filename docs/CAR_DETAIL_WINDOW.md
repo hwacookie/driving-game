@@ -69,8 +69,8 @@ values.
 | 1 | header row | `[sprite]` · **`65 km/h`** · ●brake ●blinker · `x y h` right-aligned | **1.5 × body** (`HeadFontPx` 36) |
 | 2 | chain | `whom I hold up → me → who holds me up` — see below | `ChainFontPx` 32 |
 | — | divider | | |
-| 3 | event list | `#8803  146.85 s  brake: yield sign: car 26 (19 m out)`, newest FIRST, older ones below (scroll down into the past) | `EventFontPx` 30 (address column 26, seconds 24) |
-| 4 | status line | `follow` · `centre`, each with its own glyph | `BtnFontPx` 17 + `IconPx` 22 |
+| 3 | event list | **the current event in the middle**, `AroundEvents` = 10 of the car's events on each side of it; the anchor row gets a band of colour and a ▸, earlier lines are dimmer, later lines dimmer still (they are the future of this frame) | `EventFontPx` 30 (address column 26, seconds 24) |
+| 4 | status line | five icon-only controls, no words: **follow**, **centre**, then **↑ earlier / ↓ later / ◎ back to the current event**; the rule owning the cap (`avoid#26`, `free`) at the far right | `IconPx` 34 in a `StatusBtnPx` 52 box |
 
 There is **no class line** and the constants are the state after the first
 operator review (below) — the window opened with a class word, a 24 px chain
@@ -216,7 +216,8 @@ holding up: #71, #68        me        held up by: #59 → #61 → #44
 | order | newest at the TOP; older entries below, reached by scrolling down. |
 | click on the step number | **seek** the tape to that frame (reviewer only; inert in the live viewer). Step → index is the existing binary search over the tape index. |
 | scope | this car's own decisions **and the events that come from outside** — explicitly including "someone drove into me" (2026-10-24). |
-| row cap | **the newest 100 rows**, then a footer row **`show all (853 more)`** which drops the cap for that window until the car changes (user decision 2026-10-24). Measured on the tapes we own: a normal full-suite run peaks at **32** events per car, so 100 rows is never reached there; the record is **953** (`#3` of the fig8 stress family, 951 of them `brake: …` at ~3.9/s), i.e. only the dense multi-minute stress runs need the footer. Median car: 6 events. |
+| list model | **not a dump**: a window of `AroundEvents` (10) events on each side of **the event the car is acting under at the frame on screen** — the newest at or before the cursor. The operator reads the story around the moment they are looking at, and pages through the rest with the ↑/↓/◎ controls in the status line. Supersedes the "newest 100 + `show all`" plan (user decision 2026-10-24, from the live window: "do NOT show all events — give the user the chance to see the events AROUND the currently selected frame/time"). For the numbers that sized the old plan: median 6 events per car, a suite run peaks at 32, the record 953. |
+| paging lives in the status line | A footer button at the ends of the scrolled list is off-screen exactly when the list is centred on the anchor — measured: the probe's press for "earlier events" landed at local **y = −192**, above the window, and nothing paged. The footers in the list are plain text now (`↑ 128 earlier events`), and the controls are always visible below. |
 
 **"From outside" is already recorded — verified, not assumed.** The crash
 episode logs a decision on **every** car in contact, each naming the other
@@ -356,11 +357,11 @@ measured wrong:
   and print the highlighted uid, and `--test-peek-pan` for the peek→pan
   hand-over. Each turns a claim into a measured line, as the rest of the family
   does.
-- Row nodes: 100 rows per window are ordinary `Label`s. The `show all` path is
-  what can reach ~950 rows in ~13 windows at once, so the list is built through
-  one function that a pooled/virtualised implementation can replace later
-  without touching the layout — decided only when a `show all` on a stress tape
-  is measurably slow, not before.
+- Row nodes: a page is 21 rows plus up to three footer lines, so the list is
+  ordinary `Label`s and no virtualisation is needed. The client hands the whole
+  history in once (953 rows is a few tens of kilobytes of strings) and the
+  window slices what it paints; if that ever measures slow, the slicing is the
+  one function to replace.
 
 ## What changes in the other documents when this is built
 
