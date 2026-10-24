@@ -131,6 +131,10 @@ multi-car run fits (see [docs/RECORD_PLAYBACK.md](docs/RECORD_PLAYBACK.md)).
 | [docs/CRASH_EFFECT_SMOKE.md](docs/CRASH_EFFECT_SMOKE.md) | how a one-shot crash smoke puff would be built in Godot — **NOT implemented** |
 | [AGENTS.md](AGENTS.md) | the project rules that bind every change |
 
+**Open work**: [TODO.md](TODO.md) — what is known to be unfinished, dated, with
+the state of the tree when it was written (it is a list, not a spec: the specs
+above stay authoritative and every entry points at the one that governs it).
+
 **History** (kept for provenance; describes an earlier state on purpose):
 `diary/` (session logs, incl. the raw `prompts.txt` transcript),
 `docs/StVO.pdf` (the German traffic law the §§-quotes in the ruleset rest on),
