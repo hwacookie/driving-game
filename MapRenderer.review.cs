@@ -879,8 +879,10 @@ public partial class MapRenderer : Node2D
                     // capKey (docs/CAR_DETAIL_WINDOW.md). Accept all of them
                     // rather than refusing the run — the reviewer reads tapes
                     // that were recorded before the field existed. capKey
-                    // stays LAST in every generation, because it can contain
-                    // commas, which is exactly why heldBy went before it.
+                    // stays LAST in every generation, because the record is
+                    // comma-separated and a cap key can carry that delimiter
+                    // (an added reason is joined with ',') — which is exactly
+                    // why heldBy went before it instead of after.
                     Color = fld.Length >= 11 ? fld[9] : "",
                     Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
                     HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,

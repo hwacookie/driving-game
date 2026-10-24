@@ -6,23 +6,20 @@
 > ([docs/](docs/), index in [README.md](README.md)) — every entry here points
 > at the one that governs it.
 
-## 0. First: the tree is dirty, and one unit test is red
+## 0. Done since this list was written (2026-10-24, later that night)
 
-Nothing below is safe to build on until this is resolved.
-
-- **Uncommitted:** `DrivingGame.Sim/Car.cs` (dedup in `RecordDecision`) and
-  `DrivingGame.Sim.Tests/DecisionLogTests.cs` (new, 3 tests).
-- **The change:** a decision whose text repeats the newest entry **verbatim** is
-  not a new decision, so it is dropped and the first entry keeps the step the
-  situation started on. Measured reason: `hairpin_exit` in `tape_T_249` logged
-  269 decisions for one car, 268 of them the same line
-  `[R1] off-road at (579, 1128)` — the validator re-reports at 60 Hz.
-- **Suite at writing time:** 98 tests → **95 passed, 1 failed, 2 skipped**
-  (baseline was 93/0/2, so one of the three new tests fails). *The failing
-  test had not been identified yet* — start with
-  `dotnet test DrivingGame.Sim.Tests --nologo` and read the name.
-- Also true: a tape recorded **before** this change still contains its
-  duplicates, so an old run will never look deduplicated in the reviewer.
+- **The decision dedup** (`Car.RecordDecision` drops a line that repeats the
+  newest entry verbatim, so the first entry keeps the step the situation started
+  on) is **built, tested and committed** — `DecisionLogTests` (3 tests),
+  suite **96 passed / 0 failed / 2 skipped**, build 0 errors. The one red test
+  this list recorded was a bug in my own assertion (`"brake"` where the line
+  reads `"brake:"`), not in the behaviour.
+- Why it existed: `hairpin_exit` in `tape_T_249` logged 269 decisions for one
+  car, 268 of them the identical `[R1] off-road at (579, 1128)` — the validator
+  re-reports at 60 Hz while the car sits in the same metre of grass.
+- **Still true:** a tape recorded before it (every tape in `tests/`) keeps its
+  duplicates, so an old run never looks deduplicated in the reviewer. New
+  evidence of the collapse wants a fresh run.
 
 ## 1. The live viewer has no car detail windows
 
@@ -101,8 +98,10 @@ moves the cursor). Spec:
 ## 6. Loose ends that are not about the window
 
 - [ ] `docs/godot_web_rendering_architecture.md` — untracked, **not written by
-      this session** (dated 2026-10-24 20:16). Keep (and commit) or delete;
-      someone's call.
+      this session** (dated 2026-10-24 20:16, a Godot web-export/streaming
+      reference). Deliberately left out of the commits so far: nobody said keep
+      or delete, and burying someone else's document inside an unrelated commit
+      is how provenance gets lost. Keep (and commit) or delete — someone's call.
 - [ ] `tests/tape_T_250_19_20261024_220134.txt` — untracked single-scenario
       tape, judged not evidence worth keeping; delete or commit.
 - [ ] e2e baseline: **3 red** — #20 `slow_pass_priority` (times out crawling),
@@ -117,5 +116,6 @@ moves the cursor). Spec:
       ceiling and `PERSIST_TICKS = 15` allows 4/s. Old data, `fig8_stress` is
       skipped in warped runs — reproduce it on a fresh real-time stress run
       before believing it is a live defect.
-- [ ] **`feat/car_detail_window` is not pushed** (6 local commits, top
-      `da1e765`); `origin/main` is at `63bd2e6`.
+- [x] ~~`feat/car_detail_window` is not pushed~~ — pushed with upstream set;
+      `origin/main` is still at `63bd2e6`, so nothing of this branch is on
+      `main` until it is merged.

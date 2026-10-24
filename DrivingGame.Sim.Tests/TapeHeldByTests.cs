@@ -13,12 +13,14 @@ namespace DrivingGame.Sim.Tests;
 ///
 /// Two things had to stay true while adding a field:
 ///   1. `heldBy` goes BEFORE `capKey`, not after it. capKey is the LAST field
-///      because a cap key can contain a comma (`r32#12,passage#4` when two
-///      rules own one cap) and the reader therefore joins everything from its
-///      position to the end of the record. Appending after it would have
-///      swallowed the new number into the cap key — silently, in both
-///      directions: an old file read by a new reader and a new file read by an
-///      old one.
+///      and the reader joins everything from its position to the end of the
+///      record, because the fields are comma-separated while a cap key can
+///      contain that same delimiter — `CarCollisions` joins an added reason
+///      onto an existing key with ',' (`r32#12,passage#4` is the shape; the
+///      test uses it as a constructed case, not one measured in a run).
+///      Appending after capKey would have swallowed the new number into the
+///      cap key — silently, in both directions: an old file read by a new
+///      reader and a new file read by an old one.
 ///   2. A run recorded before this field existed must load with the SAME pose,
 ///      the same cap key and held-by "nobody", because the reviewer reads tapes
 ///      that were recorded before it was written.
@@ -49,10 +51,12 @@ public class TapeHeldByTests : IDisposable
     }
 
     [Fact]
-    public void HeldBy_SurvivesTheTapeRoundTrip_BesideACommaCapKey()
+    public void HeldBy_SurvivesTheTapeRoundTrip_BesideADelimiterCapKey()
     {
         var holder = HeldCar(0, "");
-        var held = HeldCar(0, "r32#12,passage#4");       // the comma case
+        // A cap key carrying the field delimiter: the case that decides
+        // where the new column may go.
+        var held = HeldCar(0, "r32#12,passage#4");
         held.HeldByUid = holder.Uid;
         var wrong = new Dictionary<int, bool>();
         var names = new Dictionary<int, string> { [holder.Uid] = "holder", [held.Uid] = "held" };
@@ -64,9 +68,10 @@ public class TapeHeldByTests : IDisposable
         Assert.NotNull(path);
 
         // The line on disk: uid,x,y,heading,speed,blinkers,brake,wrong,crashes,
-        // color,lamps,heldBy,capKey — 13 fields, and 14 comma-separated TOKENS
-        // for this car, because the cap key itself carries a comma. That is the
-        // whole reason heldBy went before capKey and not after it.
+        // color,lamps,heldBy,capKey — 13 fields, and 14 delimiter-separated
+        // TOKENS for this car, because the cap key itself carries the
+        // delimiter. That is the whole reason heldBy went before capKey and
+        // not after it.
         var line = File.ReadAllLines(path!).First(l => !l.StartsWith("#"));
         var fields = line.Split(";")[3].Split("|")[1].Split(",");
         Assert.Equal(14, fields.Length);

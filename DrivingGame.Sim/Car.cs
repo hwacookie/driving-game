@@ -143,10 +143,15 @@ public class Car
         public string Msg = "";
     }
     /// <summary>The text of the MOST RECENT decision this car made, and the
-    /// substep it was made on. The tape reads these two together at the moment
-    /// of recording, so a decision reaches the tape the instant it happens -
-    /// the 100-entry Decisions cap only protects live memory and can never
-    /// truncate what the tape already kept.</summary>
+    /// substep it was made on. "Decision" means a CHANGE of reason:
+    /// <see cref="RecordDecision"/> drops a line that repeats the newest one
+    /// verbatim, so these two describe the situation the car is in rather than
+    /// the last tick that happened to mention it.
+    ///
+    /// The tape reads the two together at the moment of recording, so a
+    /// decision reaches the tape the instant it happens - the 100-entry
+    /// Decisions cap only protects live memory and can never truncate what the
+    /// tape already kept.</summary>
     public string LastDecisionMsg { get; internal set; } = "";
     private readonly object _decLock = new();
     public const int MaxDecisions = 100;
@@ -161,10 +166,23 @@ public class Car
     /// lets the tape mark the substeps worth scrubbing to.</summary>
     public long LastDecisionStep { get; internal set; }
 
+    /// <summary>Log one decision — and only when the car's mind actually
+    /// changed. A reason that repeats the newest entry VERBATIM is the same
+    /// decision reported again, not a new one, so it is dropped and the FIRST
+    /// entry keeps the step where the situation started.
+    ///
+    /// Measured reason (2026-10-24, `hairpin_exit` in tape_T_249): one car
+    /// logged 269 decisions, of which 268 were the same line —
+    /// `[R1] off-road at (579, 1128)` re-reported every substep the guard was
+    /// still unhappy, while the car sat in the same metre of grass. A rule that
+    /// re-evaluates at 60 Hz needs this: the DECISION is the transition, not the
+    /// tick. Text differs at all (a new gap, another car, a different node) and
+    /// it is a new decision, so it lands.</summary>
     public void RecordDecision(double simTime, string msg)
     {
         lock (_decLock)
         {
+            if (Decisions.Count > 0 && Decisions[^1].Msg == msg) return;
             Decisions.Add(new CarDecision { T = simTime, Step = SimStep, Msg = msg });
             LastDecisionStep = SimStep;
             LastDecisionMsg = msg;
