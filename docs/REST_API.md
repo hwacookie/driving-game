@@ -70,9 +70,10 @@ hosts):
 | DELETE | `/obstacles/{obId}` | remove one by id |
 | POST | `/focus` | what the CURRENT scenario wants the window to look at (a car or a place) |
 | POST | `/test_result` | the suite's verdict for the scenario that just ended (recorded on the tape) |
-| POST | `/tape` | start recording the run's substep tape (idempotent) |
+| POST | `/tape` | start recording the run's substep tape (idempotent); answers `{recording, steps, first, last, dt_fixed, map, map_hash}` — the reference to the ground the run belongs to |
 | POST | `/tape/clear` | drop recorded frames, keep the recorder running |
-| POST | `/tape/frame` | one recorded substep: `{"step": N}`, `-1` = last |
+| POST | `/tape/tip` | the frames a client has not received yet: `{"since": N, "limit": M}` (N = `-1` → since the run's start) → `{first_step, head_step, from_step, dt_fixed_s, map, map_hash, legend, lines[]}` — **the lines are the tape file's own text grammar** (`Tape.cs:FrameLine`), so a tip feed and a tape file parse with one parser, not two that can drift |
+| POST | `/tape/frame` | one recorded substep: `{"step": N}`, `-1` = last — per car: uid, x, y, heading, **speed (m/s)**, blinkers, braking, wrong-side, crashes, `cap_key`/`held_by`, **`level`** (its deck), **`kind`** (its actor kind, `car` implied) |
 | GET | `/tape/index` | step range + the steps that carry an event |
 | GET | `/tape/list` | the tapes on disk, newest first (with map + hash) |
 | POST | `/tape/load` | load a saved tape for review (`{"path": …}`) |
@@ -136,11 +137,17 @@ same `label` replaces the note instead of stacking a second one.
 
 ### The tape family in one paragraph
 
-`POST /tape` starts recording, every substep of every car lands in memory,
+`POST /tape/tip` streams the tip of a tape that is still being written — the
+live window's picture is that stream (docs/RECORD_PLAYBACK.md → *"One client,
+one data source"*); `POST /tape` starts recording, every substep of every car
+lands in memory,
 `POST /tape/save` writes it next to the run log. `POST /tape/frame` answers
 **one** recorded substep — pose, blinkers, braking, wrong-side verdict, crash
-count, cap key and the car that owns it (`held_by`), plus the frame's
-`fluidity_mps_per_car`, `moving_share` and event texts — and answers `ok: false`
+count, **the deck it drives on (`level`: 0 = ground, 1 = bridge, — the same
+number `/state` answers, resolved from the same segment: the two channels
+cannot disagree about which bridge a car is on)**, the cap key and the car that
+owns it (`held_by`), plus the frame's `fluidity_mps_per_car`, `moving_share` and
+event texts — and answers `ok: false`
 (it does not invent a frame) when the tape does not reach that step.
 `/tape/load` reads a file back for review and
 leaves recording OFF, `/tape/list` finds the runs on disk, `/tape/clear` drops
@@ -479,6 +486,21 @@ stdout goes to a timestamped log under `tests/`. The runner talks back
 through this API like any other client, so the running test is fully
 visible in the frontend.
 
+Two things the spawn has to get right, both learned from a silent failure
+(2026-10-25):
+
+- **the suite is told which host launched it** - `CAR_API_URL` is set to
+  `http://{request host}`, i.e. the address this very `POST /run_test` arrived
+  on. Inheriting the parent environment left it at the suite's default `:5001`,
+  so a host on another port started a suite that drove - and waited on - some
+  other server.
+- **the suite's path is found by walking up** from the assembly until
+  `tests/test_turning.py` exists (`GameApi.ResolveRunnerPath()`), not by
+  counting four `..`: the console host sits four levels under the repo, the
+  Godot client's assembly five (`.godot/mono/temp/bin/Debug/`), so the
+  embedded client's `Run Test` button resolved to a non-existent
+  `.godot/tests/…`. `DRIVING_GAME_TEST_RUNNER` still overrides both.
+
 ### Wait for Condition
 ```bash
 POST /wait
@@ -545,13 +567,24 @@ client renders and what an external planner would plan on. Payload keys
   "marking_style": {"center_dash_m": 3, "center_gap_m": 3, "lane_dash_m": 2,
                     "lane_gap_m": 4, "park_dash_m": 1, "park_gap_m": 1,
                     "stop_line_width_m": 0.5},
-  "start_points": {name: [x, y, heading_deg, seg, forward, lateral_offset_m]}
+  "start_points": {name: [x, y, heading_deg, seg, forward, lateral_offset_m]},
+  "map_fingerprint": "v2:segs=256:signs=4:starts=48:sum=5C2E143F:fnv=626AA1A6"
 }
 ```
 
 Every coordinate is in metres (x east, y north, origin at the map's south-west
 corner); dash patterns are declared in metres so an external renderer draws the
 same paint from one source of truth.
+
+`map_fingerprint` — a string, so no `"units"` needed — is the **stamp of the
+ground this endpoint serves**: one `RoadNetwork.MapFingerprint` (`RoadNetwork.cs:985`)
+over segment geometry plus the deck level and lane/parking profile, every sign's
+type and node, and the whole start cast. A tape names its ground with the SAME
+string (`map_hash=` in its header), which is what lets a review client refuse to
+paint a tape on a foreign map (docs/RECORD_PLAYBACK.md → *"The header's map stamp
+and the client's check"*). The value carries **no spaces**: the tape header is
+space-separated, and a spaced stamp was silently truncated to its first word by
+both readers.
 
 ### Obstacles (docs/OBSTACLES.md)
 

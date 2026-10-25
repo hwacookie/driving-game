@@ -1,0 +1,40 @@
+Please finalize the textured 2D road rendering system for Godot 4 with directional alignment, road type variations, ComfyUI API integration, and a procedural crack decal overlay system.
+
+Requirements:
+
+1. Shader & Road Type System:
+   - Create a canvas_item shader (`res://shaders/road_texture.gdshader`) with seamless UV tiling along the road tangent (`uniform vec2 texture_scale`).
+   - Add shader parameters for subtle color tinting, wear-and-tear contrast, and noise variations so roads using the same base texture don't look repetitive.
+   - Support different road types (MAIN_ROAD, SECONDARY_ROAD, OLD_ROAD, COBBLESTONE) mapping to corresponding texture files (`road_main.png`, `road_cracked.png`, `road_cobble.png`). Fall back gracefully to neutral gray if a texture is missing.
+
+2. Directional UV Mapping & Intersections:
+   - Assume input textures flow horizontally from Left to Right (U-axis).
+   - Orient texture mapping strictly along the directional vector of the road path (U along road length, V across road width) using Line2D (`texture_mode = Line2D.LINE_TEXTURE_TILE`) or a Polygon2D mesh.
+   - Handle overlapping road junctions smoothly so direction-specific track markings do not visually clash.
+
+3. Procedural Detail & Decal Overlay System (Godot):
+   - To prevent tiling artifacts, do NOT bake heavy, solitary cracks into the base texture.
+   - Implement a lightweight decal/overlay spawner on the road nodes: spawn small crack or patch sprites (`Sprite2D`) using generated overlay PNGs at randomized intervals along the road path with randomized rotation, flip, and slight scale variations.
+
+4. ComfyUI API Generator Script & Validated Workflow Template:
+   - Load `res://tools/workflow_api.json` configured for the ComfyUI endpoint at `https://dagobert.adal-scala.ts.net:8188/`.
+   - Query `GET https://dagobert.adal-scala.ts.net:8188/object_info/CheckpointLoaderSimple` to dynamically update Node "4" ('ckpt_name') with an available checkpoint (e.g. `v1-5-pruned-emaonly.safetensors`).
+   - Prompts for Base Textures (validated to generate uniform, seamless, tileable surfaces without grid/mesh patterns):
+     * SECONDARY_ROAD / BASE:
+       - Positive Prompt (Node "6"): "seamless flat concrete surface, smooth uniform grey cement ground, fine dust noise, neutral texture map, top-down view, flat lighting, low contrast"
+       - Negative Prompt (Node "7"): "cells, cracks, veins, grid, net, scale pattern, leather, skin, organic, stone pebbles, gravel, rocks, trees, plants, foliage, road markings, lines, 3d, shadows, contrast"
+     * COBBLESTONE:
+       - Positive Prompt (Node "6"): "seamless uniform cobblestone pattern, top-down view, small flat paving stones, tight regular joints, low contrast, flat lighting"
+       - Negative Prompt (Node "7"): "cracks, weeds, plants, high contrast, shadows, perspective, 3d, borders"
+   - Prompts for Decal Overlays (isolated cracks/patches):
+     * CRACK_DECAL:
+       - Positive Prompt (Node "6"): "isolated asphalt crack, road damage line, top-down view, single prominent crack on pure white background, flat lighting, high detail"
+       - Negative Prompt (Node "7"): "background texture, asphalt, pavement, multiple cracks, noise, shadows"
+   - Process/convert decal backgrounds to alpha transparency if needed and save generated images into `res://assets/textures/` and `res://assets/decals/`.
+
+5. Import Settings Configuration:
+   - Ensure seamless repetition by generating/updating the corresponding `.import` files for downloaded base textures with `repeat=1` (or `2d/repeat=1`).
+
+6. Code Structure & Logging:
+   - Keep methods concise and modular using subroutines where appropriate.
+   - Include clear logging statements inside key functions indicating where they were initialized/executed for easy debugging.

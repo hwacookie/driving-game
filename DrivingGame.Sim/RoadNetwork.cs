@@ -994,13 +994,46 @@ public class RoadNetwork
         }
         mix(net.Segments.Count);
         mix(net.Signs.Count);
+        mix(net.StartPoints.Count);
         foreach (var seg in net.Segments)
         {
             mix((long)(seg.X1 * 1000)); mix((long)(seg.Y1 * 1000));
             mix((long)(seg.X2 * 1000)); mix((long)(seg.Y2 * 1000));
             mix((long)(seg.Width * 1000)); mix(seg.Oneway ? 1 : 0);
+            // Everything the CLIENT draws from /map that the old stamp could
+            // not see: the DECK a segment carries (a bridge moved at grade is
+            // a different ground), and the lane/parking profile (a wider road
+            // draws a wider ribbon). `level` is also what a car's /state
+            // answers, so the tape's stamp and the car's channel now agree on
+            // one number by construction.
+            mix(seg.Level); mix(seg.Lanes); mix((long)(seg.ParkingLaneWidth * 1000));
+            mix((long)(seg.Shoulder * 1000));
         }
-        return $"segs={net.Segments.Count} signs={net.Signs.Count} sum={sum:X} fnv={fnv:X}";
+        // A sign is DRAWN (position + heading) and it SETS the right-of-way a
+        // driver obeys — the old stamp counted signs only, so the same roads
+        // with the yield moved to another node, or yield traded for priority,
+        // hashed IDENTICAL: a tape could be painted under the wrong right-of-
+        // way without a trace (docs/RECORD_PLAYBACK.md → "The channels").
+        foreach (var ((segIdx, nodeId), type) in net.Signs)
+        {
+            mix(segIdx); mix((long)nodeId.Length * 1000 + (int)type);
+            foreach (var ch in nodeId) mix(ch);
+            mix(type == SignType.Yield ? 1 : 2);
+        }
+        foreach (var (name, sp) in net.StartPoints)
+        {
+            mix((long)(sp.X * 1000)); mix((long)(sp.Y * 1000));
+            mix((long)(sp.Heading * 10)); mix(sp.SegIdx); mix(sp.Forward ? 1 : 0);
+            mix((long)(sp.LateralOffsetM * 1000)); mix(name.Length);
+            foreach (var ch in name) mix(ch);
+        }
+        // The stamp goes into a SPACE-separated header line (`# DGTAP1 map=basic
+        // map_hash=<this> dt_fixed=…`), so its parts are joined by ':' and
+        // NEVER by a space: a spaced value would be truncated to `v2` by both
+        // readers (`Tape.cs:Load`, `MapRenderer.review.cs:LoadTape` split the
+        // header on spaces) — and a truncated hash is a false MISMATCH.
+        return $"v2:segs={net.Segments.Count}:signs={net.Signs.Count}:" +
+               $"starts={net.StartPoints.Count}:sum={sum:X}:fnv={fnv:X}";
     }
 
 }

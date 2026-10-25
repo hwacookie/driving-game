@@ -88,6 +88,11 @@ public sealed class TestFlags
     public double[]? FlagGreen;                       // [x, y, heading_deg] world px
     public double[]? FlagRed;                         // resolved [x, y, heading_deg]
     public (int SegIdx, double Progress)? FlagRedPending;
+    /// <summary>The mark's ALONG position on the route - the number the arrival
+    /// test uses (the suite no longer re-derives the flag from segment
+    /// endpoints, one flag has one place in sim, picture and test).
+    public int FlagRedSeg = -1;
+    public double FlagRedProg = -1.0;
     public bool FlagRedNav = true;
     public string? HudLabel;
 }
@@ -258,6 +263,19 @@ public sealed class SimEngine
     {
         Network = network;
         Obstacles = obstacles;
+        // A tape belongs to the SIM, not to a client that happens to ask for
+        // one (the user's decision of 2026-10-25: every run is recorded, so
+        // live viewing is the tip of a tape that is still being written -
+        // docs/RECORD_PLAYBACK.md -> "Recording policy and the growing tape").
+        // The recorder is a process static, so an engine that comes up beside
+        // one already under way does NOT restart it: a second engine would
+        // otherwise erase the run the first one is writing. The stamp rides
+        // with the birth - it is the SAME function the /map payload stamps
+        // (`MapPayload.cs`), which is what lets the client compare a tape's
+        // reference against the ground it drew (docs/SIMULATIONS_REVIEWER.md
+        // "map reference must cover the drawn ground").
+        if (!RunTape.Recording)
+            RunTape.Start("engine boot", DtFixed, RoadNetwork.MapFingerprint(Network));
         Validator = new PhysicsValidator(enabled: true);
         LaneGuard = new LaneGuard(enabled: true);
 
@@ -629,6 +647,8 @@ public sealed class SimEngine
                     {
                         tf.FlagRed = null;
                         tf.FlagRedPending = null;
+                        tf.FlagRedSeg = -1;
+                        tf.FlagRedProg = -1.0;
                         if (fcar?.BicycleNav is not null)
                             fcar.BicycleNav.ClearDestination();
                     }
@@ -1113,7 +1133,7 @@ public sealed class SimEngine
                             namesNow[kvf.Key] = kvf.Value.HudLabel;
                     RunTape.Record(_simStepsTotal, _cars.Values.ToList(), wrongNow,
                                    namesNow,
-                                   fluidityMpsPerCar, movingShare);
+                                   fluidityMpsPerCar, movingShare, Network);
                     if (StepCost.Enabled) StepCost.Add(StepCost.Tape, tTape0, _cars.Count);
                 }
                 // Cost accounting: same window as the collision-cost report
@@ -1142,27 +1162,63 @@ public sealed class SimEngine
             double fx = pos[0], fy = pos[1], fh = pos[2];
             if (tf.FlagRedNav)
             {
-                // Truncate the reference line at the centreline point so the
-                // car parks AT the flag, not at whatever dead end the route
-                // happens to reach beyond it.
-                Console.WriteLine($"[FLAGDBG] car #{c.Uid} dest set seg={fseg} prog={fprog:F2} px=({fx:F0},{fy:F0})");
-                c.BicycleNav.SetDestination(fx, fy);
+                // Truncate the reference line at the car's stop line so the
+                // car ends AT the flag, not at whatever dead end the route
+                // happens to reach beyond it. The flag itself marks the
+                // NOSE-STOP line of the parking spot (decision 2026-10-25), so
+                // the destination - the car's CENTRE - sits one half-length
+                // behind the mark: parking "at the flag" then means what the
+                // picture shows, the front bumper touching the pennant's foot.
+                double drad = Math.Radians(fh);
+                // The mark is the parked car's FRONT-BUMPER line (decision
+                // 2026-10-25: after the reverse-in staging the car pulls
+                // forward until its nose touches the pennant's foot), while
+                // `SetDestination` wants the car's CENTRE - so the destination
+                // sits half a car length BEHIND the mark along the travel
+                // direction (forward in the sim's y-north frame is
+                // (sin h, cos h), same convention `Car.cs:445` drives by).
+                double noseBackM = Config.CAR_LENGTH_M / 2.0;
+                double destX = fx - Math.Sin(drad) * noseBackM;
+                double destY = fy - Math.Cos(drad) * noseBackM;
+                Console.WriteLine($"[FLAGDBG] car #{c.Uid} dest set seg={fseg} prog={fprog:F2} " +
+                                  $"mark=({fx:F2},{fy:F2}) centre=({destX:F2},{destY:F2})");
+                c.BicycleNav.SetDestination(destX, destY);
             }
             else
             {
                 Console.WriteLine($"[FLAGDBG] car #{c.Uid} visual-only flag seg={fseg} prog={fprog:F2} px=({fx:F0},{fy:F0})");
             }
-            // The route point sits on the segment CENTRELINE; shift it onto
-            // the right kerb (the same offset the car uses) so the renderer's
-            // grass offset lands the pennant fully off the carriageway.
+            // ONE flag, ONE place (the user's decision of 2026-10-25): the
+            // pennant's foot IS the arrival mark - the centre of the line the
+            // car has to reach. A running turn test arrives in its DRIVING
+            // line (`LaneBaseOffsetM`: 1.75 m right of the centreline on a
+            // plain road, the outermost driving lane on a wide one); the
+            // parking scenario's mark is the parked car's front bumper, so it
+            // sits in the PARKING line (`ParkOffsetM`). It used to be three
+            // different places for one flag: the suite tested a point on the
+            // CENTRELINE (a 3 m circle around it), the pennant was drawn at
+            // the KERB (`KerbOffsetM`), and the car drove in its LANE - which
+            // is why reaching the mark cost a lane offset out of the radius
+            // (√(3²-1.7²) = ±2.4 m of real window) and could not happen at all
+            // on a wide carriageway (measured: `pkw_n→pkw_s`, 19.4 m, 2 lanes
+            // → 7.27 m of lateral offset, i.e. the 3 m circle never reached
+            // the driving line). Putting the mark IN the line makes the along-
+            // track test width-independent: the suite's arrival test is now
+            // the car's NOSE crossing the mark's plane, so no radius and no
+            // lane offset enters it any more.
+            var fseg2 = Network.Segments[fseg];
+            double foff = tf.FlagRedNav ? Config.ParkOffsetM(fseg2.Width)
+                : Config.LaneBaseOffsetM(fseg2.Width, fseg2.Lanes,
+                    fseg2.ParkingLaneWidth, fseg2.Oneway);
             double frad = Math.Radians(fh);
-            double foff = Config.KerbOffsetM(Network.Segments[fseg].Width);
             tf.FlagRed = new[]
             {
                 fx + Math.Cos(frad) * foff,
                 fy - Math.Sin(frad) * foff,
                 fh,
             };
+            tf.FlagRedSeg = fseg;
+            tf.FlagRedProg = fprog;
             tf.FlagRedPending = null;
         }
 
@@ -1227,6 +1283,13 @@ public sealed class SimEngine
     {
         ["green"] = tf?.FlagGreen,
         ["red"] = tf?.FlagRed,
+        // The mark's ALONG position on the route (segment index + progress
+        // 0..1) - the arrival test reads THIS instead of re-deriving a point
+        // from the segment endpoints, which is how one flag used to mean three
+        // different places (docs/TESTING.md §3).
+        ["red_seg"] = tf?.FlagRedSeg,
+        ["red_prog"] = tf?.FlagRedProg,
+        ["units"] = "meters",
     };
 
     // Python's lane_guard.stats() returns a dict - keep the same key names.

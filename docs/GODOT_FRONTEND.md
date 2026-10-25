@@ -253,6 +253,55 @@ boundary between them (`DrivingGame.Api`, used by both hosts). The Python
 repo `/Users/hauke/prj/car` is history - it is no longer needed and nothing
 here depends on it.
 
+## 8b. Boot splash (settled, 2026-10-26)
+
+The engine paints `assets/splash.jpeg` while the process starts — before the
+main scene's `_Ready`, i.e. before this client could show anything itself.
+The settings live in `project.godot` (`[application]`, `boot_splash/*`), which
+is the same file the editor dialog **Project → Project Settings → Application →
+Boot Splash** writes, so either way is fine. Confirmed 2026-10-26 by the user
+watching the windowed launch.
+
+**The file format matters**: inside `[application]` you write the key WITHOUT
+the section prefix (`boot_splash/image=…`). Writing the full dotted name
+(`application/boot_splash/image=…`) asks for
+`application/application/boot_splash/image`, an unknown setting that is parsed
+and silently ignored — that was the whole reason an early attempt looked
+configured but painted nothing. The editor writes the image as a **uid**
+(`boot_splash/image="uid://cf1tljg2q30dh"` → `assets/splash.png`), which
+survives renaming the file; a `res://` path works equally.
+
+What made it work, and what the traps are:
+
+- **The image must be imported.** Adding `assets/splash.jpeg`/`assets/splash.png`
+  and editing the settings is not enough — run
+  `"…/Godot" --headless --path . --import` once, which writes the
+  `.import`/`.ctex` pair next to it. Without that the boot loader has nothing
+  to read and the picture stays the Godot default (the robot).
+- **Do not look for the splash in a screenshot or a `--write-movie` file.** The
+  capture starts at the first *presented* frame, which is already the app:
+  frame 1 of a movie written at `--fixed-fps 20` came in as the finished map
+  windows, and a `screencapture` ~1 s after launch showed map content too. The
+  only honest witnesses are the eye (start the window, watch the first second)
+  or **F5** from the editor.
+- **Godot 4.7 has no `full_size` any more** (docs still name it for ≤4.5).
+  The knob is `boot_splash/stretch_mode`: `0` Disabled, `1` Keep, `2` Keep
+  Width, `3` Keep Height, `4` Cover, `5` Expand. We use `1 Keep` — the
+  artwork carries its own dark bars and a centred title, so letterboxing reads
+  as intent and Cover would crop the title out.
+- **`minimum_display_time`** (ms) is the only honest way to *see* it: the rest
+  of startup is a few hundred ms on this machine, so a 0-value splash is a
+  2-frame flash. It is at 800 now; set 0 when the load alone should decide.
+- **An export must carry the raw file next to the imported one** — a splash
+  packed only as `.ctex` is not found (Godot issue #109355).
+
+Client-side splash windows (a `TextureRect` + fade overlay inside `Main.tscn`,
+the "Variant 2" pattern from the C# splash-screen snippets) are **not** what we
+use: `GetTree().ChangeSceneToFile()` swaps the scene away, and `Main` *is*
+the window machinery — minimap, test-info and detail windows, the remembered
+window placement, the clean generation-file quit. If an animated intro is ever
+wanted, it is an overlay on the same root, not a second scene.
+
 ## 9. Open questions / risks
 
 - **Phase-2 re-tuning scope** — still unmeasured; free-mode latency was never

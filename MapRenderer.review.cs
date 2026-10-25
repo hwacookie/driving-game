@@ -26,6 +26,17 @@ using System.Text.Json;
 public partial class MapRenderer : Node2D
 {
     // --- the tape, cached on the client ---------------------------------
+    /// <summary>uid -> the KIND of actor the run staged, read from the header's
+    /// `kinds=` map. Absent means "car". The reviewer paints only kinds it has
+    /// a sprite for: an actor the sim will grow (a policeman directing the
+    /// traffic) must not be guessed as a car — it is skipped and said so once
+    /// per cursor, because painting a cop as a sedan would be a lie about the
+    /// frame under the cursor (the actor channel of the class decision of
+    /// 2026-10-25; docs/RECORD_PLAYBACK.md → "The cast list … and the actor
+    /// kinds beside it").</summary>
+    private readonly Dictionary<long, string> _tapeKinds = new();
+    private int _kindDbg;
+
     private sealed class TapeCarRev
     {
         public long Uid; public double X, Y, HeadingDeg, SpeedMps;
@@ -33,6 +44,7 @@ public partial class MapRenderer : Node2D
         public long Crashes;
         public int Lamps;                 // bit0 headlights, bit1 taillights
         public int HeldBy;                // the CAR owning CapKey, 0 = nobody
+        public int Level;                 // the DECK (0 = ground, 1 = bridge)
         public string Color = "", CapKey = "";
     }
     private sealed class TapeEventRev { public long Uid; public string Msg = ""; }
@@ -50,12 +62,16 @@ public partial class MapRenderer : Node2D
     /// cast is what a review is about: "why did THIS car stop" is a
     /// question one asks by role, not by number.</summary>
     private readonly Dictionary<long, string> _tapeNames = new();
+    /// <summary>uid -> the KIND of actor the run staged, read from the header's
+    /// `kinds=` map (the actor channel: docs/RECORD_PLAYBACK.md → "The channels").
+    /// Absent means "car", which is every actor today - nothing but cars can be
     // --review-name <name>: the reviewer selects by ROLE, the same handle the
     // live client takes, resolved from the tape header rather than from the
     // live state. The named car owns slot 1 and the camera follows it, so a
     // review of "the pass of the parked car" stays on the parked car for
     // every frame of the scrub.
     private string _reviewName = "";
+    private bool _legendSeen, _legendHasLevel;   // reset per LoadTape (below)
     private int _clickDbg;
     /// <summary>The HUD has ONE size - fixed fonts, fixed boxes, whatever the
     /// window is (binding user decision 2026-10-22: "one readable font size,
@@ -118,8 +134,16 @@ public partial class MapRenderer : Node2D
     private const double JogStepsPerSecond = 6.0;
     private bool _btnWasHeld;          // scrub button down on the previous frame
     private double _holdSec;             // how long a scrub key has been held
-    private double _scrubAcc;            // fractional steps carried over
-    private double _scrubAcc2;           // play-mode accumulator
+    private double _scrubAcc;            // held-scrub accumulator (whole steps + carry)
+    /// <summary>The PLAY CLOCK: a CONTINUOUS position in substeps. `_cursor` is
+    /// only the whole substep a frame is READ from; `_playPos - _cursor` is the
+    /// fraction painted between it and the next one. Quantising the CLOCK (as
+    /// the old accumulator did) instead of only the READ is what made the
+    /// review picture hold two frames and then leap a full 1/60 s — the
+    /// stutter the live viewer never had, because its `_simNow` runs free.
+    /// Trace: tests/pose_stutter_check.py.</summary>
+    private double _playPos;
+    private double _lastTickDelta;       // the delta ReviewTick last ran on
     private bool _reviewShotOnce;
 
     private Label _reviewLabel;
@@ -130,6 +154,7 @@ public partial class MapRenderer : Node2D
     private Vector2 _testBarPoint = new Vector2(-1e6f, -1e6f);  // --test-bar-point <x> <y>
     private float _barAlpha = 1f;  // how much of the instrument is painted
     private float _barWant = 1f;   // what the pointer's PLACE asks of it
+    private bool _barAlwaysLogged; // the "fade is off" notice, once
     private int _barDbg;           // the first idle decisions, logged
     private Label _camLabel;
     private double _hudW = 0.0;
@@ -301,6 +326,7 @@ public partial class MapRenderer : Node2D
         // The window itself survives - it is long-lived, the run is not.
         _reviewPath = path;
         _tape.Clear();
+        _tapeKinds.Clear();
         if (!LoadTape(path)) return;
         // A new tape is a new moment to review: its address has to be on
         // screen again, even if the operator had closed the box before.
@@ -562,8 +588,9 @@ public partial class MapRenderer : Node2D
     {
         if (_tape.Count == 0) return;
         _playing = false;
-        _scrubAcc = 0.0; _scrubAcc2 = 0.0;
+        _scrubAcc = 0.0;
         _cursor = Math.Clamp((int)Math.Round(frac * (_tape.Count - 1)), 0, _tape.Count - 1);
+        _playPos = _cursor;      // the clock resumes WHERE the seek landed
         if (_seekDbg < 6)
         {
             _seekDbg++;
@@ -789,9 +816,234 @@ public partial class MapRenderer : Node2D
         catch { return v; }
     }
 
+    /// <summary>The live window's PICTURE, read from the tip of a tape that is
+    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md → "One
+    /// client, one data source"): viewer and reviewer are one display and the
+    /// only difference is the SOURCE — a tape file on disk or the host's growing
+    /// recorder. `_tape` is that source, filled here instead of by `LoadTape`;
+    /// `_tapeFirstStep` is the ABSOLUTE substep `_tape[0]` holds, because the
+    /// memory ROLLS while the run does not restart - an index into `_tape` is
+    /// only meaningful beside that floor. `_tapeHead` is where the source has
+    /// got to: a cursor that reaches it WAITS there (the playback decision of
+    /// 2026-10-25 forbids a jump), and the readout shows the lag behind it.
+    /// `POST /tape/tip` answers the tape's OWN text lines (`Tape.cs:FrameLine`)
+    /// so this parser is `LoadTape`'s parser: two frame readers are how a live
+    /// window and its own tape disagree about one run.</summary>
+    /// <summary>The live window's PICTURE, read from the tip of a tape that is
+    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md → "One
+    /// client, one data source"): the viewer and the reviewer are one display
+    /// and the only difference is the SOURCE — a tape file on disk or the host's
+    /// <summary>The last substep APPENDED into the live sample rings by the
+    /// tip source: continuous play appends only what is newer than this, a
+    /// seek re-seeds the rings from the new position (so a jump does not drag
+    /// a trail across the cut — see `ReviewFeed`'s clear).</summary>
+    private long _lastRenderStep = -1;
+
+    /// <summary>The live window's PICTURE, read from the tip of a tape that is
+    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md -> "One client,
+    /// one data source"): the viewer and the reviewer are one display and the
+    /// only difference is the SOURCE - a tape file on disk or the host's growing
+    /// recorder. `_tape` is that source, filled by `ApplyTipPayload` instead of
+    /// by `LoadTape`; `_tapeFirstStep` is the ABSOLUTE substep `_tape[0]` holds,
+    /// because the memory ROLLS while the run does not restart - an index into
+    /// `_tape` is only meaningful beside that floor. `_tapeHead` is where the
+    /// source has got to: a cursor that reaches it WAITS there (the playback
+    /// decision of 2026-10-25 forbids a jump), and the readout shows the lag
+    /// behind it. The hop asks for the tape's OWN text lines (`Tape.cs:FrameLine`)
+    /// so `ParseTapeFrame` is ONE reader for both channels - two readers of one
+    /// format is how a live window and its own tape would drift apart.</summary>
+    private bool _tapeLive;
+    private long _tapeFirstStep = -1, _tapeHead = -1, _deliveredStep = -1;
+    private readonly int TipWindowFrames = 9_000;   // 150 s at 60 Hz
+    private HttpRequest _tipHttp;
+    private bool _tipBusy;
+    private int _tipDbg, _tipGapDbg;
+    private long _tipGap;   // substeps the client's window rolled past (a seek behind them is a source question)
+
+    /// <summary>One hop of the live source, handed to the tape's model: the
+    /// frames AFTER `since`, the substep the source reaches, and the absolute
+    /// step of the first line. The window ROLLS (`TipWindowFrames`), and a roll
+    /// moves the floor - `_tapeFirstStep` is what turns a window index back into
+    /// a substep, so the readout prints it and a seek behind the floor counts
+    /// (`_tipGap`) rather than silently painting the wrong thing. The lines are
+    /// the tape's OWN text, so `ParseTapeFrame` below is the ONE reader a file
+    /// read uses too (docs/RECORD_PLAYBACK.md: "one frame, one grammar, one
+    /// reader").</summary>
+    private void ApplyTipPayload(byte[] bodyBytes)
+    {
+        if (bodyBytes == null || bodyBytes.Length < 3) return;
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(bodyBytes); }
+        catch (System.Exception e)
+        {
+            if (_tipDbg < 4) GD.PrintErr($"TAPE-TIP bad payload: {e.Message}");
+            return;
+        }
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("lines", out var linesEl)
+            || linesEl.ValueKind != JsonValueKind.Array)
+            return;
+        // The same read shape `LoadTape` and the rest of the client use
+        // (`(long)el.GetDouble()`): a substep counter is exact in a double to
+        // 2^53, which is far beyond any run.
+        var head = root.TryGetProperty("head_step", out var hEl) ? (long)hEl.GetDouble() : -1L;
+        var firstNew = root.TryGetProperty("first_step", out var fEl) ? (long)fEl.GetDouble() : -1L;
+        if (head <= _tapeHead) return;                     // nothing new since the last hop
+        if (_tapeHead >= 0 && firstNew > _deliveredStep + 1)
+            _tipGap += firstNew - (_deliveredStep + 1);     // the readout prints it
+        // The hop carries the file's OWN format line, so the generation rule
+        // ("is `level` among the car fields?") is decided exactly as for a file
+        // - counting tokens cannot decide it (a generation-4 cap key can carry
+        // the comma).
+        _legendSeen = true;
+        _legendHasLevel = root.TryGetProperty("legend", out var lg)
+                          && lg.GetString().Contains("heldBy,level,capKey");
+        if (root.TryGetProperty("dt_fixed_s", out var dEl))
+        {
+            double dt = dEl.GetDouble();
+            if (dt > 0.0) _tapeDt = dt;
+        }
+        if (root.TryGetProperty("map_hash", out var mh)) _tapeHash = mh.GetString();
+        if (root.TryGetProperty("map", out var mp)) _tapeMap = mp.GetString();
+        var added = 0;
+        foreach (var el in linesEl.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.String) continue;
+            var fr = ParseTapeFrame(el.GetString());
+            if (fr == null) continue;
+            _tape.Add(fr);
+            added++;
+        }
+        if (added == 0) return;
+        // The window ROLLS; the run does not restart.
+        while (_tape.Count > TipWindowFrames)
+        {
+            _tape.RemoveAt(0);
+            _tipGap++;
+        }
+        _tapeFirstStep = _tape[0].Step;
+        _deliveredStep = _tape[^1].Step;
+        _tapeHead = head;
+        if (_tapeLive && _cursor < 0) _cursor = 0;
+        if (_tipDbg < 4)
+        {
+            _tipDbg++;
+            GD.Print($"TAPE-TIP +{added} substeps -> window {_tapeFirstStep}..{_tapeHead} " +
+                     $"(rolled back {_tipGap}, first {firstNew}) dt {_tapeDt:F6} s · " +
+                     $"map {_tapeMap} #{_tapeHash}");
+        }
+        // A live source arrives AFTER the ground was drawn, so the map check
+        // has to run here too (`MapRenderer.cs` calls it once per /map payload).
+        if (_tapeLive) CheckTapeAgainstMap();
+    }
+
+    /// <summary>Embedded mode: the recorder in THIS process hands over the next
+    /// lines. Their TEXT is the tape's own grammar, and the SAME reader below
+    /// parses them - the hop serialises through JSON because the wire form IS
+    /// the format's form (`Tape.cs:FrameLine`), so embedded mode pays one
+    /// serialize/parse round trip rather than growing a second reader.</summary>
+    private void PullTapeTipEmbedded()
+    {
+        if (_simHost == null || !DrivingGame.Sim.RunTape.Recording) return;
+        var p = DrivingGame.Sim.RunTape.TipPayload(_deliveredStep, 24);
+        if (p == null) return;
+        ApplyTipPayload(JsonSerializer.SerializeToUtf8Bytes(p));
+    }
+
+    /// <summary>The live window's tape hop, once per rendered frame: embedded
+    /// mode reads the recorder IN-PROCESS (the client of `--source embedded`
+    /// contains the engine), http mode queues the `POST /tape/tip` node below.
+    /// A hop that lands empty is a pace, not a failure: the clock must not
+    /// advance on nothing, and the cursor's waiting-at-the-head rule already
+    /// handles the case where the picture has no newer data.</summary>
+    private void PullTapeTip()
+    {
+        if (_simHost != null) { PullTapeTipEmbedded(); return; }
+        RequestTapeTip();
+    }
+
+    private void RequestTapeTip()
+    {
+        if (_tipBusy || _tipHttp == null) return;
+        _tipBusy = true;
+        _tipHttp.Request("http://127.0.0.1:" +
+                         (_embeddedPort > 0 ? _embeddedPort : PortOfUrl(MapUrl)) + "/tape/tip",
+                         new string[] {}, HttpClient.Method.Post,
+                         JsonSerializer.Serialize(new Dictionary<string, object?>
+                             { ["since"] = _deliveredStep, ["limit"] = 24 }));
+    }
+
+    private void OnTapeTipResponse(long id, long code, String[] headers, byte[] respBody)
+    {
+        _tipBusy = false;
+        ApplyTipPayload(respBody);          // the same model a hop in-process feeds
+        if (_tapeLive) RequestTapeTip();    // keep the hop coming, empty or not
+    }
+
+    /// <summary>One tape line -> one frame, or null. `LoadTape` and the live
+    /// tip source call THIS function: one frame, one grammar, one reader. The
+    /// generation rule lives in `_legendSeen`/`_legendHasLevel`, set from the
+    /// header before the body is read (a file) or from the tip payload's own
+    /// `legend` line (a hop) - never from counting the tokens of one record.
+    /// capKey stays LAST in every generation because a record is comma
+    /// separated and a cap key can carry that delimiter (an added reason is
+    /// joined with ','): that is why `level` went BEFORE it, and the reason
+    /// this reader re-joins the tail rather than assuming a fixed count.</summary>
+    private TapeFrameRev ParseTapeFrame(string line)
+    {
+        var col = line.Split(";");
+        if (col.Length < 2) return null;
+        if (col[0] == "step") return null;              // the legend: not a frame
+        var fr = new TapeFrameRev();
+        fr.Step = (long)ParseNum(col[0], 0.0);
+        fr.Fluidity = col.Length >= 4 ? ParseNum(col[1], 0.0) : 0.0;
+        fr.Moving = col.Length >= 4 ? ParseNum(col[2], 0.0) : 0.0;
+        var carCol = col.Length >= 4 ? col[3] : col[1];
+        foreach (var part in carCol.Split("|"))
+        {
+            var fld = part.Split(",");
+            if (fld.Length < 10) continue;
+            var cf = new TapeCarRev {
+                Uid = (long)ParseNum(fld[0], 0.0),
+                X = ParseNum(fld[1], 0.0), Y = ParseNum(fld[2], 0.0),
+                HeadingDeg = ParseNum(fld[3], 0.0),
+                SpeedMps = ParseNum(fld[4], 0.0),
+                Blinkers = (int)ParseNum(fld[5], 0.0),
+                Brake = fld[6] == "1", WrongSide = fld[7] == "1",
+                Crashes = (long)ParseNum(fld[8], 0.0),
+                Color = fld.Length >= 11 ? fld[9] : "",
+                Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
+                HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,
+                Level = _legendSeen ? (_legendHasLevel && fld.Length >= 14 ? (int)ParseNum(fld[12], 0.0) : 0)
+                    : fld.Length >= 14 ? (int)ParseNum(fld[12], 0.0) : 0,
+                CapKey = (!_legendSeen || _legendHasLevel)
+                    ? (fld.Length >= 14 ? string.Join(",", fld, 13, fld.Length - 13)
+                        : fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                        : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                        : fld.Length >= 11 ? fld[10] : "")
+                    : (fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                        : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                        : fld.Length >= 11 ? fld[10] : ""),
+            };
+            fr.Cars.Add(cf);
+        }
+        if (col.Length >= 5 && col[^1].StartsWith("~"))
+            foreach (var ev in col[4].Substring(1).Split("~"))
+            {
+                int eq = ev.IndexOf("=");
+                if (eq <= 0) continue;
+                fr.Events.Add(new TapeEventRev {
+                    Uid = (long)ParseNum(ev.Substring(0, eq), 0.0),
+                    Msg = ev.Substring(eq + 1) });
+            }
+        return fr.Cars.Count > 0 ? fr : null;
+    }
+
     private bool LoadTape(string path)
     {
         _tape.Clear();
+        _tapeKinds.Clear();
+        _legendSeen = _legendHasLevel = false;
         string text;
         try { text = File.ReadAllText(path); }
         catch { return false; }
@@ -808,8 +1060,27 @@ public partial class MapRenderer : Node2D
             {
                 if (line.Contains("dt_fixed="))
                     _tapeDt = ParseNum(line.Split("dt_fixed=")[1].Split(" ")[0], 1.0 / 60.0);
+                if (line.StartsWith("# step;"))
+                {
+                    // The file's OWN format line declares the car-field
+                    // grammar. Counting tokens alone cannot decide: a generation-4
+                    // record whose cap key carries the delimiter (`r32#12,passage#4`)
+                    // has exactly the token count of a generation-5 record, so
+                    // counted, an old key would be read as a deck level plus a
+                    // shorter key - silently, and in a review window that is
+                    // supposed to be the evidence. Same rule as `Tape.cs:Load`.
+                    _legendSeen = true;
+                    _legendHasLevel = line.Contains("heldBy,level,capKey");
+                }
                 if (line.Contains("map_hash="))
+                {
+                    // ONE token, and it has to be the WHOLE stamp: the wide
+                    // stamp is colon-joined precisely so this split-on-space
+                    // read keeps it intact. The old spaced stamps never did -
+                    // they read back as `segs=256` here, which is what the
+                    // client's `pre-wide stamp, unverifiable` branch is for.
                     _tapeHash = line.Split("map_hash=")[1].Split(" ")[0];
+                }
                 if (line.Contains("names="))
                 {
                     // The cast's roles, once per run (the sim names a car AT
@@ -818,6 +1089,16 @@ public partial class MapRenderer : Node2D
                     {
                         var kv = pair.Split(":");
                         if (kv.Length == 2) _tapeNames[(long)ParseNum(kv[0], -1.0)] = kv[1];
+                    }
+                }
+                if (line.Contains("kinds="))
+                {
+                    // The actor kinds, once per run beside the cast roles.
+                    foreach (var pair in line.Split("kinds=")[1].Split(" ")[0].Split(","))
+                    {
+                        var kvk = pair.Split(":");
+                        if (kvk.Length == 2)
+                            _tapeKinds[(long)ParseNum(kvk[0], -1.0)] = kvk[1];
                     }
                 }
                 if (line.Contains("map=")) _tapeMap = line.Split("map=")[1].Split(" ")[0];
@@ -849,62 +1130,59 @@ public partial class MapRenderer : Node2D
                 continue;
             }
             var col = line.Split(";");
-            // Three generations of the format live on disk: the first wrote
-            // "step;cars", the next added fluidity + moving share, the current
-            // one adds the decision column. Accept all three - refusing an old
-            // run would make a recorded test un-reviewable.
-            if (col.Length < 2) continue;
-            // step;cars                       (first generation)
-            // step;fluidity;moving;cars       (second)
-            // step;fluidity;moving;cars;~ev   (current)
-            var carCol = col.Length >= 4 ? col[3] : col[1];
-            var fr = new TapeFrameRev();
-            fr.Step = (long)ParseNum(col[0], 0.0);
-            fr.Fluidity = col.Length >= 4 ? ParseNum(col[1], 0.0) : 0.0;
-            fr.Moving = col.Length >= 4 ? ParseNum(col[2], 0.0) : 0.0;
-            foreach (var part in carCol.Split("|"))
-            {
-                var fld = part.Split(",");
-                if (fld.Length < 10) continue;
-                var cf = new TapeCarRev {
-                    Uid = (long)ParseNum(fld[0], 0.0),
-                    X = ParseNum(fld[1], 0.0), Y = ParseNum(fld[2], 0.0),
-                    HeadingDeg = ParseNum(fld[3], 0.0),
-                    SpeedMps = ParseNum(fld[4], 0.0),
-                    Blinkers = (int)ParseNum(fld[5], 0.0),
-                    Brake = fld[6] == "1", WrongSide = fld[7] == "1",
-                    Crashes = (long)ParseNum(fld[8], 0.0),
-                    // Four field generations: no colour, colour + capKey,
-                    // colour + lamps + capKey, and colour + lamps + heldBy +
-                    // capKey (docs/CAR_DETAIL_WINDOW.md). Accept all of them
-                    // rather than refusing the run — the reviewer reads tapes
-                    // that were recorded before the field existed. capKey
-                    // stays LAST in every generation, because the record is
-                    // comma-separated and a cap key can carry that delimiter
-                    // (an added reason is joined with ',') — which is exactly
-                    // why heldBy went before it instead of after.
-                    Color = fld.Length >= 11 ? fld[9] : "",
-                    Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
-                    HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,
-                    CapKey = fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
-                             : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
-                             : fld.Length >= 11 ? fld[10] : "",
-                };
-                fr.Cars.Add(cf);
-            }
-            if (col.Length >= 5 && col[^1].StartsWith("~"))
-                foreach (var ev in col[4].Substring(1).Split("~"))
-                {
-                    int eq = ev.IndexOf('=');
-                    if (eq <= 0) continue;
-                    fr.Events.Add(new TapeEventRev {
-                        Uid = (long)ParseNum(ev.Substring(0, eq), 0.0),
-                        Msg = ev.Substring(eq + 1) });
-                }
-            if (fr.Cars.Count > 0) _tape.Add(fr);
+            // The frame lines go through ONE reader - `ParseTapeFrame`, the
+            // same function the live tip source calls (docs/RECORD_PLAYBACK.md:
+            // "one frame, one grammar, one reader"; two readers of one format
+            // is how a live window and its own tape drift apart). The line
+            // generations (step;cars / +fluidity;moving / +decision events) are
+            // handled inside it.
+            var fr = ParseTapeFrame(line);
+            if (fr != null && fr.Cars.Count > 0) _tape.Add(fr);
+            continue;
         }
         return _tape.Count > 0;
     }
+
+    /// <summary>A tape NAMES its ground (`map=` + `map_hash=`) rather than
+    /// carrying road polygons — the user's decision of 2026-10-25: the ground
+    /// is static per run, so a reference beats a few hundred KB of it in every
+    /// file. A name is only honest if it is CHECKED, because painting the
+    /// tape's cars on a foreign ground is a lie about WHERE they drove. The
+    /// client compares the tape header's stamp to the stamp of the ground it
+    /// actually drew (`GET /map` answers `map_fingerprint`, `MapPayload.cs:204`)
+    /// and both sides call the SAME `RoadNetwork.MapFingerprint`, so the check
+    /// cannot drift by construction. A v2-vs-v2 mismatch REFUSES the picture
+    /// (`ReviewFeed` returns, the HUD says why) unless `--ignore-map-hash`
+    /// overrides it. A stamp without the `v2 ` prefix predates the wide
+    /// fingerprint — it covered segment endpoints/width/oneway and a sign
+    /// COUNT only, so `level`, sign type and sign position were invisible to
+    /// it: those tapes load with a tag rather than a refusal, because
+    /// "unknown" is not "wrong".</summary>
+    private void CheckTapeAgainstMap()
+    {
+        // The check belongs to the SOURCE, not to a window: a live tip carries
+        // the recorder's stamp from its first hop, and comparing the ground to
+        // nothing is what would silently paint a tape on wrong roads.
+        if ((!_review && !_tapeLive) || _tapeHash.Length == 0) return;
+        bool tapeWide = _tapeHash.StartsWith("v2:");
+        bool drawnWide = _drawnMapHash.StartsWith("v2:");
+        if (tapeWide && drawnWide)
+            _mapMismatch = _tapeHash != _drawnMapHash;
+        else
+            _mapMismatch = false;     // unknown, not wrong: load with a tag
+        if (_mapDbg < 6)
+        {
+            _mapDbg++;
+            GD.Print($"REVIEW-MAP tape '{_tapeMap}' {_tapeHash} vs drawn " +
+                     $"'{_drawnMapHash}' → " +
+                     (tapeWide && drawnWide
+                         ? (_mapMismatch ? "MISMATCH" : "match")
+                         : "unverifiable (pre-wide stamp)"));
+        }
+    }
+
+    private int _mapDbg;
+    private int _mapRefusedDbg;
 
     /// <summary>Feed the car buffers from the tape at the cursor - the SAME
     /// buffers the live pipeline fills, so the whole renderer (sprites,
@@ -914,17 +1192,58 @@ public partial class MapRenderer : Node2D
     private void ReviewFeed()
     {
         if (_cursor < 0 || _cursor >= _tape.Count) return;
+        // A foreign ground: the cars would be painted somewhere they never
+        // drove. Refuse rather than lie (the decision goes with the map
+        // REFERENCE of 2026-10-25; --ignore-map-hash shows it anyway).
+        if (_mapMismatch && !_ignoreMapHash)
+        {
+            if (_mapRefusedDbg < 4)
+            {
+                _mapRefusedDbg++;
+                GD.Print($"REVIEW-REFUSED the tape's map {_tapeHash} is not the " +
+                         $"ground drawn ({_drawnMapHash}) — no cars painted " +
+                         "(override: --ignore-map-hash)");
+            }
+            return;
+        }
         var fr = _tape[_cursor];
         double t0 = fr.Step * _tapeDt;
         double rt = t0;
         var next = _cursor + 1 < _tape.Count ? _tape[_cursor + 1] : null;
         if (_playing && next != null)
-            rt = t0 + _scrubAcc2 * (next.Step * _tapeDt - t0);
+        {
+            // The painted pose is the CONTINUOUS clock, bracketed by two
+            // recorded substeps — so every smoothed pose sits between two
+            // truths at any rate, which is the reviewer's whole claim
+            // (docs/SIMULATIONS_REVIEWER.md "▶ play → the same interpolation
+            // path as the live view"). A paused/stepped frame keeps frac 0:
+            // the exact recorded substep, no lerp.
+            double frac = _noPlayLerp ? 0.0 : Math.Clamp(_playPos - _cursor, 0.0, 1.0);
+            rt = t0 + frac * (next.Step * _tapeDt - t0);
+        }
 
         var seen = new HashSet<long>();
         foreach (var cf in fr.Cars)
         {
             seen.Add(cf.Uid);
+            // The actor channel (docs/RECORD_PLAYBACK.md → "The cast list …").
+            // A uid the header never named is a car - every actor today. A
+            // kind this window has no sprite for (a policeman directing the
+            // traffic, once the sim grows one) is NOT guessed as a car: the
+            // frame under the cursor would then show something the run never
+            // had. Skipped, and said so - a silent absence reads as a bug.
+            var kind = _tapeKinds.GetValueOrDefault(cf.Uid, "car");
+            if (kind != "car")
+            {
+                if (_kindDbg < 6)
+                {
+                    _kindDbg++;
+                    GD.Print($"REVIEW-KIND uid {cf.Uid} kind '{kind}' — this " +
+                             "window has no sprite for it, NOT painted as a car " +
+                             $"(pose {cf.X:F2},{cf.Y:F2} m · level {cf.Level})");
+                }
+                continue;
+            }
             _carColors[cf.Uid] = cf.Color;
             // The lamps, the brake and the blinkers come from the RECORDED
             // substep, not from the live sim beside the tape. The per-frame
@@ -950,14 +1269,14 @@ public partial class MapRenderer : Node2D
             buf.Add(new CarSample {
                 Time = t0, X = (float)cf.X, Y = (float)cf.Y,
                 HeadingDeg = (float)cf.HeadingDeg,
-                SpeedKmh = (float)(cf.SpeedMps * 3.6), Level = 0 });
+                SpeedKmh = (float)(cf.SpeedMps * 3.6), Level = cf.Level });
             if (_playing && next != null)
                 foreach (var nf in next.Cars)
                     if (nf.Uid == cf.Uid)
                         buf.Add(new CarSample {
                             Time = next.Step * _tapeDt, X = (float)nf.X,
                             Y = (float)nf.Y, HeadingDeg = (float)nf.HeadingDeg,
-                            SpeedKmh = (float)(nf.SpeedMps * 3.6), Level = 0 });
+                            SpeedKmh = (float)(nf.SpeedMps * 3.6), Level = nf.Level });
         }
         // Uids that vanished between frames (a despawn) must not stay on
         // screen - and clearing the SAMPLES was not enough (measured on
@@ -998,6 +1317,16 @@ public partial class MapRenderer : Node2D
     /// in the tree, so the address of a moment does not move. A click always
     /// follows a move, which means the bar is up before the hand can reach a
     /// button it could not see.</summary>
+    /// <summary>TEMPORARY: the instrument does not fade away. The rule it
+    /// overrides is the binding user decision of 2026-10-23 ("it shall only
+    /// appear when the mouse is where the scrub bar is located") and that code
+    /// below is UNCHANGED - the user asked for the fade to be disabled for now,
+    /// not deleted (2026-10-25: "die Scrub-Bar wird unsichtbar … das stört mich
+    /// gerade, deswegen möchte ich das gerne temporär disablen"), so this is one
+    /// named constant and everything else stays as it was. Flip it to false and
+    /// the bar hides, summons and logs exactly like before.</summary>
+    private const bool BarAlwaysVisible = true;
+
     private void BarIdle(double delta)
     {
         if (_barGroup == null) return;
@@ -1027,6 +1356,13 @@ public partial class MapRenderer : Node2D
         // anywhere else on the map does not summon it.
         bool over = p.Y > _barTop - 24.0f && p.Y < vp.Size.Y &&
                     p.X > 0f && p.X < vp.Size.X;
+        if (BarAlwaysVisible && !_barAlwaysLogged)
+        {
+            _barAlwaysLogged = true;
+            GD.Print("BAR-IDLE DISABLED (BarAlwaysVisible=true): the instrument stays painted - " +
+                     "the 2026-10-23 pointer-place rule is still in the code, flip the const to restore it");
+        }
+        if (BarAlwaysVisible) over = true;
         float want = over ? 1f : 0f;
         if (want != _barWant)
         {
@@ -1063,6 +1399,7 @@ public partial class MapRenderer : Node2D
 
     private void ReviewTick(double delta)
     {
+        _lastTickDelta = delta;   // what --test-play reports the clock on
         // A resize still gets a NEW HUD: the strip, the bar's seek band, the
         // marker lane and the readout's width budget are measured against the
         // viewport when they are built (fonts are FIXED, so nothing here is a
@@ -1081,8 +1418,9 @@ public partial class MapRenderer : Node2D
         if (_buttons.Count >= 6)
         {
             bool bBack = _buttons[4].IsPressed(), bFwd = _buttons[5].IsPressed();
-            if (bBack) _scrubDir = -1.0;
-            else if (bFwd) _scrubDir = 1.0;
+            // Like the scrub keys: a held scrub button steps, so play lets go.
+            if (bBack) { _playing = false; _scrubDir = -1.0; }
+            else if (bFwd) { _playing = false; _scrubDir = 1.0; }
             else if (_btnWasHeld) _scrubDir = 0.0;   // release stops the ramp
             _btnWasHeld = bBack || bFwd;
         }
@@ -1115,18 +1453,22 @@ public partial class MapRenderer : Node2D
             // time, which ran 1x at ONE substep per second: the window
             // looked frozen while the label honestly said "play" (measured:
             // the cursor sat at frame 1 of 35904 for a whole minute).
-            _scrubAcc += delta * _playRate / _tapeDt;
-            var whole = (int)_scrubAcc;
-            if (whole > 0)
+            _playPos += delta * _playRate / _tapeDt;
+            int whole = (int)Math.Floor(_playPos);
+            if (whole > _cursor)
             {
-                _scrubAcc -= whole;
-                _cursor = Math.Min(_tape.Count - 1, _cursor + whole);
+                int before = _cursor;
+                _cursor = Math.Min(_tape.Count - 1, whole);
                 if (_playDbg < 6)
                 {
                     _playDbg++;
-                    GD.Print($"REVIEW-PLAY +{whole} -> frame {_cursor}/{_tape.Count - 1} at {_playRate:F1}x");
+                    GD.Print($"REVIEW-PLAY +{_cursor - before} -> frame {_cursor}/{_tape.Count - 1} at {_playRate:F1}x");
                 }
             }
+            // The last substep is the END of the data: the clock waits there
+            // rather than running ahead into frames that do not exist — never
+            // extrapolate, never jump (user decision 2026-10-25).
+            if (_cursor >= _tape.Count - 1) _playPos = _cursor;
         }
         if (_scrubDir != 0.0)
         {
@@ -1142,12 +1484,11 @@ public partial class MapRenderer : Node2D
         else
         {
             _holdSec = 0.0;
-            // The reset belongs to the SCRUB, not to the frame: clearing
-            // _scrubAcc while ▶ play was running threw away the fraction
-            // that had not reached a whole substep yet, so the accumulator
-            // never crossed 1.0 and the cursor never moved at all (measured:
-            // REVIEW-BTN play fired, zero REVIEW-PLAY lines followed).
-            if (!_playing) _scrubAcc = 0.0;
+            // The scrub carry belongs to the SCRUB key, so it dies with the
+            // hold. It is no longer shared with ▶ play at all: play owns
+            // `_playPos`, a continuous clock, and two owners of one
+            // accumulator is how a fraction goes missing.
+            _scrubAcc = 0.0;
         }
         // Resolve the role against the cast list the header carries.
         if (_reviewName.Length > 0 && _reviewUid == 0L)
@@ -1207,7 +1548,11 @@ public partial class MapRenderer : Node2D
             $"cam x {camPos.X:F2} m  y {(-camPos.Y):F2} m · zoom {_cam.Zoom.X:F1} px/m · " +
             $"view: {(_playing ? "play (lerp between recorded frames)" : "step (exact substep)")}" +
             " · units: meters",
-            $"map {_tapeMap} · hash: {_tapeHash} · fluidity {(fr != null ? fr.Fluidity : 0.0):F2} m/s/car" +
+            $"map {_tapeMap} · tape hash {_tapeHash} · drawn {_drawnMapHash} " +
+            $"· {(_mapMismatch ? "MAP MISMATCH — refused, --ignore-map-hash to force ⚠⚠"
+                    : _tapeHash.StartsWith("v2:") && _drawnMapHash.StartsWith("v2:")
+                        ? "map check: ok" : "map check: pre-wide stamp, unverifiable")} " +
+            $"· fluidity {(fr != null ? fr.Fluidity : 0.0):F2} m/s/car" +
             $" (window {winS:F2}/5.00 s) · " +
             $"{(_playing ? "▶ " + _playRate.ToString() + "x" : "⏸ step")}",
         });
@@ -1548,10 +1893,14 @@ public partial class MapRenderer : Node2D
         { _playing = false; _cursor = Math.Max(0, _cursor - 1); _scrubAcc = 0.0; _jogDir = -1.0; _jogAcc = 0.0; }
         else if (k.Keycode == Key.Period)
         { _playing = false; _cursor = Math.Min(_tape.Count - 1, _cursor + 1); _scrubAcc = 0.0; _jogDir = 1.0; _jogAcc = 0.0; }
-        else if (k.Keycode == Key.Right) _scrubDir = 1.0;
-        else if (k.Keycode == Key.Left) _scrubDir = -1.0;
+        // A held scrub is a STEP sequence — "the frame you aimed at is the
+        // frame you get" — so it releases ▶ play, exactly as the jog keys and
+        // a bar drag already do. Two clocks advancing one cursor is not a
+        // thing the picture can express.
+        else if (k.Keycode == Key.Right) { _playing = false; _scrubDir = 1.0; }
+        else if (k.Keycode == Key.Left) { _playing = false; _scrubDir = -1.0; }
         else if (k.Keycode == Key.Space) { _playing = false; _scrubDir = 0.0; _jogDir = 0.0; }
-        else if (k.Keycode == Key.R) { _playing = true; _scrubAcc2 = 0.0; }
+        else if (k.Keycode == Key.R) StartPlay();
         else if (k.Keycode == Key.F8 && !k.Echo) ReviewShot();
         else if (k.Keycode == Key.Kp1) SetPlayRate(0.5);
         else if (k.Keycode == Key.Kp2) SetPlayRate(1.0);
@@ -1602,10 +1951,20 @@ public partial class MapRenderer : Node2D
     // The scenario whose declared zoom is already on the camera (empty = none).
     private string _focusZoomApplied = "";
 
+    /// <summary>The ONE entry point that starts the play clock (▶ button, Key.R,
+    /// --test-play). Before it, each caller poked `_playing` and its own idea
+    /// of what "start from here" means — which is how a start path can forget
+    /// to reset a clock and nobody notices until a trace is taken.</summary>
+    private void StartPlay()
+    {
+        _playing = true;
+        _playPos = _cursor;      // ▶ starts from the frame on screen, not from 0
+    }
+
     private void ReviewButton(string action)
     {
         GD.Print($"REVIEW-BTN {action} (pressed signal reached the control)");
-        if (action == "play") { _playing = true; _scrubAcc2 = 0.0; }
+        if (action == "play") StartPlay();
         else if (action == "pause") { _playing = false; _scrubDir = 0.0; }
         else if (action == "back")
         { _playing = false; _cursor = Math.Max(0, _cursor - 1); _scrubAcc = 0.0; }
@@ -1667,14 +2026,14 @@ public partial class MapRenderer : Node2D
     {
         var w = new CarDetailWindow
         {
-            CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, "")),
+            CarTexture = CarTexture(ColorOf(uid)),
             // A chain reads as the cast the scenario named, not as a column of
             // numbers: "slow_car → me → oncoming_car". A car the run never
             // named keeps its number — an invented name would be worse than
             // the uid (user decision 2026-10-24).
             ChainName = ChainLabel,
         };
-        ApplyCarSize(w, _carColors.GetValueOrDefault(uid, ""));
+        ApplyCarSize(w, ColorOf(uid));
         AddChild(w);
         RegisterWindow(w);          // inside the main window, 5 px from the others
         w.Position = DetailSpot(_details.Count);
@@ -1685,8 +2044,8 @@ public partial class MapRenderer : Node2D
         {
             // "click an id, read about THAT car" — the window changes subject,
             // which also drops its `show all` (that was an ask about the old car).
-            win.CarTexture = CarTexture(_carColors.GetValueOrDefault(other, ""));
-            ApplyCarSize(win, _carColors.GetValueOrDefault(other, ""));
+            win.CarTexture = CarTexture(ColorOf(other));
+            ApplyCarSize(win, ColorOf(other));
             win.ShowCar(other);
             SyncSelectedFromDetails();
             GD.Print($"DETAIL-SWITCH window → #{other} ({NameOf(other)})");
@@ -1731,7 +2090,7 @@ public partial class MapRenderer : Node2D
             };
         }
         if (_highlightBox.GetParent() != node) node.AddChild(_highlightBox);
-        var color = _carColors.GetValueOrDefault(uid, "");
+        var color = ColorOf(uid);
         var (bw, bl) = DrivingGame.Sim.Config.SizeForColor(color);
         float y0 = (float)(-DrivingGame.Sim.Config.REAR_AXLE_OFFSET_M - bl / 2.0);
         float y1 = y0 + (float)bl, x0 = (float)(-bw / 2.0), x1 = x0 + (float)bw;
@@ -2072,6 +2431,60 @@ public partial class MapRenderer : Node2D
         return n.Length > 16 ? n.Left(16) : n;
     }
 
+    /// <summary>The live twin of <see cref="UpdateDetails">UpdateDetails()</see>:
+    /// the same window fed by the same <see cref="CarDetailData"/> shape, but
+    /// every value read from the newest `/state` sample instead of a tape frame.
+    /// (`UpdateDetails` returns at once when no tape is loaded - which is why
+    /// the live viewer could never show a car in a slot.)
+    ///
+    /// `Seekable = false` says it plainly: a live run has no frame to jump back
+    /// to. The rule-log rows stay empty here on purpose - the reviewer builds
+    /// them from the tape's decision notes, the live decisions come per car from
+    /// `GET /car/{uid}/decisions`, and wiring that into the slot is the next
+    /// step; an empty list is honest where a stale one would lie.</summary>
+    private void UpdateDetailsLive()
+    {
+        if (_details.Count == 0 || _tape.Count > 0) return;
+        var holderOf = new Dictionary<long, long>();
+        foreach (var kv in _carMeta)
+            if (kv.Value.HeldBy != 0) holderOf[kv.Key] = kv.Value.HeldBy;
+        foreach (var w in _details)
+        {
+            if (!w.Showing) continue;
+            if (!_carBuf.TryGetValue(w.Uid, out var buf) || buf.Count == 0) continue;
+            var fr = buf[^1];
+            var d = new CarDetailData
+            {
+                Uid = w.Uid,
+                Name = NameOf(w.Uid),
+                Seekable = false,
+                SpeedKmh = fr.SpeedKmh,
+                X = fr.X, Y = fr.Y, HeadingDeg = fr.HeadingDeg,
+                Following = AnyFollowOn(w.Uid),
+            };
+            if (_carMeta.TryGetValue(w.Uid, out var m))
+            {
+                d.Brake = m.Braking;
+                d.BlinkLeft = m.BlinkL; d.BlinkRight = m.BlinkR;
+                d.CapKey = m.CapKey;
+            }
+            foreach (var kv in holderOf)
+                if (kv.Key != w.Uid && kv.Value == w.Uid) d.HoldsUp.Add(kv.Key);
+            d.HoldsUp.Sort();
+            var seen = new HashSet<long> { w.Uid };
+            long at = holderOf.GetValueOrDefault(w.Uid, 0L);
+            while (at != 0L && seen.Add(at) && d.HeldUpBy.Count < 12)
+            {
+                d.HeldUpBy.Add(at);
+                at = holderOf.GetValueOrDefault(at, 0L);
+            }
+            if (at == w.Uid) d.Lockdown = true;   // a chain that closes on me, seen live
+            w.CarTexture = CarTexture(ColorOf(w.Uid));
+            ApplyCarSize(w, ColorOf(w.Uid));
+            w.Update(d);
+        }
+    }
+
     private void UpdateDetails()
     {
         if (_details.Count == 0 || _tape.Count == 0) return;
@@ -2083,7 +2496,7 @@ public partial class MapRenderer : Node2D
         foreach (var w in _details)
         {
             if (!w.Showing) continue;
-            w.CarTexture = CarTexture(_carColors.GetValueOrDefault(w.Uid, ""));
+            w.CarTexture = CarTexture(ColorOf(w.Uid));
             w.Update(BuildDetailData(w.Uid, fr, holderOf));
         }
         // The highlighted car may have left the frame (or the window that asked
@@ -2195,6 +2608,31 @@ public partial class MapRenderer : Node2D
     /// open → just "New slot"; windows open → one entry per window (labelled
     /// with the car it shows, which is what the operator is looking at) and
     /// then "New slot". Picking a window REPLACES its car — nothing swaps.</summary>
+    /// <summary>The screen-space layer every HUD instrument lives in. The
+    /// reviewer builds its own with the bar; the LIVE viewer had none, so a
+    /// popup hung off this Node2D inherited the WORLD canvas - whose transform is
+    /// the camera - and the zoom multiplied the font (measured once: "New slot"
+    /// 1300 px wide at 39.5 px/m). Live mode gets an equal layer on demand.</summary>
+    CanvasLayer HudLayer()
+    {
+        if (_hudLayer == null)
+        {
+            _hudLayer = new CanvasLayer { Layer = 11 };
+            AddChild(_hudLayer);
+        }
+        return _hudLayer;
+    }
+
+    /// <summary>The colour of a car: from the tape when one is loaded, else
+    /// from the live `/state` meta. Two sources, one question - and a detail
+    /// window without a colour would draw a spriteless box.</summary>
+    string ColorOf(long uid)
+    {
+        var c = _carColors.GetValueOrDefault(uid, "");
+        if (c.Length > 0) return c;
+        return _carMeta.TryGetValue(uid, out var m) ? m.Color : "";
+    }
+
     private void OpenDetailMenu(Vector2 atPointer, long uid)
     {
         var acts = new List<System.Action>();
@@ -2205,8 +2643,8 @@ public partial class MapRenderer : Node2D
             pm.AddItem($"#{shown} {NameOf(shown)}", acts.Count);
             acts.Add(() =>
             {
-                w.CarTexture = CarTexture(_carColors.GetValueOrDefault(uid, ""));
-                ApplyCarSize(w, _carColors.GetValueOrDefault(uid, ""));
+                w.CarTexture = CarTexture(ColorOf(uid));
+                ApplyCarSize(w, ColorOf(uid));
                 w.ShowCar(uid);
                 SyncSelectedFromDetails();
                 GD.Print($"DETAIL-REPLACE window #{shown} -> #{uid} ({NameOf(uid)})");
@@ -2234,7 +2672,7 @@ public partial class MapRenderer : Node2D
             if (at >= 0 && at < acts.Count) acts[at]();
         };
         pm.PopupHide += () => pm.QueueFree();
-        (_hudLayer ?? (Node)this).AddChild(pm);
+        HudLayer().AddChild(pm);
         pm.Popup();
         GD.Print($"DETAIL-MENU car #{uid} ({NameOf(uid)}) at ({atPointer.X:F0},{atPointer.Y:F0}) " +
                  $"· {acts.Count} entries ({_details.Count} window(s) already open)");
@@ -2257,6 +2695,13 @@ public partial class MapRenderer : Node2D
     private string NameOf(long uid)
     {
         var n = _tapeNames.TryGetValue(uid, out var v) ? v : "";
+        // No tape (the live viewer): the scenario still NAMED the cast, and
+        // `/state` carries that role per car as `hud_label`. Without this
+        // fallback every live detail window would read "no-name" while the map
+        // above the car shows "blocked_car" - the same fact, two answers.
+        if (n.Length == 0 && _carMeta.TryGetValue(uid, out var lm) &&
+            !string.IsNullOrEmpty(lm.HudLabel) && !lm.HudLabel.Contains("/"))
+            n = lm.HudLabel;
         if (n.Length == 0 || n.Contains("/")) return "no-name";
         return n.Length > 14 ? n.Left(14) : n;
     }

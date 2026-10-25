@@ -26,6 +26,21 @@ public sealed class TapeCar
     public double Y { get; internal set; }
     public double HeadingDeg { get; internal set; }
     public double SpeedMps { get; internal set; }
+    /// <summary>The DECK this car drives on (0 = ground, 1 = bridge, …) - the
+    /// level of the segment it was on at this substep. The renderer offsets
+    /// a car by it (`MapRenderer.cs:3772` reads `CarSample.Level`), so a tape
+    /// without it cannot say what the frame under the cursor looked like:
+    /// the reviewer painted every bridge car AT GRADE (measured on
+    /// it: `TapeCar` had no level and `ReviewFeed` painted `Level = 0` for
+    /// every tape car (a code fact, visible in two greps - the field list and
+    /// that hard-code), and the A/B settles what it does to the PICTURE: the
+    /// SAME tape at the SAME cursor renders the deck car ON the bridge with its
+    /// recorded level and hidden UNDER the deck with the column zeroed
+    /// `Level = 0`). `/state` had it from the start (`SimEngine.cs:1264`),
+    /// the tape was the channel that lacked it — the general rule this fix
+    /// instantiates: **every field the client draws is a tape field, or the
+    /// HUD must say `live-only`** (binding, 2026-10-25).</summary>
+    public int Level { get; internal set; }
     public int Blinkers { get; internal set; }      // bit 0 left, bit 1 right
     public bool Brake { get; internal set; }
     public bool WrongSide { get; internal set; }
@@ -130,6 +145,16 @@ public static class RunTape
     private static bool _recording;
     private static string _mapName = "";
     private static string _mapHash = "";   // the map's GEOMETRY, not just its name
+
+    /// <summary>The car-field grammar, declared ONCE: `Save` writes it as a
+    /// header line, a tip hop answers with it, and every reader decides the
+    /// field generation from it (docs/RECORD_PLAYBACK.md's rule: a token count
+    /// cannot tell a generation-4 cap key with a comma in it from a generation-5
+    /// record). Three copies of this string is how a file and a feed could
+    /// disagree about one byte.</summary>
+    private static readonly string FrameLegend =
+        "# step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps," +
+        "blinkers,brake,wrong,crashes,color,lamps,heldBy,level,capKey|...;~uid=decision text~…";
     private static readonly List<TapeFrame> _frames = new();
     // Substeps at which something worth scrubbing to happened (a decision on
     // any car, a fresh contact). Appended in step order, so it stays sorted.
@@ -141,6 +166,19 @@ public static class RunTape
     /// scenario that re-labels mid-run) keeps the first name: the tape
     /// describes who drove, not who said so.
     private static readonly Dictionary<long, string> _names = new();
+    /// <summary>uid -> the KIND of actor the scenario staged ("car" is the only
+    /// kind in use today; absent means car). Like the cast roles, an actor's
+    /// kind is authored ONCE at staging and never changes per substep, so it
+    /// lives in the HEADER next to `names=` and the frames stay a per-actor
+    /// pose list — which is the ACTOR channel the class decision of 2026-10-25
+    /// asks for (docs/RECORD_PLAYBACK.md → "The channels"): a policeman
+    /// directing traffic moves every substep, so he is a FRAME, and the only
+    /// thing the frame list cannot say today is that an entry is not a car.
+    /// The car-shaped fields (`color`, `capKey`, `heldBy`, `lamps`, `blinkers`)
+    /// simply stay empty for another kind: they describe a car, not an actor.
+    /// No producer exists yet — nothing but cars can be staged — so this is
+    /// read/write format support, deliberately not a hook that pretters unused.</summary>
+    private static readonly Dictionary<long, string> _kinds = new();
     private static readonly List<FocusNote> _focus = new();
     private static readonly List<TestResultNote> _results = new();
 
@@ -160,6 +198,31 @@ public static class RunTape
                 if (_results[i].Label == r.Label && r.Label.Length > 0)
                 { _results[i] = r; return; }     // a re-run of the same label wins
             _results.Add(r);
+        }
+    }
+
+    /// <summary>The actor kinds the header carries (uid -> kind). Absent means
+    /// "car". Written by `SetKind` at staging, read back by `Load` — the kind
+    /// never changes per substep, so it is a header map and the frames stay a
+    /// per-actor pose list (docs/RECORD_PLAYBACK.md → "The cast list … and the
+    /// actor kinds beside it"). Copied out so a caller cannot mutate the tape's
+    /// own map.</summary>
+    public static Dictionary<long, string> Kinds
+    {
+        get { lock (Lock) return new Dictionary<long, string>(_kinds); }
+    }
+
+    /// <summary>Name an actor's KIND at staging (default is "car", so naming
+    /// "car" is a no-op). Nothing calls this today — only cars can be staged —
+    /// and the FIRST non-car actor (a policeman directing the traffic) will.
+    /// First name wins: a kind is authored at staging, like a role
+    /// (docs/RECORD_PLAYBACK.md's rule for re-labelled cars).</summary>
+    public static void SetKind(long uid, string kind)
+    {
+        lock (Lock)
+        {
+            if (kind == null || kind == "" || kind == "car") return;
+            if (!_kinds.ContainsKey(uid)) _kinds[uid] = kind;
         }
     }
 
@@ -255,6 +318,8 @@ public static class RunTape
         string mapName = "";
         double dt = DtFixedS;
         var namesLoaded = new Dictionary<long, string>();
+        var kindsLoaded = new Dictionary<long, string>();
+        bool headerDeclaresLevel = false, hasLegend = false;
         try
         {
             string text = File.ReadAllText(path);
@@ -262,10 +327,31 @@ public static class RunTape
             {
                 if (line.StartsWith("#"))
                 {
+                    // The file's OWN format line declares the car-field
+                    // grammar. Field COUNTING alone cannot: a generation-4
+                    // record whose cap key carries the delimiter (`r32#12,passage#4`,
+                    // docs/CAR_DETAIL_WINDOW.md) has 14 tokens, exactly what a
+                    // generation-5 record has - counted, the old key would be
+                    // read as a level plus a shorter key, silently. The legend
+                    // is authoritative when present; counting stays the fallback
+                    // for the pre-legend files that never wrote one.
+                    if (line.StartsWith("# step;"))
+                    {
+                        hasLegend = true;
+                        headerDeclaresLevel = line.Contains("heldBy,level,capKey");
+                    }
                     if (line.Contains("map="))
                         mapName = line.Split("map=")[1].Split(" ")[0];
                     if (line.Contains("map_hash="))
+                    {
+                        // The whole stamp, one token: the wide fingerprint is
+                        // colon-joined so this read cannot truncate it. Stamps
+                        // written before that change contained spaces and DO
+                        // get cut here (`segs=256`) - history stays as it was
+                        // recorded, and the client says "unverifiable" rather
+                        // than pretending the tail matched.
                         _mapHash = line.Split("map_hash=")[1].Split(" ")[0];
+                    }
                     if (line.Contains("names="))
                     {
                         foreach (var pair in line.Split("names=")[1].Split(" ")[0].Split(","))
@@ -273,6 +359,15 @@ public static class RunTape
                             var kv2 = pair.Split(":");
                             if (kv2.Length == 2)
                                 namesLoaded[ParseL(kv2[0], -1L)] = kv2[1];
+                        }
+                    }
+                    if (line.Contains("kinds="))
+                    {
+                        foreach (var pair in line.Split("kinds=")[1].Split(" ")[0].Split(","))
+                        {
+                            var kvk = pair.Split(":");
+                            if (kvk.Length == 2)
+                                kindsLoaded[ParseL(kvk[0], -1L)] = kvk[1];
                         }
                     }
                     if (line.StartsWith("# focus "))
@@ -359,15 +454,29 @@ public static class RunTape
                         Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                         CrashEpisodes = ParseI(fld[8], 0),
                         Color = fld.Length >= 11 ? fld[9] : "",
-                        // Four field generations: ...,color,capKey (lamps
-                        // absent), ...,color,lamps,capKey and
-                        // ...,color,lamps,heldBy,capKey. capKey stays LAST in
-                        // every one of them, because it may contain commas.
+                        // FIVE field generations: ...,color,capKey (lamps
+                        // absent), ...,color,lamps,capKey, ...,color,lamps,
+                        // heldBy,capKey and ...,color,lamps,heldBy,level,
+                        // capKey. Accept all of them rather than refusing
+                        // the run — the reviewer reads tapes that were
+                        // recorded before the field existed. capKey stays
+                        // LAST in every generation, because the record is
+                        // comma-separated and a cap key can carry that
+                        // delimiter (an added reason is joined with ',')
+                        // — which is exactly why level and heldBy went
+                        // before it instead of after.
                         Lamps = fld.Length >= 12 ? ParseI(fld[10], 0) : 0,
                         HeldByUid = fld.Length >= 13 ? ParseI(fld[11], 0) : 0,
-                        CapKey = fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
-                                 : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
-                                 : fld.Length >= 11 ? fld[10] : "",
+                        Level = hasLegend ? (headerDeclaresLevel && fld.Length >= 14 ? ParseI(fld[12], 0) : 0)
+                                        : fld.Length >= 14 ? ParseI(fld[12], 0) : 0,
+                        CapKey = (!hasLegend || headerDeclaresLevel)
+                            ? (fld.Length >= 14 ? string.Join(",", fld, 13, fld.Length - 13)
+                              : fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                              : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                              : fld.Length >= 11 ? fld[10] : "")
+                            : fld.Length >= 13 ? string.Join(",", fld, 12, fld.Length - 12)
+                              : fld.Length >= 12 ? string.Join(",", fld, 11, fld.Length - 11)
+                              : fld.Length >= 11 ? fld[10] : "",
                     });
                 }
                 if (evs.StartsWith("~"))
@@ -408,6 +517,8 @@ public static class RunTape
             foreach (var e in loadedEvents) _events.Add(e);
             _names.Clear();
             foreach (var kv in namesLoaded) _names[kv.Key] = kv.Value;
+            _kinds.Clear();
+            foreach (var kv in kindsLoaded) _kinds[kv.Key] = kv.Value;
         }
         return true;
     }
@@ -470,7 +581,8 @@ public static class RunTape
     /// AT a frame instead of only after the fact.</summary>
     public static void Record(long step, List<Car> cars, Dictionary<int, bool> wrongSide,
                               Dictionary<int, string> names,
-                              double fluidityMpsPerCar, double movingShare)
+                              double fluidityMpsPerCar, double movingShare,
+                              RoadNetwork network)
     {
         if (!_recording) return;
         var f = new TapeFrame { Step = step, Cars = new List<TapeCar>(),
@@ -486,7 +598,14 @@ public static class RunTape
             int blinkers = (blinkL ? 1 : 0) | (blinkR ? 2 : 0);
             f.Cars.Add(new TapeCar {
                 Uid = c.Uid, X = c.X, Y = c.Y, HeadingDeg = c.Heading,
-                SpeedMps = c.Speed, Blinkers = blinkers, Brake = c.IsBraking,
+                SpeedMps = c.Speed,
+                // The deck, resolved the way /state resolves it
+                // (`SimEngine.cs:1264`) - ONE source for the number, so the
+                // two channels cannot drift about which bridge a car is on.
+                Level = network is not null && c.SegIdx >= 0
+                        && c.SegIdx < network.Segments.Count
+                        ? network.Segments[c.SegIdx].Level : 0,
+                Blinkers = blinkers, Brake = c.IsBraking,
                 WrongSide = wrongSide.GetValueOrDefault(c.Uid, false),
                 CrashEpisodes = c.CrashEpisodes,
                 Color = c.Color ?? "",
@@ -541,6 +660,84 @@ public static class RunTape
         }
     }
 
+    /// <summary>One substep as ONE text line - the format the FILE writes and
+    /// every reader accepts. Factored out of `Save` so the live endpoint
+    /// (`POST /tape/tip`) ships the SAME bytes a tape file contains: one frame,
+    /// one grammar, no second parser to drift (`docs/RECORD_PLAYBACK.md`).</summary>
+    public static string FrameLine(TapeFrame f)
+    {
+        var parts = new List<string>(f.Cars.Count);
+        foreach (var cf in f.Cars)
+            parts.Add($"{cf.Uid},{cf.X:F3},{cf.Y:F3},{cf.HeadingDeg:F2}," +
+                      $"{cf.SpeedMps:F3},{cf.Blinkers},{(cf.Brake ? 1 : 0)}," +
+                      $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Color}," +
+                      $"{cf.Lamps},{cf.HeldByUid},{cf.Level},{cf.CapKey}");
+        return $"{f.Step};{f.FluidityMpsPerCar:F4};{f.MovingShare:F3};" +
+               string.Join("|", parts) +
+               (f.Events.Count > 0
+                   ? ";~" + string.Join("~",
+                       f.Events.Select(e => e.Uid + "=" + e.Msg).ToList())
+                   : "");
+    }
+
+    /// <summary>The tip a client reads: the next lines, where the source has got
+    /// to, and the header facts a reader needs (dt, the legend, the map stamp).
+    /// A C# shape so an EMBEDDED client reads it in-process; the http host
+    /// serialises the SAME values (GameApi.cs: `POST /tape/tip`). The lines are
+    /// the tape's own grammar - the client's one reader parses them either way
+    /// (docs/RECORD_PLAYBACK.md -> "one frame, one grammar, one reader").</summary>
+    public sealed class TipData
+    {
+        public long Head = -1;
+        public long First = -1;        // absolute substep of the first line
+        public List<string> Lines = new();
+        public bool Recording;
+        public double DtFixedS;
+        public string Legend = "";
+        public string MapName = "";
+        public string MapStamp = "";
+    }
+
+    public static TipData GetTip(long since, int limit)
+    {
+        var d = new TipData { Head = -1, First = -1, Recording = _recording,
+                              DtFixedS = DtFixedS, Legend = FrameLegend,
+                              MapName = _mapName, MapStamp = _mapHash };
+        lock (Lock)
+        {
+            long first = _frames.Count > 0 ? _frames[0].Step : -1;
+            d.Head = _frames.Count > 0 ? _frames[^1].Step : -1;
+            long from = since < 0 ? first : (since + 1 > first ? since + 1 : first);
+            d.First = from;
+            for (long st = from; st <= d.Head && d.Lines.Count < limit; st++)
+            {
+                int i = (int)(st - first);
+                if (i >= 0 && i < _frames.Count)
+                    d.Lines.Add(FrameLine(_frames[i]));
+            }
+        }
+        return d;
+    }
+
+    /// <summary>The tip as JSON for the http host: the SAME values `GetTip`
+    /// answers, so the wire and the in-process read cannot disagree.</summary>
+    public static Dictionary<string, object?> TipPayload(long since, int limit)
+    {
+        var d = GetTip(since, limit);
+        return new Dictionary<string, object?>
+        {
+            ["ok"] = true,
+            ["recording"] = d.Recording,
+            ["first_step"] = d.First,
+            ["head_step"] = d.Head,
+            ["dt_fixed_s"] = d.DtFixedS,
+            ["map"] = d.MapName,
+            ["map_hash"] = d.MapStamp,
+            ["legend"] = d.Legend,
+            ["lines"] = d.Lines,
+        };
+    }
+
     /// <summary>Write the whole tape, one line per substep. Text on purpose:
     /// greppable, and tests/ already keeps per-run text logs beside it.
     /// Returns the path on success, null on a disk error.</summary>
@@ -553,26 +750,16 @@ public static class RunTape
                 var lines = new List<string>(_frames.Count + 2);
                 var nameParts = new List<string>();
                 foreach (var kv in _names) nameParts.Add($"{kv.Key}:{kv.Value}");
+                var kindParts = new List<string>();
+                foreach (var kv in _kinds) kindParts.Add($"{kv.Key}:{kv.Value}");
                 lines.Add($"# DGTAP1 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
-                          (nameParts.Count > 0 ? $" names={string.Join(",", nameParts)}" : ""));
-                lines.Add("# step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,heldBy,capKey|...;~uid=decision text~…");
+                          (nameParts.Count > 0 ? $" names={string.Join(",", nameParts)}" : "") +
+                          (kindParts.Count > 0 ? $" kinds={string.Join(",", kindParts)}" : ""));
+                lines.Add(FrameLegend);
                 foreach (var fn in _focus) lines.Add(fn.ToHeaderLine());
                 foreach (var rn in _results) lines.Add(rn.ToHeaderLine());
                 foreach (var f in _frames)
-                {
-                    var parts = new List<string>(f.Cars.Count);
-                    foreach (var cf in f.Cars)
-                        parts.Add($"{cf.Uid},{cf.X:F3},{cf.Y:F3},{cf.HeadingDeg:F2}," +
-                                  $"{cf.SpeedMps:F3},{cf.Blinkers},{(cf.Brake ? 1 : 0)}," +
-                                  $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Color}," +
-                                  $"{cf.Lamps},{cf.HeldByUid},{cf.CapKey}");
-                    lines.Add($"{f.Step};{f.FluidityMpsPerCar:F4};{f.MovingShare:F3};" +
-                              string.Join("|", parts) +
-                              (f.Events.Count > 0
-                                  ? ";~" + string.Join("~",
-                                        f.Events.Select(e => e.Uid + "=" + e.Msg).ToList())
-                                  : ""));
-                }
+                    lines.Add(FrameLine(f));
                 File.WriteAllText(path, string.Join("\n", lines) + "\n");
                 return path;
             }

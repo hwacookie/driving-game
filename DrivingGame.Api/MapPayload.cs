@@ -194,6 +194,14 @@ public static class MapPayload
                 ["stop_line_width_m"] = Config.STOP_LINE_WIDTH_M,
             },
             ["start_points"] = startPoints,
+            // The ground's OWN stamp, so a client can check a tape's map
+            // REFERENCE against what this host actually serves: the tape
+            // names its ground (`map=` + `map_hash=`) rather than carrying
+            // road polygons (decided 2026-10-25 — docs/RECORD_PLAYBACK.md →
+            // "The channels"). Same `RoadNetwork.MapFingerprint` the tape is
+            // stamped with (`GameApi.cs:475`), so the two sides of the check
+            // are one function and cannot drift apart.
+            ["map_fingerprint"] = RoadNetwork.MapFingerprint(net),
         };
     }
 }

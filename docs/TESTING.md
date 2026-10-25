@@ -17,7 +17,7 @@ Testing has three layers:
    raceline solver against its golden fixture. They run in ~25 s and are the
    first thing to run after a change:
    ```bash
-   dotnet test DrivingGame.Sim.Tests/          # 91 passed / 2 skipped
+   dotnet test DrivingGame.Sim.Tests/          # 102 passed / 2 skipped
    ```
    (The Python pytest suites of the original `car/` repo -
    `tests/test_obstacles.py`, `tests/test_road_network.py`,
@@ -31,6 +31,32 @@ Testing has three layers:
 3. **Manual visual QA scripts** (`tests/light_check.py`,
    `tests/car_line_check.py`) - no pass/fail, they stage a situation for the
    eye (see the section at the end).
+4. **Measurement scripts** (`tests/pose_stutter_check.py`,
+   `tests/tape_state_agreement.py`) - no eye either: they read the client's own
+   `--motionlog`, or the sim's own two channels, and print a distribution / a
+   verdict, so "is the playback smooth?" and "do the channels agree?" become
+   numbers that can be argued with.
+
+`tests/tape_state_agreement.py` holds `/state` and the tape against each other
+at ONE frozen substep. Two things it found are worth keeping as facts, because
+both look like bugs and neither is:
+
+- **`/teleport` by SEGMENT, not by start point**, is what puts a car on the
+  bridge: the `fig8_bridge` START point spawns at the crossing node and the
+  car's first segment there is a ground one (`/state` answered `segment 139,
+  level 0`) — so a check that teleports by name proves nothing about `level`.
+- **`/state` is a per-FRAME snapshot, the tape is per-SUBSTEP.** Freeze the
+  sim, then ask the tape for the frame AT the step `/state` names
+  (`round(time / dt_fixed)`) — not for the head. The head can sit one substep
+  past the snapshot a client sees; comparing the two answered a 9.5 cm pose
+  gap that was a clock question, not a disagreement about the same world.
+
+The map stamps are checked by hand with the one-shot client recipe from
+`AGENTS.md` (`--review <tape>` on its own map: `map check: ok`; on the
+embedded default OSM ground: `MAP MISMATCH` + `REVIEW-REFUSED … no cars
+painted`), and `--ignore-map-hash` is the documented escape. The A/B that
+proves `level` drives the PICTURE is the same tape with its level column
+zeroed: ON the deck versus hidden UNDER it, at one cursor and one camera.
 
 See [REST_API.md](REST_API.md) for the endpoint reference; this document
 focuses on the *testing workflow* itself.
@@ -146,14 +172,23 @@ sim on a crash and leaves the cars in place.
   red in the previous full run (`T_231`, 2026-10-22), with #27 failing
   differently there (the R29 lockdown valve despawned car 96 at t=15.1 s).
   Read the log's own footer for the verdict of any newer run.
+- **Reproduced 2026-10-25** (`--warp 4`, `tests/run_test_T_258_0_20261025_140722.log`):
+  the same three red, each with the same first reason — #20 timed out after
+  240.1 s of sim, #26 the R33 lane-guard hit at 9.1 s, #27 a contact at 9.7 s
+  (again the pair 100/95). That run sat on the client working tree of that day;
+  re-running #26 and #27 **with those client changes reverted** (`--no-godot`,
+  `T_259`, `T_260`) reproduced both — so the render-path work of 2026-10-25
+  changed no verdict.
 - **Reproduced 2026-10-24** (`--warp 4`, first run whose tape carries the
   `heldBy` column — `tests/run_test_T_249_0_20261024_204743.log`): the same
   three red, same first-reason for each (20 timed out, 26 the R33 hit at
   t=9.1 s, 27 a contact — 9.8 s this time vs 40.2 s there, same pair 100/95),
   and the same `❌ WRONG-SIDE` marker inside #24 that every full run since
   T_231 prints without counting it as a failed test.
-- C# unit suite: **93 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
-  ~25 s; 91/2 before the tape-generation tests of 2026-10-24) - skipped are
+- C# unit suite: **102 passed / 2 skipped** (`dotnet test DrivingGame.Sim.Tests/`,
+  ~23 s; 98/2 before the map reference widened, 93/2 before the tape generation
+  of 2026-10-25 put `level` on the frames, 91/2 before the tape-generation tests
+  of 2026-10-24) - skipped are
   `CrossingStressTests.CrossingStress_NoContact_Within_15s`
   (the crossing bug in unit-test form) and
   `RacelineReferenceTests.RebaselineReferenceFile` (a manual re-baseline tool).
@@ -225,9 +260,17 @@ only exists under `DrivingGame.Server/bin/Debug/net9.0/` (that is the path
 
 ### 1a. Watching a run
 
-Prefer the runner (`scripts/run_e2e.sh`) - it starts host + window together
-and closes both cleanly. The manual pair, if you want a long-running session
-to poke at:
+**Just want a window? `scripts/open.sh`.** It opens the viewer with an embedded
+sim (API on :5001), keeps it open, and closes it again with `scripts/open.sh
+--close` - clean self-quit through the generation file, never a signal. Flags:
+`--map`, `--zoom`, `--port`, `--external` (attach to a host you started),
+`--review <tape>` (the reviewer instead). It refuses to double-open ("already
+open (pid N)") and refuses a port something else already answers - the two ways
+a hand-launched client silently misbehaves.
+
+For a test run, prefer the runner (`scripts/run_e2e.sh`) - it starts host +
+window together and closes both cleanly. The manual pair, if you want a
+long-running session to poke at by hand:
 
 ```bash
 # terminal 1 - console host
@@ -242,6 +285,50 @@ dotnet run --project DrivingGame.Server -- --map basic --warp 4
 The window shows the map (roads as their own geometry, markings, halt lines,
 signs), the car (sprite, blinkers, wheel breadcrumbs), the test flags, the
 HUD label and the minimap - and follows the car unless `--center` pins it.
+
+### 1b. Where the window opens (it remembers)
+
+The viewer **opens where it was last closed** - position, size and the monitor
+it sat on. Godot does not do this for you, so the client implements the
+[docs' own recipe](https://docs.godotengine.org/en/stable/tutorials/ui/creating_applications.html#remembering-window-position-and-size-across-sessions):
+`MapRenderer.RestoreWindowPlacement()` reads `user://window.ini`
+(`~/Library/Application Support/Godot/app_userdata/DrivingGame/window.ini`) and
+states the rect **once, in `_Ready`, before the first frame is drawn** - which
+is the whole point: the old path opened the window at the project default and
+grew/moved it from a timer a second later, and the user watched that jump
+(binding decision 2026-10-25: *"kein Resize, sondern direkt"*).
+`SaveWindowPlacement()` writes it back on `_ExitTree` **and** every 0.5 s
+whenever the rect changed, because the runner closes this client from outside
+and an exit-path-only save would lose the last drag. Every write logs one line
+(`WINDOW-PLACEMENT saved #n: pos … size …`), so "did my move reach the file?" is
+answerable from the log instead of by theory - a hand-drag that was on screen
+for half a second IS in the file, a hard kill inside that half second is not.
+
+```
+WINDOW-PLACEMENT saved #3: pos (1252, 484) size (3754, 2168) screen 2 -> user://window.ini
+WINDOW-PLACEMENT remembered: asked pos (1252, 484) size (3754, 2168) -> got (1252, 484) (3754, 2168) screen 2
+```
+The word after `WINDOW-PLACEMENT` names the AUTHORITY that ruled this start -
+`remembered`, `default`, or `--window` - which is what tells a wrong rect apart
+from a right rect that merely looks like the default. Measured 2026-10-25: a
+rect produced by hand (1252, 484 · 3754x2168) was restored byte-exact by the
+next run (screenshot 3754x2168).
+
+Three ways to say "not there":
+
+| what | effect |
+|---|---|
+| drag or resize the window, then close | the next start opens at that rect (this is the normal way to aim it) |
+| `--window <x> <y> <w> <h>` | one run at an explicit rect (scripted shots); it becomes the new memory |
+| `--window-default` | ignore the memory once → 2000x1000 at (100, 100) |
+
+A stored rect that no longer overlaps any connected screen by at least
+200x120 px is dropped with a log line (an unplugged monitor must not leave the
+title bar - the only handle to drag it back - out of reach), and `run_e2e.sh
+--watch` therefore passes **no** geometry at all; `DG_WINDOW_RECT="x y w h"`
+overrides it for one run. Measured on 2026-10-25: explicit `--window 300 250
+1200 800` opened at exactly that rect (screenshot 1200x800) and the next run
+with no argument restored it in one step.
 
 ## 2. Run the test suite against it
 
@@ -373,10 +460,14 @@ pygame frontend. What replaces its two uses:
   `POST /run_test` once the map is up, and `--quit-on-test-done` closes the
   window when the run finishes (that is how the runner closes it without ever
   sending a signal).
-- **Drive by hand** - the keys the client itself listens to (`_Input` in
-  `MapRenderer.cs`): arrow keys / WASD steer, `Q`/`E` blinker, `H` hazard,
-  `T` toggles BICYCLE↔FREE, `+`/`-` zoom, `C` centers on the car, mouse drag
-  pans. Everything goes through the same `POST /control` channel the suite uses.
+- **Drive by hand** - what `_Input` in `MapRenderer.cs` binds today (checked
+  2026-10-25, one `Key.` branch per meaning): **arrow keys / WASD** steer
+  (`Key.A/D/W/S` + arrows into the drive vector), **`Tab`** cycles the camera
+  binding, **`F`** toggles follow, **`T`** hides/shows the test window, mouse
+  drag pans, wheel zooms. The pygame-era keys the earlier version of this list
+  claimed (`Q`/`E` blinker, `H` hazard, `T` nav-mode, `+`/`-`, `C`) have **no
+  handler** in the client - drive commands go through the same
+  `POST /control` channel the suite uses, which is the way to send them.
 - **Read a finished car** - click it: the inspector window shows speed, pose,
   nav state and the rule log from `GET /car/{uid}/decisions`.
 
@@ -406,13 +497,20 @@ else. The runner teleports a fresh car into the LAST 20% of the start
 segment (progress `TURN_SPAWN_PROGRESS` = 0.8), laterally in the middle of
 the rightmost lane, already ROLLING at `RUNNING_START_KMH` (50 km/h) - no
 standstill-to-cruise phase. The red end flag marks the FIRST 20% of
-`expected_end_segment` (`END_FLAG_PROGRESS`) and is VISUAL ONLY: the
+`expected_end_segment` (`END_FLAG_PROGRESS`) and is **VISUAL ONLY**: the
 `POST /flags` payload carries `red_nav: false`, so the flag does NOT become
 the nav's destination - no parking plan, no stop. The test ends when the
-car crosses the flag; "passed" means it did the turn without leaving the
-road (criteria below). Decision 2026-08-27: tests must be fast, and
-parking is covered by the dedicated parking scenarios - not bolted onto
-every turn.
+car passes the flag, AT ANY SPEED, and the car may keep driving on at full
+or intended speed past it. (Binding user decision 2026-10-25, correcting an
+earlier same-day proposal that every car must stop at the red flag: what a
+scenario tests is its OWN manoeuvre - driving through the curve, not whether
+the car can park; parking is tested by the dedicated parking scenarios. A
+red-flag stop would also make the nav stage a parking manoeuvre inside a
+turn test, which the user explicitly does not want. Exception stated by the
+same decision: ONLY the parking scenario requires a complete standstill AT
+the red flag.) Decision 2026-08-27 ("tests must be fast, parking is covered
+by the dedicated parking scenarios - not bolted onto every turn") says the
+same thing and stays the anchor for this.
 
 **Parking-offset scenario** (`kerb_check` = true, exactly ONE scenario today:
 **#23 `park_6lane_right_lane`**; DRIVING_MANEUVERS.md §1 "Variant: Dead-end /
@@ -430,14 +528,32 @@ right-of-way scenarios, not parking ones.)
 
 A scenario **passes** only if ALL of these hold:
 
-1. **Arrival.** Running tests: the car crosses the end flag (first 20% of
-   `expected_end_segment`) - at any speed, no stop required. Parking
-   tests: the car comes to REST AT the flag (50% point): either it stops
-   within `STOP_AT_FLAG_TOLERANCE_M` (8 m) before the flag, or it crosses
-   the flag at crawl speed (≤ `FLAG_CRAWL_KMH`, 5 km/h) and then stops.
-   Driving PAST the flag while moving is a FAILURE for parking tests
-   ("drove past the end flag") - parking at the destination is part of that
-   test, not an afterthought.
+1. **Arrival at the red flag - ONE place, ONE event** (binding user decision
+   2026-10-25, agreed after measuring the old rule: the pennant was drawn ~7 m
+   off the centreline, the suite tested a 3 m circle around a CENTRELINE point,
+   and the car drove 1.75 m off that point - so the real along-window was only
+   ±2.4 m, and on the 19.4 m avenue (`pkw_n→pkw_s`, 2 lanes, lateral 7.27 m) the
+   circle could never be reached at all. A radius around a point in a ~2.6 m
+   lane also reaches into the next lane, which is exactly what the user rejected.)
+   The **sim states the mark**: `flags.red` is the pennant's FOOT in the line the
+   car must arrive in - `Config.LaneBaseOffsetM` (the driving line) for a running
+   test, `Config.ParkOffsetM` (the parked car's front-bumper line) for the
+   parking scenario - and `flags.red_seg`/`flags.red_prog` carry the along
+   position on the route (metres, `"units": "meters"`). The **client draws the
+   pennant exactly there** (`MapRenderer.DrawFlag` puts the pole's foot at the
+   point; the cloth leans right, the mark stays). The **arrival event is the
+   car's body crossing the mark's transverse line**: the front-most corner of
+   `body_corners` projected onto the mark's route direction passes zero; the one
+   extra condition is that the car is inside the mark's lane band
+   (`FLAG_LANE_HALF_TOL_M` = 2 m perpendicular), so a car on a different road
+   cannot fire it. No radius enters the criterion.
+   - **Running tests:** the crossing ENDS the test at any speed - the car drove
+     against the flag; it may keep rolling on at full or intended speed.
+   - **The parking scenario (#23, reverse-in ordered):** the car first drives
+     PAST the flag to stage the back-in, sets back, then pulls forward until its
+     **nose touches the mark** within `NOSE_TOUCH_M` (0.5 m) at rest. The 8 m
+     `STOP_AT_FLAG_TOLERANCE_M` only decides WHO is at the flag at all; the kerb
+     verdict (`KERB_PASS_MAX_M`, 30 cm) still applies.
 
    **Reverse-in exception.** When the nav plans a back-in park (`/state`
    reports `parking.style == "reverse"`), the car deliberately drives PAST
@@ -503,6 +619,31 @@ defect - e.g. the nav ignoring the hard brake while in pull-over mode (this
 is exactly what used to happen on `s_curve`, which parked at the dead end
 beyond the flag) - not a test artifact.
 
+**The standstill after the flag is a period, not a second criterion** (binding
+user decision 2026-10-25: *"es wäre schön, wenn sie nach dem Überfahren der
+roten Flagge dann auch bremsen würden bis zum Stillstand, damit man sieht, der
+Test ist fertig"*). Passing the mark at speed still ENDS the test - unchanged.
+What was added is `_stop_after_verdict()` in `tests/test_turning.py`, called at
+the very end of `monitor_turn`, **after** `POST /test_result` and after the
+result is appended and saved, so it can clarify the picture but never move a
+verdict. It latches `brake` through `POST /control` (a real deceleration -
+never a written zero, AGENTS.md "never do physically impossible things") and
+waits for `speed_kmh < 0.3`, up to 8 s:
+
+```
+   ✅ Reached the end flag - the car's front is 0.58 m past the pennant's foot on segment 9
+   ✅ PASSED
+   🛑 test over - braking to a standstill from 43 km/h so the picture says it ended
+      stands still after 3.4 s (sim 12.7 s) - brake stays latched        [real time; 0.9 s at --warp 4]
+```
+
+Two things it deliberately does not do: it **skips a field with more than one
+car** (saying so - `🛑 skipped the stop: 3 cars on the field`), because standing
+still in traffic would drop a sudden obstacle in front of a following car and
+put a crash the scenario never tested into the tape; and it **does not re-drive
+a car that already stands** (the parking scenarios end at rest anyway). The
+latched brake is cleared by the next scenario's `POST /reset`.
+
 ## 4. The test map (`DrivingGame.Sim/TestMaps.cs`)
 
 `TestMaps.BuildBasicTestMap()` builds a synthetic grid of ~500 m tiles
@@ -564,6 +705,110 @@ name to that number (1 = top-left tile of the minimap, counted left-to-right
 then top-to-bottom - note this is the *visual* minimap position, which is
 vertically flipped from the map's internal world-grid row; see the comment
 above `START_POINT_NUMBER` for why).
+
+**The test-info window (binding user decision 2026-10-25): "do we not have a
+window that says which test runs, why, and how far along it is? If not, we
+should have."** The number alone answers neither WHAT the window is showing nor
+whether the goal has been reached, which is exactly what a watching human needs
+to know - without it a finished test looks alive, because a running turn test
+ends by the CAR PASSING the flag at speed and the sim is not stopped
+(docs/TESTING.md §3 above).
+
+The same day the user ruled on its shape: *"make it a window like the car detail
+window - moveable, bigger fonts, more structured, not text-only"*. So it is a
+**real OS window** (`BuildTestInfo` / `TestInfoUpdate` in `MapRenderer.cs`,
+`Window` + `RegisterWindow`, the pattern the reviewer's readout uses), not text
+painted into the map and not a fixed corner box: its title bar carries the
+test's identity, it drags, and the shared `EnforceWindows` guard keeps it 5 px
+inside the map window and clear of the minimap and the readout. The body is
+structured - 24 px rows (the user's "die Fonts sind zu klein" of the same day,
+up from 19) and a colour **chip** that answers without reading
+(amber ▶ running, green ✓ passed, red ✗ failed):
+
+```
+title bar   test 2/27
+            Taking a sharp 90° left corner        <- the scenario's own description
+            watch: the car                        <- what the camera follows
+            [✓] passed                            <- the chip: the glanceable state
+            wall 9.2 s · crossings 0 · off-road 0 <- the verdict's numbers
+```
+
+Same day, second ruling: *"integriere das Test-Panel unten mit in das
+Test-Fenster, das die Ergebnisse anzeigt"* - so the run controls that used to
+float bottom-left **on the map** (`Test-Nr:` field, `Run Test` button, the
+run-status line) live in this window too, under the verdict they belong to:
+
+```
+title bar   test 2/27
+            Taking a sharp 90° left corner
+            watch: the car
+            [✓] passed
+            wall 9.2 s · crossings 0 · off-road 0
+            [ 3 · T-junction: turning left off the stem ]  [Run]
+            list: GET /tests · T hides/shows this window
+            test #3 done ✅ (log: /Users/hauke/prj/driving-game/tests/ …
+```
+
+Consequences of putting them there, all deliberate:
+
+- **one place per job**: start a scenario and read what it did in the same
+  square centimetres; the old split (type bottom-left, read a window top-left)
+  made you hunt for the verdict.
+- **the window is always open** - it carries a control now, so it cannot wait
+  for a first focus; with no test context its rows read `no test running` /
+  `idle` behind a grey chip. `T` hides it, the next focus or `--run-test` brings
+  it back; ✕ hides it too (same reason).
+- **the map is the map again**: the row was positioned from the viewport size at
+  build time, so a resize left it in the wrong corner; inside a window the
+  layout is in the window's own coordinates.
+- rows and the status line **elide with "…"** instead of running under the frame
+  - and they need an explicit `Size` for that: a trim mode on an auto-sized
+    label rendered the rows *completely empty* while `TEST-INFO` still printed
+    their text (measured 2026-10-25 - the log said fine, the screenshot said
+    nothing; only the screenshot is a picture).
+- **starting a test from inside the window** is the dropdown: it holds every
+  scenario as `<number> · <description>` straight from `GET /tests` (so the
+  window can never disagree with the generated list in §2a), and `Run` beside it
+  starts the selected one. `--run-test <n>` fires the same entry point
+  (`StartTestNumber`) and moves the dropdown to that number; a click that
+  arrives while a request is in flight queues (`_clickPendingNum`) instead of
+  being lost. While the list has not arrived yet the button says so rather than
+  doing nothing - an empty dropdown must read as "not loaded", not as "no
+  tests". A client that starts before its host retries `GET /tests` up to 8
+  times, 2 s apart, and names the code if it stays unavailable.  is attached to: the client posts to `RunTestUrlOf()` (its own host, from the
+  resolved `_apiPort`), and the host hands the suite a `CAR_API_URL` pointing at
+  the address the request arrived on. Before that, `RunTestUrl` was hardcoded to
+  `:5001` and an embedded session on another port answered `Fehler: ` with an
+  empty body - because the host threw on `File.Open` of a `RunnerPath` that was
+  guessed by counting four `..` (wrong depth for the Godot assembly), outside the
+  try/catch that would have named the reason. Both fixed, both in
+  `GameApi.ResolveRunnerPath()` and `POST /run_test`.
+
+
+- **name + purpose**: `GET /state` already answers them - `focus.scenario`,
+  `focus.label` and `focus.desc` (`SimEngine.cs:FocusPayload`, announced per
+  test by the suite through `POST /focus`, recorded on the tape as a `# focus`
+  note). No new channel: the window reads what the camera focus already carries.
+- **state**: `test_results` in `GET /state` (`number`, `label`, `scenario`,
+  `passed`, `reason`, `sim_s`, `wall_s`, `crossings`, `off_road` - the verdict
+  the suite files through `POST /test_result`, also on the tape as a `# result`
+  note). Until such an entry matches the CURRENT focus label the state row
+  reads `running` behind the amber chip; when it matches, the chip turns green
+  `✓ passed` or red `✗` with the reason and the numbers drop into the last row.
+  A window that would keep saying `running` after the verdict is the
+  lie this decision is about, so the match is on the label, not on position in
+  the list.
+- **what happens after the goal**: the suite proceeds to the next test on its
+  own (`run_e2e.sh` runs the selector's list; the window follows the new focus),
+  and for a single watched test the runner closes the viewer at the suite's end
+  (`--quit-on-test-done`, in-app, no signal - see the never-signal rule). Only
+  an explicit `--keep-window` keeps it open, and then the window's `✓ passed`
+  row is what says the run is over while the car is allowed to drive on.
+- **measured** (2026-10-25, `--tests 2 --watch --realtime`): the client logs
+  `TEST-INFO '2/27': title=test 2/27 | purpose=Taking a sharp 90° left corner |
+  watch: the car | state=▶ running` and, a poll later,
+  `state=✓ passed | nums=wall 9.2 s · crossings 0 · off-road 0`; the screenshot
+  of the doubled window shows the title bar, the four rows and the green chip.
 
 ## 6. Other test scripts and suites
 
@@ -740,6 +985,14 @@ python3 tests/light_check.py      # one stationary car, zoomed to its lights
 python3 tests/car_line_check.py   # ALL vehicle types lined up on a road,
                                   # side by side (picks a long-enough segment
                                   # itself, verifies positions vs /state)
+python3 tests/pose_stutter_check.py --ab
+                                  # is the PAINTED motion smooth? traces the
+                                  # per-frame node position in the live window
+                                  # and in the reviewer at 1x on one tape, and
+                                  # scores held / jump / speed-spread. --ab
+                                  # re-runs the same tape with the play lerp
+                                  # switched off, so before and after differ by
+                                  # one flag (--no-play-lerp), not by two runs
 ```
 
 ## Notes / gotchas

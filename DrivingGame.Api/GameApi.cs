@@ -33,11 +33,31 @@ public static class GameApi
     // overridable via env; the default resolves <repo>/tests relative to
     // the app binary (<root>/DrivingGame.Server/bin/<config>/net9.0/ ->
     // four levels up).
-    private static string RunnerPath =>
-        Environment.GetEnvironmentVariable("DRIVING_GAME_TEST_RUNNER")
-        ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..",
-                                        "..", "..", "..",
-                                        "tests", "test_turning.py"));
+    private static string? _runnerPath;
+    /// <summary>The suite script. Found by walking UP from the assembly until a
+    /// `tests/test_turning.py` exists, NOT by counting four `..`: the console
+    /// host lives at `bin/Debug/net9.0/` (four levels - the original guess)
+    /// while the Godot client's assembly sits at
+    /// `.godot/mono/temp/bin/Debug/` (five), so the embedded "Run Test" button
+    /// resolved to a non-existent `.godot/tests/…` and answered 500 with an
+    /// EMPTY body - measured 2026-10-25, see docs/TESTING.md §5.</summary>
+    private static string RunnerPath => _runnerPath ??= ResolveRunnerPath();
+
+    private static string ResolveRunnerPath()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("DRIVING_GAME_TEST_RUNNER");
+        if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+        {
+            var cand = Path.Combine(dir.FullName, "tests", "test_turning.py");
+            if (File.Exists(cand)) return cand;
+        }
+        // Nothing found: keep the historical guess so a failure at least names
+        // a plausible path instead of an empty string.
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..",
+                                            "..", "..", "..",
+                                            "tests", "test_turning.py"));
+    }
 
     private static string PythonExe =>
         Environment.GetEnvironmentVariable("PYTHON") ?? "python3";
@@ -499,6 +519,7 @@ public static class GameApi
                 return Results.Json(new Dictionary<string, object?>
                     { ["ok"] = false, ["error"] = $"no tape frame at step {step}" });
             var cars = new List<object?>(f.Cars.Count);
+            var kinds = RunTape.Kinds;     // one fetch, not one per car
             foreach (var cf in f.Cars)
                 cars.Add(new Dictionary<string, object?>
                 {
@@ -506,6 +527,14 @@ public static class GameApi
                     ["heading"] = cf.HeadingDeg, ["speed"] = cf.SpeedMps,
                     ["blinkers"] = cf.Blinkers, ["braking"] = cf.Brake,
                     ["wrong_side"] = cf.WrongSide, ["crashes"] = cf.CrashEpisodes,
+                    ["level"] = cf.Level,
+                    // The KIND, beside `level`: the frames of a tape are an
+                    // ACTOR channel (docs/RECORD_PLAYBACK.md → "The cast list
+                    // … and the actor kinds beside it"), so a client reading a
+                    // TAPE frame gets the same contract as one reading /state -
+                    // and an actor that is not a car must arrive saying so
+                    // rather than wearing car fields as a lie.
+                    ["kind"] = kinds.GetValueOrDefault((long)cf.Uid, "car"),
                     ["cap_key"] = cf.CapKey,
                     // The actor behind that key, so a client reading a TAPE
                     // frame gets the same contract as one reading /state
@@ -524,6 +553,22 @@ public static class GameApi
                 ["events"] = evs,
                 ["units"] = "meters", ["cars"] = cars,
             });
+        });
+
+        // The growing tape, read as a STREAM: the live window is the tip of a
+        // tape that is still being written (docs/RECORD_PLAYBACK.md → "One
+        // client, one data source"), so the tip is served in the tape's OWN
+        // text grammar - `RunTape.FrameLine` is the one function the file and
+        // this endpoint share. A second frame format is how two channels in one
+        // window drift apart, which is the failure this whole design is built
+        // against.
+        app.MapPost("/tape/tip", async (HttpRequest req) =>
+        {
+            var data = await ReadJsonBody(req);
+            long since = data.TryGetProperty("since", out var sn) ? (long)sn.GetDouble() : -1L;
+            int limit = data.TryGetProperty("limit", out var lm) ? (int)lm.GetDouble() : 0;
+            if (limit <= 0 || limit > 600) limit = 120;   // 600 = 10 sim-s at 60 Hz
+            return Results.Json(RunTape.TipPayload(since, limit));
         });
 
         // The recorded runs on disk - a review client picks one of these and
@@ -749,7 +794,17 @@ public static class GameApi
                 // NOTE: no `using` here - the stream must stay open for the
                 // whole life of the subprocess; CopyToStreamAsync disposes it
                 // when the process exits.
-                var logStream = File.Open(logFile, FileMode.Append);
+                FileStream logStream;
+                try { logStream = File.Open(logFile, FileMode.Append); }
+                catch (Exception e)
+                {
+                    // Before this, a missing directory here escaped to Kestrel:
+                    // 500 with NO body, and the client could only print
+                    // "Fehler: " - a failure with the reason cut off.
+                    RunTag.Current = RunTag.Idle;
+                    return Json(new Dictionary<string, object?>
+                        { ["error"] = $"cannot open the run log {logFile}: {e.Message}" }, 500);
+                }
                 try
                 {
                     // -u: unbuffered stdout - the suite's output must reach
@@ -764,6 +819,13 @@ public static class GameApi
                         RedirectStandardOutput = true,
                         UseShellExecute = false,
                     };
+                    // The suite talks to the host that LAUNCHED it. It reads
+                    // CAR_API_URL (default :5001), and inheriting the parent's
+                    // environment meant a host on another port started a suite
+                    // that then drove - and waited on - some other :5001.
+                    // `req.Host.Value` is the address this very request arrived
+                    // on, so it cannot disagree with the server answering it.
+                    psi.Environment["CAR_API_URL"] = $"http://{req.Host.Value}";
                     proc = Process.Start(psi)!;
                     _ = CopyToStreamAsync(proc.StandardOutput, logStream);
                 }

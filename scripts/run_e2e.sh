@@ -12,18 +12,22 @@
 #   3. Wait until /health is up
 #   4. Launch the Godot client (VISIBLE window unless --no-godot); the
 #      runner closes the window again on exit (clean self-quit - the
-#      client watches a generation file, never a signal).
+#      client watches a generation file, never a signal) unless
+#      --keep-window asks for it to stay live.
 #   5. Launch the suite through the host's POST /run_test (server spawns
 #      test_turning.py, logs to tests/run_test_N_*.log); stream that log to
 #      the console with tail -F and poll GET /run_test until it finishes.
 #   6. Stop the C# host (plain dotnet process - SIGTERM is clean) and close
 #      the Godot window. On failure the host stays up so the frozen crash
 #      scene can be analysed (stop it later: pkill -f DrivingGame.Server).
+#      --keep-window leaves BOTH up after any verdict: the finished run stays
+#      on screen, driveable, reviewable, click-through-able.
 #
 # Usage:
 #   scripts/run_e2e.sh                                  # full suite, visible
 #   scripts/run_e2e.sh --no-godot                       # headless (no window)
 #   scripts/run_e2e.sh --tests corner_left_entry        # single scenario
+#   scripts/run_e2e.sh --warp 4 --keep-window           # suite, window stays open
 #   scripts/run_e2e.sh --tests 26 --watch                 # watch one, staged frozen
 #   scripts/run_e2e.sh --tests fig8_stress --stress-cars 250
 #   scripts/run_e2e.sh --tests 21-24                        # resume a range
@@ -50,12 +54,16 @@ API=http://127.0.0.1:5001
 GODOT_BIN="/Applications/Godot_mono.app/Contents/MacOS/Godot"
 
 RUN_GODOT=1
+KEEP_WINDOW=0  # --keep-window: cleanup() closes NOTHING, whatever the verdict
 TEST_SELECTOR=""
 EXTRA_ARGS=()
 HOST_ARGS=()   # --fast / --warp N go to the C# host, not to the suite
 PACING=""      # empty = the default below (--warp 4)
 FOCUS_UID=""   # --focus-car <uid>: the client binds to that car
 MAXIM=0        # --maximized: the Godot window fills the screen (borderless)
+WATCH=0        # --watch: the doubled window (binding decision 2026-10-25:
+               # NEVER fullscreen - the user wants to SEE the manoeuvre but
+               # keeps the desktop around it), staged frozen, real time
 # --watch: the TWO-MODE rule (AGENTS.md). Watching is not racing: the window
 # fills the screen, the camera pins on the named hotspot, and the harness
 # HALTS the sim while it stages the cars, spawns every one of them AT SPEED,
@@ -69,13 +77,14 @@ CRASH_SHOT="${CRASH_SHOT:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-godot) RUN_GODOT=0; shift ;;
+    --keep-window) KEEP_WINDOW=1; shift ;;
     --tests) TEST_SELECTOR="$2"; shift 2 ;;
     --fast) HOST_ARGS+=(--fast); PACING=1; shift ;;
     --warp) HOST_ARGS+=(--warp "$2"); PACING=1; shift 2 ;;
     --realtime) PACING=1; shift ;;   # explicit: real time, no warp
     --focus-car) FOCUS_UID="$2"; shift 2 ;;   # watch that car (the last crashed uid)
     --maximized) MAXIM=1; shift ;;   # Godot window at full screen size
-    --watch) MAXIM=1; DG_FREEZE_STAGE=1; export DG_FREEZE_STAGE; shift ;;
+    --watch) WATCH=1; DG_FREEZE_STAGE=1; export DG_FREEZE_STAGE; shift ;;
     --zoom) CAM_ZOOM="$2"; shift 2 ;;
     --center) CAM_CENTER="$2 $3"; shift 3 ;;
     *) EXTRA_ARGS+=("$1"); shift ;;
@@ -97,6 +106,17 @@ GODOT_GEN_FILE=/tmp/driving_game_godot_gen
 HOLD_OPEN=0   # set to 1 on failure: leave host + Godot up for analysis
 cleanup() {
   [ -n "$TAIL_PID" ] && kill "$TAIL_PID" 2>/dev/null || true
+  # --keep-window: the user asked to look at the result, so neither the window
+  # nor the host gets put away. Clean close stays available the same way as
+  # always: bump the generation file, and pkill the .NET host.
+  if [ "$KEEP_WINDOW" -eq 1 ]; then
+    echo ""
+    echo "==> --keep-window: Godot window (pid ${GODOT_PID:-n/a}) and host "
+    echo "   (pid ${GAME_PID:-n/a}) stay up."
+    echo "   Close the window cleanly:  echo \$RANDOM > $GODOT_GEN_FILE"
+    echo "   Stop the host:             pkill -f DrivingGame.Server"
+    return
+  fi
   # Close our Godot client window CLEANLY (bump the generation file - the
   # client quits itself; never a signal). On failure the C# host stays up,
   # so the frozen scene can be re-opened in a new window.
@@ -244,9 +264,27 @@ GODOT_CAM_ARGS=()
 # DISABLED (viewport == window, see project.godot), so the overlays - minimap,
 # zoom label - are laid out from GetVisibleRect() and follow the new size.
 GODOT_WIN_ARGS=()
+GODOT_SIZE_ARGS=()
 if [ "$MAXIM" -eq 1 ] && [ "$RUN_GODOT" -eq 1 ]; then
   GODOT_WIN_ARGS=(--fullscreen)
   echo "==> Window: MAXIMIZED (--fullscreen) - the map fills the screen"
+  [ "${DG_FREEZE_STAGE:-0}" = "1" ] && echo "==> Staging: sim FROZEN while cars are placed, unfrozen at the announced pace"
+fi
+if [ "$WATCH" -eq 1 ] && [ "$RUN_GODOT" -eq 1 ]; then
+  # The watched window opens WHERE THE USER LEFT IT: the client stores its
+  # screen/position/size in user://window.ini and applies that rect before the
+  # first frame (the docs' "Remembering window position and size across
+  # sessions" recipe - binding user decision 2026-10-25: "kein Resize, sondern
+  # direkt ... abspeichern, wo das Fenster zuletzt geschlossen wurde"). The
+  # runner therefore passes NO geometry of its own; an explicit rect for a
+  # scripted shot stays available through DG_WINDOW_RECT="x y w h".
+  if [ -n "${DG_WINDOW_RECT:-}" ]; then
+    read -r -a _WR <<< "$DG_WINDOW_RECT"
+    GODOT_SIZE_ARGS=(--window "${_WR[0]}" "${_WR[1]}" "${_WR[2]}" "${_WR[3]}")
+    echo "==> Window: forced rect ${_WR[0]},${_WR[1]} ${_WR[2]}x${_WR[3]} (DG_WINDOW_RECT)"
+  else
+    echo "==> Window: opens where it was last closed (user://window.ini; first run 100,100 2000x1000)"
+  fi
   [ "${DG_FREEZE_STAGE:-0}" = "1" ] && echo "==> Staging: sim FROZEN while cars are placed, unfrozen at the announced pace"
 fi
 if [ "$RUN_GODOT" -eq 1 ]; then
@@ -317,7 +355,7 @@ if [ "$RUN_GODOT" -eq 1 ]; then
     # The runner closes this window again on exit (clean self-quit via the
     # generation file - never a signal). On failure the C# host stays up,
     # so the scene can be re-opened in a new Godot window.
-    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
+    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} ${GODOT_SIZE_ARGS[@]+"${GODOT_SIZE_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in
   fi
@@ -394,5 +432,5 @@ if [ -n "$TAPE_FILE" ]; then
   fi
 fi
 
-echo "==> Stopping host..."
+if [ "$KEEP_WINDOW" -eq 0 ]; then echo "==> Stopping host..."; fi
 exit $TEST_EXIT

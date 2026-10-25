@@ -5,7 +5,10 @@
 Regardless of whether the user writes in German or English, **respond in
 English** and **write all documentation in English** (docs/, comments,
 diary). This is the default: it only changes if the user gives an explicit
-instruction to use a different language for a specific artifact.
+instruction to use a different language for a specific artifact — a
+one-off request ("answer this in German") changes THAT answer only, not the
+rule. A permanent switch needs an explicit standing instruction ("from now
+on always X"), and if the two conflict, the newest explicit wording wins.
 
 ## Follow explicit user instructions exactly
 

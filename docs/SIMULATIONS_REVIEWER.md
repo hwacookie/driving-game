@@ -9,6 +9,10 @@
 > inline. The tape, the endpoints and the per-substep fluidity it reads are
 > built — see [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md).
 >
+> **Status 2026-10-25:** the two windows are **one client** by decision (see
+> *One client, one data source* below). `▶ play`'s frame-snap is fixed and the
+> fix is measured — `python3 tests/pose_stutter_check.py --ab`.
+>
 > **Reading order** (sections were appended, not merged): *Controls* →
 > *Readout label* → *Review-list fixes (2026-10-22)* → *One fixed HUD size
 > (2026-10-22)* are current; *Implementation status (2026-10-21)* near the end
@@ -55,6 +59,8 @@ Every flag the client parses (all after `--`):
 | `--test-pan`, `--test-seek <frac>`, `--test-scrub-drag <n>`, `--test-bar-point <x> <y>`,
 `--test-slot-buttons` (the car detail window: open, follow, resize, seek —
 see [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md)), `--test-jog`, `--test-window-out`, `--test-minimap-pan <x> <y>` | scripted interactions, for reproducing a window/HUD defect without a hand on the mouse |
+| `--test-play` | scripted `▶`: presses play 2 s after `_Ready` (Godot timers count *from* `_Ready` — a trace must not score the paused stretch before it as stutter) and then prints `cursor / step / playPos / simNow / renderTarget` once a second. `tests/pose_stutter_check.py` drives it |
+| `--no-play-lerp` | A/B switch for the smoothness measurement: advance the play clock but paint the raw recorded substep, i.e. reproduce the 2026-10-25 frame-snap on the same tape (`--ab`) |
 | `--resize <w> <h>` | grow the window shortly after start — the only scripted way to reproduce "HUD after maximize" |
 | `--test-bar-ui` | scripted probe for the bar's new layers: lands the cursor inside a scenario, zooms the range, hovers and clicks a marker, then prints the tooltip, the Test panel and `focus at cursor` — the deterministic check for boundaries/tooltip/zoom (Godot does not deliver **pushed** wheel or bare-motion events to handlers, so those two go through the same entry points a real event feeds) |
 | `--test-pan-probe` | scripted **pan** probe: the same grab at five window heights, then a window's CENTRE, then the grab again, printing `cam / zoom / _reviewPan / _mmAsk / which pin obeys` around each — the instrument that separated "panning is broken" from "panning is shadowed by the pin" (2026-10-24) |
@@ -73,6 +79,157 @@ They are independent. The reviewer holds **no simulation state** — it reads
 recorded frames (over the API or from the tape file on disk) and draws them; it
 never re-simulates. A new run is a new tape, not a new process.
 
+### What the client actually reads today *(as-built, 2026-10-25)*
+
+The sentence above is the *intent*; these three lines are the *reality*. There
+are exactly three ingest sites in the client (`MapRenderer.cs`), and the tape
+never reaches any of them from the host:
+
+| channel | how the client gets it | viewer | reviewer |
+|---|---|---|---|
+| **world** — roads, markings, obstacles | `GET /map` (`FetchMap` → `OnMapResponse`), or the same `MapPayload.Build` **in-process** in embedded | every start | every start |
+| **cars, live** | `GET /state` — pipelined poll (`IngestState`), or `_simHost.Engine.StateSnapshot()` in embedded `_Process` | **yes — this *is* the viewer's picture** | poll still runs; `ReviewFeed` then throws its result away |
+| **cars, recorded** | **`File.ReadAllText` of a `res://tests/tape_*.txt`**, parsed client-side into `_tape[]` (`LoadTape`) | never | **yes — this is the reviewer's picture** |
+
+So "direct access to the tape" is direct **to the file on disk**, not to the
+recorder: no client code ever calls `/tape/frame`, `/tape/list`, `/tape/save`
+or `/tape/load` (`MapRenderer.review.cs:233` even says the picker reads the
+directory *rather than* `/tape/list`). The host's `RunTape` is a **third copy**
+of the run that neither window looks at — `POST /tape/save` is what moves it
+onto disk so the reviewer can find it. That is also why a tape that is still
+growing on a live host is invisible to every client: the file is written once,
+at the end of a run.
+
+Two consequences for the unification *(measured, see TODO §7)* — the second
+is a live defect the width of one field, and both are closed by 2026-10-25:
+
+- **The world has no tape — by decision, and the decision is checked.** Geometry
+  only ever comes from a host (`GET /map`), so "the reviewer needs no host"
+  (`MapRenderer.review.cs:208`) is true for the cars and false for the map: a
+  review window still needs a ground beside it, and it now **verifies that the
+  ground is the one the tape names** (`REVIEW-MAP … match | MISMATCH | unverifiable
+  (pre-wide stamp)`, `MAP MISMATCH — refused` in the readout, `--ignore-map-hash`
+  to force). Measured: the same tape on its own map paints the deck car ON the
+  bridge; the same tape on the client's default OSM ground paints **no cars at
+  all** (`REVIEW-REFUSED … no cars painted`) — a tape painted on the wrong
+  ground is not a review, it is a lie about where those cars drove.
+- **The tape is no longer car-only where it matters.** `level` is on every frame
+  (closed 2026-10-25 — it was the live lie that a bridge car drew at grade) and
+  the actor KIND is in the header (`kinds=uid:kind`, `car` implied). What is
+  still missing is the **ground's own state** — obstacle placement/removal
+  (`GameApi.cs:823/849`) moves the ground during a run and no tape record
+  covers it — and the **light phases** the sim will grow. Any field the client
+  draws is a tape field, or the HUD must say `live-only`.
+- **Display source and control target are two addresses today** (and must stay
+  two): `PostFreeze`, `SendCommands` and the whole click-through UI talk to the
+  **live host**, so a review window that ⏸'s "the simulation" has always paused
+  the sim *next to* the tape, not the tape. Unifying the picture must not unify
+  that. *(The live poll during review is wasteful but provably harmless: `ReviewFeed`
+  clears `_carBuf[uid]` before writing its one/two recorded samples —
+  "review mode owns its history: no live leftovers".)*
+
+### What belongs to the tape, what to the map (binding, 2026-10-25)
+
+The user closed the open question: the map is static per run, so the tape
+references it — and the sim **will** grow dynamic ground (traffic lights, a
+policeman directing the traffic, …). Three classes follow, and each has one
+channel. Deciding a field's channel by its *frequency*, not by its kind:
+
+| thing | changes during a run? | channel | today |
+|---|---|---|---|
+| road network, markings, **yield/priority signs**, bridge decks, colours | no — per map | **map reference** (`map=` + `map_hash=`) — **built and checked** | `POST /tape` stamps `RoadNetwork.MapFingerprint`, and `GET /map` answers the SAME function as `map_fingerprint` (`MapPayload.cs:204`), so a client can check a tape against the ground beside it (`MapRenderer.review.cs:CheckTapeAgainstMap`). The stamp is wide (`v2:`): segment endpoints/width/oneway **plus `level`, lanes, parking-lane width, shoulder**, every sign's **type and node**, every start point, three counts — the old stamp mixed **`net.Signs.Count` only**, so a yield traded for a priority hashed IDENTICAL (fixed with the reference, closed 2026-10-25; the unit fact `MapFingerprint_SeesSignTypePositionAndTheStartCast` pins it). Geometry still comes from the map side, which is what a reference means. |
+| obstacle **placement/removal** (`/obstacles`), a light's **phase**, a gate | yes, rarely | **tape events** — record at the substep of the change, replay onto the cursor to rebuild state | nothing: `GameApi.cs:820/823/849` move the ground, the tape has no ground record at all |
+| cars — and any actor that moves: **a cop**, a directing policeman, a walking pedestrian | yes, every substep | **tape frames** | `TapeFrame.Cars` is *car*-only (`Tape.cs`), so an actor that is not a car has nowhere to be recorded; the channel has to be an ACTOR channel before the first cop is simulated |
+
+Consequences I will not defer, since the classes are settled now:
+
+- **Do not store the map in the tape.** A tape names its ground (`map=` +
+  a geometry hash that covers what is drawn); the client rebuilds the ground
+  from the name (embedded) or asks the host (http) and REFUSES the overlay when
+  the hashes differ. A few hundred KB of duplicated road polygons per run buys
+  nothing, and it rots the moment the map data changes on disk.
+- **A sparse channel is not a slow channel.** A light phase every substep is
+  noise; the phase *change* plus the rules that count between changes (`*
+  Config.cs` timings) is the truth — the same shape the driver decisions already
+  use (`TapeEvent`, `docs/RECORD_PLAYBACK.md`). Never extrapolate the countdown:
+  a review window paints a phase only if the tape recorded the change that
+  started it.
+
+## One client, one data source (binding user decisions, 2026-10-25)
+
+The viewer and the reviewer **are the same thing**. What differs is the data
+source the window displays: the live simulation, or a tape addressed through
+the scrub bar. Because every run is recorded anyway, the live case is to be
+read as *the tip of a tape that is still being written* — one renderer, one
+clock, one set of overlays — and `--review` shrinks to "open this tape instead
+of the newest one".
+
+Four answers closed the open questions:
+
+| | decision |
+|---|---|
+| **(a) every run** | is recorded, always. Recording is not a diagnostic you remember to switch on |
+| **(b) durability** | the tape file is **appended from the first substep**, flushed **on every collision and at the latest every second** — never rewritten. A suite run's tape is 8–12 MB, so "save every second" would be ~12 MB/s of the wrong verb |
+| **(c) never jump** | playback keeps going at the selected rate even when it falls behind the head. The lag grows honestly, the label says so, and only a hand rejoins |
+| **(d) `/state`** | stays — the e2e suite asserts on it — but stops being the renderer's source once the live view reads the tape tip |
+
+Two rules follow, and both are about the clock:
+
+**The dropdown is the only rate control.** `1×` means one **sim**-second of
+tape per wall second; the ruler is the header's `dt_fixed`, so a `--warp 4`
+recording replays at the pace the run would have had in reality, and `4×` is
+how you watch it at the rate the host produced it. There is no `LIVE` speed:
+a cursor that outruns the head **waits** at it (`⏳ waiting for the run`) — it
+neither skips ahead nor extrapolates past recorded truth.
+
+**The clock belongs to the source.** The live ingest *estimates* frame time
+(samples land at network rate, hence the free-running `_simNow` and its
+bounded servo pull at `MapRenderer.cs:3140`); a source that **states** a time —
+a tape cursor — *is* that time. `_sourceOwnsClock` (`MapRenderer.cs:262`) is
+that seam, and it is the first real piece of "the one refactor both share"
+below: an estimate running on top of a stated value puts two clocks in one
+frame, disagreeing by a frame's worth of drift.
+
+**And the clock is continuous.** The cursor's *position in tape time* is a
+real number (`_playPos`); only the *read* quantises, to the two substeps that
+bracket it. A held scrub arrow/button therefore **releases** `▶ play` — a step
+sequence and a lerp cannot share one cursor.
+
+Still open, in order: (1) fill the tape's field gaps — **`level` first**: `/state`
+carries `Network.Segments[…].Level`, the tape does not, so the review pass paints
+`Level = 0` and a car on a bridge is drawn at grade today; the rule is *every
+field the client draws or displays is a tape field, or the HUD marks it
+live-only*. (2) Let the tape carry its own map geometry, so a review survives the
+host and not merely the run. (3) Move the live view onto the tape tip and delete
+`_review`.
+
+### Smoothness is measurable (`tests/pose_stutter_check.py`)
+
+The report was: "in the reviewer the cars jump a tiny bit from frame to frame;
+the live viewer was completely smooth." The cause was not a mystery and not a
+frame-rate fact — `ReviewFeed` interpolated the pose with `_scrubAcc2`, a
+variable that was declared, reset to `0.0` in three places, **never written**.
+So `▶ play` painted the raw recorded substep and leapt a whole 1/60 s per step:
+on a ~130 fps display that is 2 frames of nothing and then a leap.
+
+The harness traces the **painted** node position every rendered frame in both
+windows (camera pinned with `--center`, `--motionlog`, `--test-play` presses
+`▶`) and scores each pass on `held` (frames repainting their predecessor) and
+`jump` (frames moving > 1.8× the typical step). `--ab` re-runs the same tape
+with the interpolation switched off (`--no-play-lerp`), so before and after
+differ by one switch, not by two worlds. Measured on one tape, one machine:
+
+| pass | median step/frame | held | jump | speed rel-mad |
+|---|---|---|---|---|
+| live viewer (the reference) | 1.44 px | 0.1 % | 7.9 % | 0.20 |
+| review, **before** (raw substep) | **0.00 px** | **67.0 %** | **33.0 %** | median 0 |
+| review, **after** (continuous clock) | 1.44 px | 0.0 % | 4.5 % | 0.17 |
+
+Reading the first line of that pair: a typical rendered frame used to paint
+*nothing new*, a third of them leapt. Now the review median step equals the
+live one and its painted speed is steadier than live — the tape's cursor needs
+no starvation pull, the live stream does.
+
 ## The one refactor both share
 
 The renderer must be able to draw an arbitrary **world snapshot** instead of
@@ -86,6 +243,13 @@ draw(world_snapshot, interpolate: bool)
 ```
 
 Without it the reviewer would mirror the live sim and the rewind would be a lie.
+
+> **2026-10-25:** no `world_snapshot` type exists yet, but the reviewer already
+> reached the same renderer by feeding `CarSample`s into the live buffer — and
+> the two halves that were missing are now built: the source **owns its clock**
+> (`_sourceOwnsClock`) and that clock is **continuous** (`_playPos`). What is
+> still missing is the interface itself: `level` on the tape, geometry in the
+> tape, and a live view that reads the tape tip.
 
 ## Display truth — the viewer's mechanism split in two
 
@@ -122,9 +286,9 @@ there. **Step mode never smooths**, at any ramp speed.
 | **⏸ pause** | only the **cursor** stops. The sim keeps ticking, the tape keeps growing — you fall behind the head and scrub through the story so far. Pause is **not** a sim command |
 | **⏹ stop** | `POST /freeze {"frozen": true}` — the simulation itself halts, the head stops advancing |
 | **● record** | `POST /freeze {"frozen": false}` — continues from the halted state, nothing re-simulated |
-| **playback speed** | advance the cursor by `speed / dt_fixed` substeps per wall second; the rate comes from the header's `dt_fixed`, never from the wall clock, so a tape recorded at `--warp 4` replays at the correct speed |
+| **playback speed** | the dropdown is the ONLY rate control: `1×` = one **sim**-second of tape per wall second, so a tape recorded at `--warp 4` replays at the pace the run would have had in reality. The rate comes from the header's `dt_fixed`, never from the wall clock. If the head advances more slowly than the cursor, the cursor **waits at the head** — never a jump, never an extrapolation (user decision 2026-10-25) |
 | **single click ◀ / ▶** | exactly **one frame** |
-| **hold ◀ / ▶** | the rate ramps while held and ramps back on release: `0.0 s → 1`, `0.3 s → 6`, `0.8 s → 20`, `1.5 s → 60`, cap `120` frames/s. Same curve both directions |
+| **hold ◀ / ▶** | the rate ramps while held and ramps back on release: `0.0 s → 1`, `0.3 s → 6`, `0.8 s → 20`, `1.5 s → 60`, cap `120` frames/s. Same curve both directions. A held scrub **releases `▶ play`** (like a bar drag and `,`/`.`): a step sequence and a lerp cannot share one cursor |
 | **`,` and `.`** | one substep back / forward — the two keys **right of M** on a German layout. Bound by **physical position** (Godot `keycode`, not `unicode`), so the gesture survives other layouts |
 | **right-click a car** | opens the **car detail window** menu: one entry per open window (picking one hands it the clicked car) plus `New slot`. The ONLY gesture that opens or re-points a window — a left press does not select anything any more. [CAR_DETAIL_WINDOW.md](CAR_DETAIL_WINDOW.md) |
 | **right-click an event row** | copies that event's whole address to the clipboard: `tape → #uid [role] → #step  seconds  text`, so a line you want to ask about carries its run and its car with it |

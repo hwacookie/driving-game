@@ -31,6 +31,7 @@ public partial class MapRenderer : Node2D
     private string _source = "http";
     private string _embeddedMapName;   // null = OSM (console-host parity)
     private int _embeddedPort = 5001;
+    private int _apiPort = 5001;         // resolved in _Ready: embedded port or the URL's own
     private SimHost _simHost;          // non-null in embedded mode
 
     static Vector2 W(float x, float y) => new(x, -y);
@@ -58,7 +59,11 @@ public partial class MapRenderer : Node2D
     private int _pollGen;                 // bump per polling chain - stale CreateTimer callbacks die
     private bool _cmdHttpBusy;            // _cmdHttp handles ONE request at a time
     private int _clickPendingNum = 0;     // >0: a Run Test click waits for the in-flight response to land
-    private LineEdit _testInput;
+    private OptionButton _testPick;          // the scenario list, number first
+    private readonly List<int> _testPickNums = new();
+    private HttpRequest _testsHttp;          // GET /tests, on its own socket:
+    private int _testsTries;                 // _cmdHttp is single-flight
+    private int _lastRunNum;                 // the run the status line talks about
     private Button _runTestBtn;
     private Label _runStatus;
     private Camera2D _cam;
@@ -69,6 +74,19 @@ public partial class MapRenderer : Node2D
     private string _screenshotPath;
     private float _shotDelay = 0.5f;
     private Vector2I _resizeTo;        // --resize <w> <h>: grow the window after start
+    // Where the window OPENS (docs/TESTING.md "Window placement", the Godot
+    // recipe "Remembering window position and size across sessions"): the
+    // geometry it had at the last close, kept in user://window.ini. Applied in
+    // _Ready BEFORE the first frame is drawn, so there is no visible
+    // open-small-then-grow-then-move step any more (that dance was the user's
+    // complaint of 2026-10-25: "kein Resize, sondern direkt").
+    private const string WinCfgPath = "user://window.ini";
+    private Rect2I _windowAsk;             // --window <x> <y> <w> <h>: explicit, wins over the memory
+    private bool _windowNoRestore;         // --window-default: ignore the stored geometry once
+    private double _winSaveAcc;            // the "save regularly" timer of the docs' note
+    private Rect2I _winSavedRect;           // the rect already in window.ini (write only on a change)
+    private int _winSaveDbg;
+    private string _winPlacedBy = "default";
     private double _testSeek = -1.0;   // --test-seek <frac>: click the scrub bar
     private Vector2 _testMmPan;        // --test-minimap-pan <fx> <fy>: drive the view box
     private double _testScrubDrag = -1.0;  // --test-scrub-drag <frac>: drag in the bar
@@ -76,15 +94,27 @@ public partial class MapRenderer : Node2D
     // rendering smoothness can be measured (delta variance = stutter).
     private string _motionLogPath;
     private int _autoRunTest = -1;   // --run-test <N>: auto-click Run Test
+    // Dev hooks of the same family as --test-pan / --test-bar-ui: the two
+    // car-detail paths a hand would take, fired from the script, so "does a
+    // click on a car open the menu in the LIVE viewer, and does the live frame
+    // feed an open slot?" is answerable without a finger on the mouse.
+    private int _testCarHook;           // 1 = the menu, 2 = open a slot
     private StreamWriter _motionLog;
     private bool _testPan;
     private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
+    private bool _testPlay;          // --test-play: press ▶, let the motion log time it
+    /// <summary>A/B switch for the 2026-10-25 stutter measurement:
+    /// --no-play-lerp paints the raw recorded substep while still advancing
+    /// the clock, i.e. exactly what ▶ play did before the continuous cursor.
+    /// tests/pose_stutter_check.py --ab traces both on the SAME tape, so the
+    /// comparison is one switch and not two runs of two different worlds.</summary>
+    private bool _noPlayLerp;
     private bool _testSlotButtons;   // --test-slot-buttons: drive a car detail window
     private bool _testPanProbe;      // --test-pan-probe: log a scripted pan, twice
     private bool _testBarUi;         // --test-bar-ui: wheel-zoom + marker tooltip/click
     private bool _testFocusProbe;    // --test-focus-probe: review auto-focus + follow trace
     private bool _dumpAllControls;   // probe-internal: list every Control once
-    private bool _testWindowOut;     // --test-window-out: park a window illegally, let the guard answer
+    private bool _testInfoWindowOut;     // --test-window-out: park a window illegally, let the guard answer
     // --quit-on-test-done: exit IN-APP (GetTree().Quit) once a polled test
     // run finishes. Used by scripts/run_e2e.sh so the window never has to
     // be killed from outside - any kill signal (SIGTERM -> .NET abort,
@@ -103,6 +133,23 @@ public partial class MapRenderer : Node2D
     private readonly List<MeshInstance2D> _farMarkings = new();
 
     // Dash patterns from the sim (set in BuildMap; RebuildMarkings needs them).
+    /// <summary>The stamp of the ground THIS window actually drew - the same
+    /// `RoadNetwork.MapFingerprint` the tape header carries (`GameApi.cs:475`
+    /// stamps a run, `MapPayload.cs:204` answers it beside the geometry).
+    /// A tape NAMES its map rather than carrying road polygons (the user's
+    /// decision of 2026-10-25: the ground is static per run, so a reference
+    /// beats a few hundred KB per file) - and a name is only honest if it is
+    /// CHECKED. Paint the tape's cars on a foreign ground otherwise and the
+    /// review is a lie about where they drove, so a v2-vs-v2 mismatch
+    /// REFUSES the picture (`ReviewFeed` returns, the HUD says why).
+    /// A stamp without the `v2:` prefix predates the wide fingerprint - the
+    /// old hash covered segment endpoints/width/oneway and a sign COUNT only,
+    /// so `level`, a sign's type and a sign's POSITION were invisible to it,
+    /// AND its spaces were truncated by the header's own parse. Those tapes
+    /// load with a tag, not a refusal: unknown is not wrong.</summary>
+    private string _drawnMapHash = "";
+    private bool _mapMismatch;
+    private bool _ignoreMapHash;    // --ignore-map-hash: show it anyway
     private float _cDash = 3f, _cGap = 3f, _lDash = 2f, _lGap = 4f,
                   _pDash = 1f, _pGap = 1f;
 
@@ -260,6 +307,14 @@ public partial class MapRenderer : Node2D
     // (jump after bursts, decelerate after gaps). Only sustained drift
     // (sim slower/faster than real time) corrects the rate.
     private double _simNow = double.NegativeInfinity;
+    /// <summary>Who owns the render clock for this frame. The live stream has
+    /// to be ESTIMATED (samples land at network rate, so a free-running clock
+    /// plus a bounded pull is what makes it smooth); a source that STATES a
+    /// time — the tape cursor — IS that time, and running an estimate on top
+    /// of it puts two clocks in one frame, disagreeing by a frame's worth of
+    /// drift. Measured as frames painted a substep ahead and then back:
+    /// tests/pose_stutter_check.py.</summary>
+    private bool _sourceOwnsClock;
     private double _lastFrameWall = 0;
     private double _rateRefSim = -1;     // newest sample at last rate update
     private double _rateRefWall = 0;
@@ -305,7 +360,18 @@ public partial class MapRenderer : Node2D
     // A focus the OPERATOR gave the client by hand (--center, --zoom, F, a drag)
     // beats the run's: `_focusManual` latches on the first such input, so an
     // announced focus cannot undo a deliberate choice mid-run.
-    private string _tFocusLabel = "", _tFocusKind = "car", _tFocusName = "";
+    private string _tFocusLabel = "", _tFocusKind = "car", _tFocusName = "", _tFocusDesc = "";
+    /// <summary>The test-info WINDOW (docs/TESTING.md §5, the user's decision of
+    /// 2026-10-25): a watching human must know WHICH test runs, WHY, and whether
+    /// its goal was reached. `_testVerdict` holds the filed verdict of the
+    /// CURRENT test (matched on the focus LABEL inside `test_results`, so a
+    /// verdict of another scenario can never be shown as this one's state);
+    /// empty means still running.</summary>
+    private string _testVerdict = "";
+    private int _testDbg, _testDbg2;
+    private Window _testInfoWin;
+    private ColorRect _testBg, _testChip;
+    private Label _testPurpose, _testWatch, _testState, _testNums, _testChipIcon;
     // The car the scenario STAGED under that role name (focus "name_uid"). The
     // name alone is not a key: roles are reused from test to test.
     private long _tFocusNameUid;
@@ -334,6 +400,12 @@ public partial class MapRenderer : Node2D
         // derived from /state body_corners. 0 = not known yet.
         public float CollLenM, CollWidM;
         public bool InContact;   // crashed (pinned against another car)
+        // The two facts the CAR DETAIL window shows that a sprite does not
+        // need: who holds this car, and which rule caps it. Parsed from the same
+        // `cars[]` entries as the blinkers, so a LIVE detail slot can show the
+        // same chain the reviewer reads off the tape.
+        public long HeldBy;
+        public string CapKey = "";
     }
     private readonly Dictionary<long, CarMeta> _carMeta = new();
     // Small per-car HUD label in world space above the car's nose.
@@ -440,6 +512,7 @@ public partial class MapRenderer : Node2D
     public override void _Ready()
     {
         _godotGen = ReadGodotGen();   // baseline for the clean-quit check
+
         // User args after "--": parsed FIRST - the source selection decides
         // how map + state are fetched. --screenshot <path> saves the viewport
         // a moment after the map is built (the visual check of AGENTS.md
@@ -534,8 +607,24 @@ public partial class MapRenderer : Node2D
                 _testBarUi = true;
             else if (args[i] == "--test-jog")
                 _testJog = true;
+            else if (args[i] == "--ignore-map-hash")
+                _ignoreMapHash = true;
+            else if (args[i] == "--tape-live")
+                // The live window's PICTURE from the tip of a tape that is still
+                // being written - the unification of viewer and reviewer (docs/
+                // SIMULATIONS_REVIEWER.md → "One client, one data source", the
+                // user's decision of 2026-10-25): the scrub bar, the cursor and
+                // the rate dropdown exist here too. This is a SOURCE, not a mode:
+                // it does NOT set `_review`, because the live surface (speed,
+                // flow, the test runner) describes the same run the picture shows
+                // and must stay on screen.
+                _tapeLive = true;
+            else if (args[i] == "--test-play")
+                _testPlay = true;
+            else if (args[i] == "--no-play-lerp")
+                _noPlayLerp = true;
             else if (args[i] == "--test-window-out")
-                _testWindowOut = true;
+                _testInfoWindowOut = true;
             else if (args[i] == "--test-minimap-pan" && i + 2 < args.Length)
             {
                 // Dev hook (same family as --test-seek and --test-scrub-drag):
@@ -546,6 +635,19 @@ public partial class MapRenderer : Node2D
                 _testMmPan = new Vector2(float.Parse(args[i + 1]), float.Parse(args[i + 2]));
                 i += 2;
             }
+            else if (args[i] == "--window" && i + 3 < args.Length)
+            {
+                // Open HERE and at this size, once, before the first frame:
+                // `--window <x> <y> <w> <h>` (desktop coordinates, the same
+                // space Window.Position/Size use). Overrides the remembered
+                // geometry for this run - and, like a hand on the border, it
+                // becomes the NEW remembered geometry at the next close.
+                _windowAsk = new Rect2I(int.Parse(args[i + 1]), int.Parse(args[i + 2]),
+                                        int.Parse(args[i + 3]), int.Parse(args[i + 4]));
+                i += 4;
+            }
+            else if (args[i] == "--window-default")
+                _windowNoRestore = true;    // ignore user://window.ini for this run
             else if (args[i] == "--resize" && i + 2 < args.Length)
             {
                 // Change the window size a moment after start. A HUD that
@@ -556,6 +658,10 @@ public partial class MapRenderer : Node2D
                 _resizeTo = new Vector2I(int.Parse(args[i + 1]), int.Parse(args[i + 2]));
                 i += 2;
             }
+            else if (args[i] == "--test-car-menu")
+                _testCarHook = 1;
+            else if (args[i] == "--test-car-slot")
+                _testCarHook = 2;
             else if (args[i] == "--quit-on-test-done")
                 _quitOnTestDone = true;
             else if (args[i] == "--motionlog" && i + 1 < args.Length)
@@ -600,6 +706,15 @@ public partial class MapRenderer : Node2D
             }
         }
 
+        // The window's opening geometry, stated ONCE, before the first frame is
+        // drawn (and before the HUD measures itself against the viewport, and
+        // before the map fits itself to the window): the rect it was closed with
+        // last time, or the `--window` of this run, or the default. A later
+        // resize would repaint the whole HUD and show the jump the user asked to
+        // be rid of - and it is this point in `_Ready` that makes the difference,
+        // since nothing has reached the screen yet.
+        RestoreWindowPlacement();
+
         // Phase 7: pick the communication method. Embedded mode creates the
         // SimHost FIRST (its _Ready runs synchronously on AddChild: network,
         // sim thread and embedded REST API are up before we fetch anything).
@@ -616,31 +731,68 @@ public partial class MapRenderer : Node2D
 
         // Review mode: load the tape BEFORE anything is fetched, and build its
         // HUD (the two-line readout + the scrub bar with the fluidity curve).
-        if (_review)
+        // A review client that gets NO map (no host, `--source http`) still
+        // draws the tape's cars: the ground is missing, the readout says the
+        // map is unverifiable (`--drawnMapHash` empty). That is the honest
+        // half of "the reviewer survives the host dying" — the cars survive,
+        // the ground does not, and nothing may pretend otherwise.
+        if (_review || _tapeLive)
         {
-            string tape = _reviewPath;
-            if (tape.Length == 0)
-                tape = NewestTape();
-            if (tape.Length > 0 && LoadTape(tape))
+            // The reviewer and the live window are ONE instrument; what differs
+            // is the SOURCE. A file (`--review [path]`) is loaded whole; the
+            // live window's source is the host's GROWING tape (`--tape-live`),
+            // which arrives by hops instead of in one read - and there is nothing
+            // to fall back to when a hop has not landed yet, because the tape
+            // starts with the sim (decision (a) of 2026-10-25: every run is
+            // recorded, so the live view is never without a picture).
+            if (_tapeLive)
             {
-                // Index the tape ONCE - every per-frame scan of the whole
-                // run is what put the review window at ~2 fps.
-                BuildTapeIndex();
-                GD.Print($"REVIEW of {TapeNameOf(tape)}: {_tape.Count} substeps, " +
-                         $"dt {_tapeDt:F6} s, map {_tapeMap} #{_tapeHash}");
+                _tapeFirstStep = -1; _tapeHead = -1; _deliveredStep = -1;
+                _playing = true;          // the cursor chases the head at the dialled rate
+                _cursor = 0; _playPos = 0.0;
+                GD.Print("REVIEW-SOURCE live tape tip (no file loaded): " +
+                         $"recording={DrivingGame.Sim.RunTape.Recording}");
             }
             else
             {
-                _review = false;
-                GD.Print("!! review: no tape readable - falling back to the live view");
+                string tape = _reviewPath;
+                if (tape.Length == 0)
+                    tape = NewestTape();
+                if (tape.Length > 0 && LoadTape(tape))
+                {
+                    // Index the tape ONCE - every per-frame scan of the whole
+                    // run is what put the review window at ~2 fps.
+                    BuildTapeIndex();
+                    GD.Print($"REVIEW of {TapeNameOf(tape)}: {_tape.Count} substeps, " +
+                             $"dt {_tapeDt:F6} s, map {_tapeMap} #{_tapeHash}");
+                }
+                else if (!_tapeLive)
+                {
+                    _review = false;
+                    GD.Print("!! review: no tape readable - falling back to the live view");
+                }
             }
             BuildReviewHud();
-            BuildRunPicker();
+            if (!_tapeLive)
+                BuildRunPicker();   // a live session has ONE run: the current one
+            if (_tapeLive && _simHost == null)
+            {
+                // The http half of the live tape source: ONE node (see `RequestTapeTip`
+                // in the reviewer part - a hop carries up to 24 substeps, so one
+                // request per rendered frame is already 2.4 substeps/frame against
+                // the sim's 60/s). Kick it once here; the response rearms it.
+                _tipHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
+                AddChild(_tipHttp);
+                _tipHttp.RequestCompleted += (id, code, hdr, body) =>
+                    OnTapeTipResponse(id, code, hdr, body);
+                RequestTapeTip();
+            }
             // A review window draws the TAPE, so a live sim beside it is
             // irrelevant to the picture - and the live surface (speed label,
             // flow, test runner) is hidden per frame. ⏹ stop is what freezes
             // the host, and only when the user presses it (docs/
-            // SIMULATIONS_REVIEWER.md).
+            // SIMULATIONS_REVIEWER.md). `--tape-live` keeps the live surface:
+            // its picture and the live sim are the same run.
         }
 
         // The window title carries the REST port: two windows of this
@@ -648,6 +800,7 @@ public partial class MapRenderer : Node2D
         // a scratch run look identical otherwise, which made "which map is
         // this?" unanswerable from the screen.
         var port = embedded ? _embeddedPort : PortOfUrl(MapUrl);
+        _apiPort = port;      // the host THIS window talks to - see RunTestUrlOf()
         if (port > 0)
         {
             var title = GetTree().Root.Title;
@@ -698,6 +851,19 @@ public partial class MapRenderer : Node2D
             _stateHttpB = new HttpRequest { UseThreads = true, Timeout = 1.0 };
             AddChild(_stateHttpA);
             AddChild(_stateHttpB);
+            if (_tapeLive)
+            {
+                // The live tape hop: ONE node (see `RequestTapeTip` in the
+                // reviewer part - a hop carries 24 substeps, so a single
+                // request per frame is already ~2.4 substeps/frame against
+                // the sim's 60/s; the state pair needs two because a /state
+                // answer carries exactly one).
+                _tipHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
+                AddChild(_tipHttp);
+                _tipHttp.RequestCompleted += (id, code, hdr, body) =>
+                    OnTapeTipResponse(id, code, hdr, body);
+                RequestTapeTip();
+            }
             _stateHttpA.RequestCompleted += (id, code, hdr, body) =>
                 OnStateResponse(code, body, _stateHttpB);
             _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
@@ -720,16 +886,22 @@ public partial class MapRenderer : Node2D
         AddChild(_cmdHttp);
         _cmdHttp.RequestCompleted += (id, code, hdr, body) =>
             OnCmdResponse(code, body);
-        if (!_review) BuildRunTestUi();   // the reviewer has its own surface
+        if (!_review)
+        {
+            BuildTestInfo();    // ONE test surface: info rows + run controls
+        }
 
         // --run-test <N>: fill the field and fire the same code path as a
         // button click, a moment after the UI is built.
         if (_autoRunTest > 0)
-            GetTree().CreateTimer(1.0).Timeout += () =>
-            {
-                _testInput.Text = _autoRunTest.ToString();
-                RunTestFromUi();
-            };
+            GetTree().CreateTimer(1.0).Timeout += () => StartTestNumber(_autoRunTest);
+
+        // The car hooks fire once the scenario has had time to put cars on the
+        // map (`--run-test` starts at 1.0 s, the suite teleports within the
+        // second after) - 6 s in, polled by the timer rather than a blind sleep
+        // on the sim, because the check itself reports "no car yet" honestly.
+        if (_testCarHook != 0)
+            GetTree().CreateTimer(6.0).Timeout += DoTestCarHook;
 
         // --quit-on-test-done: watch /run_test from the start (the run may
         // be launched by scripts/run_e2e.sh, not by this window) and quit
@@ -782,6 +954,37 @@ public partial class MapRenderer : Node2D
                     GD.Print($"TEST-JOG +2.0s after release cursor={_cursor}");
                     if (_screenshotPath != null) SaveShot(_screenshotPath);
                 };
+            };
+        }
+
+        if (_testPlay)
+        {
+            // Dev hook (family of --test-jog): press ▶ a moment after the tape
+            // loaded and LEAVE it running, so "does the picture advance
+            // smoothly at 1x" is answered by the per-frame pose line of the
+            // motion log rather than by an eye on a 144 Hz screen —
+            // tests/pose_stutter_check.py drives exactly this.
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                StartPlay();
+                GD.Print($"TEST-PLAY playing={_playing} cursor={_cursor} " +
+                         $"rate={_playRate:F1}x dt={_tapeDt:F6} s tape={_tape.Count} substeps");
+                // And what the clock does from there: a play that STARTS is
+                // not yet a play that RUNS, and the only honest witness is the
+                // state sampled over time. Both addresses go in the line — the
+                // CURSOR index and the STEP it points at — because the painted
+                // time is derived from the step, and a window can be smooth on
+                // one clock and wrong on the other.
+                for (int s = 1; s <= 4; s++)
+                {
+                    int at = s;      // the loop variable must not be captured
+                    GetTree().CreateTimer(at).Timeout += () => GD.Print(
+                        $"TEST-PLAY +{at}s playing={_playing} cursor={_cursor} " +
+                        $"step={(_cursor >= 0 && _cursor < _tape.Count ? _tape[_cursor].Step : -1)} " +
+                        $"playPos={_playPos:F3} tape={_tape.Count} " +
+                        $"simNow={_simNow:F4} renderTarget={_renderTarget:F4} " +
+                        $"dt={_lastTickDelta * 1000:F2}ms");
+                }
             };
         }
 
@@ -1281,7 +1484,7 @@ public partial class MapRenderer : Node2D
             };
         }
 
-        if (_testWindowOut)
+        if (_testInfoWindowOut)
         {
             // Dev hook (same family as --test-pan): put windows somewhere a
             // hand is not allowed to leave them - partly out of the main
@@ -1451,6 +1654,15 @@ public partial class MapRenderer : Node2D
         _flagNodes.Clear();
         _lastFlagFp = "";
         ClearCars();
+
+        // The stamp of the ground about to be drawn, BEFORE the geometry:
+        // the check of a tape against it must run even when the payload has
+        // no geometry the tape could match (a foreign map), and drawing that
+        // foreign ground and then refusing the picture is exactly what a
+        // mismatch looks like on screen.
+        if (root.TryGetProperty("map_fingerprint", out var mfEl))
+            _drawnMapHash = mfEl.GetString();
+        CheckTapeAgainstMap();
 
         var bg = new Color(34 / 255f, 120 / 255f, 34 / 255f);
         if (root.TryGetProperty("bg_color", out var bgEl))
@@ -1898,8 +2110,24 @@ public partial class MapRenderer : Node2D
             float when = Mathf.Max(0.6f, _shotDelay - 1.5f);
             GetTree().CreateTimer(when).Timeout += () =>
             {
-                GetWindow().Size = _resizeTo;   // position stays where it is
-                GD.Print($"window resized to {_resizeTo} (--resize)");
+                // Clamped to the real screen (the --watch size of 3393x1908 is
+                // already near a 2560x1440 desktop): asking Godot for more than
+                // the display puts part of the window off-screen and the HUD
+                // rows (laid out from GetVisibleRect) sit in the invisible band.
+                var scr = DisplayServer.ScreenGetSize();
+                var w = (int)_resizeTo.X;
+                var h = (int)_resizeTo.Y;
+                if (scr.X > 0 && w > scr.X - 20) w = scr.X - 20;
+                if (scr.Y > 0 && h > scr.Y - 20) h = scr.Y - 20;
+                if (w < 320) w = 320;
+                if (h < 200) h = 200;
+                GetWindow().Size = new Vector2I(w, h);
+                // Centre it on the screen, so the doubled window keeps the
+                // title bar and both HUD corners inside the visible area.
+                GetWindow().Position = new Vector2I((scr.X - w) / 2, (scr.Y - h) / 2);
+                GD.Print($"window resized to {w}x{h} (--resize, clamped to " +
+                         $"screen {scr.X}x{scr.Y}), centred at " +
+                         $"{GetWindow().Position.X},{GetWindow().Position.Y}");
             };
         }
     }
@@ -2018,6 +2246,16 @@ public partial class MapRenderer : Node2D
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /// <summary>The /run_test URL of THE HOST THIS WINDOW IS ATTACHED TO.
+    /// `RunTestUrl` names :5001 exactly like `MapUrl`/`StateUrl` do, but the
+    /// run controls have to reach the server the window actually talks to: a
+    /// session started on another port (`scripts/open.sh --port 5011`, an
+    /// embedded probe) clicked "Run Test" into the void - measured 2026-10-25
+    /// on :5035, where the click produced neither a run nor a log line, because
+    /// the request went to a free :5001.</summary>
+    string RunTestUrlOf() =>
+        $"http://127.0.0.1:{(_apiPort > 0 ? _apiPort : PortOfUrl(RunTestUrl))}/run_test";
 
     /// <summary>The port a REST URL names ("http://127.0.0.1:5001/map" ->
     /// 5001); 0 when it does not name one.</summary>
@@ -2228,9 +2466,9 @@ public partial class MapRenderer : Node2D
                     : ((InputEventMouseMotion)e).GlobalPosition;
             GD.Print($"PAN-INPUT {what} pos=({pos.X:F0},{pos.Y:F0}) " +
                      $"global=({glb.X:F0},{glb.Y:F0}) " +
-                     $"review={_review} dragging={_dragging} stripDrag={_stripDrag} barTop={_barTop:F0}");
+                     $"tape={_review || _tapeLive} dragging={_dragging} stripDrag={_stripDrag} barTop={_barTop:F0}");
         }
-        if (_review) ReviewInput(e);
+        if (_review || _tapeLive) ReviewInput(e);
         if (_testPanProbe && e is not InputEventKey && _review)
             GD.Print($"PAN-INPUT   after ReviewInput: dragging={_dragging} " +
                      $"stripDrag={_stripDrag} pan=({_reviewPan.X:F1},{_reviewPan.Y:F1})");
@@ -2264,6 +2502,14 @@ public partial class MapRenderer : Node2D
                 {
                     if (_followUid.HasValue) { _followUid = null; _autoFollow = false; _tFocusManual = true; }
                     else if (_carNodes.Count > 0) _followUid = _carNodes.Keys.Min();
+                }
+                else if (k.Keycode == Key.T)     // the test window out of the way, and back
+                {
+                    if (_testInfoWin != null)
+                    {
+                        _testInfoWin.Visible = !_testInfoWin.Visible;
+                        GD.Print($"TEST-INFO-{(_testInfoWin.Visible ? "SHOWN" : "HIDDEN")} (T key)");
+                    }
                 }
             }
         }
@@ -2299,7 +2545,7 @@ public partial class MapRenderer : Node2D
                              $"stripDrag={_stripDrag} -> " +
                              ((_review && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
                               ? "STRIP owns it, no grab" : "grab starts"));
-                if (_review && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
+                if ((_review || _tapeLive) && (mb.Position.Y > _barTop - 6.0 || _stripDrag))
                 {
                     _stripDrag = mb.Pressed;      // the strip owns it, alone
                     _dragging = false;            // no grab starts
@@ -2314,7 +2560,7 @@ public partial class MapRenderer : Node2D
                     // the run's declared focus does not re-aim the window
                     // (docs/TESTING.md "Camera focus"). --focus / --center set
                     // the same latch, so there is one rule: the operator wins.
-                    if (mb.Pressed && !_review) _tFocusManual = true;
+                    if (mb.Pressed && !_review && !_tapeLive) _tFocusManual = true;
                     _dragStartMouse = mb.Position;
                     _dragStartCam = ClampViewCentre(_cam.GlobalPosition);
                     _dragStartPan = _reviewPan;
@@ -2328,7 +2574,7 @@ public partial class MapRenderer : Node2D
                     // the hand's for THIS scenario (src becomes "the hand (pin)")
                     // and the recording re-claims it at the next test boundary
                     // (FocusHandoff).
-                    if (mb.Pressed && _review && _mmAsk == null)
+                    if (mb.Pressed && (_review || _tapeLive) && _mmAsk == null)
                     {
                         _mmAsk = _cam.GlobalPosition;
                         _reviewPan = Vector2.Zero;
@@ -2357,7 +2603,7 @@ public partial class MapRenderer : Node2D
             // substep, so writing the drag to the camera is undone
             // immediately - panning did nothing at all. The drag belongs to
             // the pin instead: an offset the pin adds to.
-            if (_review)
+            if (_review || _tapeLive)
                 _reviewPan = _dragStartPan -
                     new Vector2(d.X / _cam.Zoom.X, d.Y / _cam.Zoom.Y);
             else
@@ -2507,13 +2753,28 @@ public partial class MapRenderer : Node2D
 
     public override void _Process(double delta)
     {
+        // "save this information regularly, so that the window state can be
+        // restored after a crash or when terminated externally" - the runner
+        // does terminate this client from outside, so the memory may not hang
+        // on the exit path alone.
+        _winSaveAcc += delta;
+        if (_winSaveAcc >= 0.5) { _winSaveAcc = 0; SaveWindowPlacement(); }
+
         // Embedded source (Phase 7): read the in-process snapshot every frame
         // and feed it through the SAME ingest path as the HTTP pipeline
         // (serialize + parse keeps state application single-sourced; the cost
         // is negligible vs an HTTP round trip - profiled at G5 via the EMBED
         // motionlog line).
-        if (_review)
+        // Property of the SOURCE, not of a window: the day the live view reads
+        // the tip of a growing tape, the tape owns the clock here too.
+        // Property of the SOURCE, not of a window: a source that STATES a time
+        // (a tape, file or tip) IS that time; the live `/state` stream has to be
+        // ESTIMATED because samples land at network rate.
+        _sourceOwnsClock = _review || _tapeLive;
+        if (_review || _tapeLive)
         {
+            if (_tapeLive)
+                PullTapeTip();
             ReviewTick(delta);
         }
         else if (_simHost != null)
@@ -2775,6 +3036,8 @@ public partial class MapRenderer : Node2D
                     m.BlinkR = c.TryGetProperty("blinker_right", out var br) && br.GetBoolean();
                     m.Hazard = c.TryGetProperty("hazard", out var hz) && hz.GetBoolean();
                     m.Braking = c.TryGetProperty("braking", out var bk2) && bk2.GetBoolean();
+                    m.HeldBy = c.TryGetProperty("held_by", out var hbC) ? hbC.GetInt64() : 0L;
+                    m.CapKey = c.TryGetProperty("cap_key", out var ckC) ? ckC.GetString() ?? "" : "";
                     if (_focusRole.Length > 0 || _focusName.Length > 0)
                     {
                         if (c.TryGetProperty("parking", out var pkv) &&
@@ -2939,18 +3202,55 @@ public partial class MapRenderer : Node2D
                     v.ValueKind == JsonValueKind.Number ? (long)v.GetDouble() : 0L;
                 var f = (kind: Str("kind"), label: Str("label"),
                          scenario: Str("scenario"), name: Str("name"),
+                         desc: Str("desc"),
                          x: Dbl("x"), y: Dbl("y"),
                          zoom: DblN("zoom", 0.0), uid: Lng("uid"),
                          nameUid: Lng("name_uid"));
-                if (f.label != _tFocusLabel)
+                if (f.label != _tFocusLabel || f.desc != _tFocusDesc)
                 {
                     _tFocusLabel = f.label;
                     _tFocusKind = f.kind; _tFocusName = f.name;
+                    _tFocusDesc = f.desc;
                     _tFocusX = f.x; _tFocusY = f.y; _tFocusZoom = f.zoom; _tFocusUid = f.uid;
                     _tFocusNameUid = f.nameUid;
                     ApplyFocus();
+                    TestInfoUpdate();      // the panel follows the test (see below)
                 }
             }
+
+            // The verdict of the CURRENT test, if the suite has filed one
+            // (POST /test_result -> `test_results` in /state, also on the tape
+            // as a `# result` note). Matched on the LABEL, not on the list
+            // position: a full suite appends one note per scenario, and taking
+            // the last entry while a later test is still running would show
+            // another test's verdict as this one's state.
+            _testVerdict = "";
+            if (root.TryGetProperty("test_results", out var tr) &&
+                tr.ValueKind == JsonValueKind.Array && _tFocusLabel.Length > 0)
+                foreach (var r in tr.EnumerateArray())
+                {
+                    if (r.ValueKind != JsonValueKind.Object) continue;
+                    if (!(r.TryGetProperty("label", out var rl) &&
+                          rl.ValueKind == JsonValueKind.String) ||
+                        rl.GetString() != _tFocusLabel) continue;
+                    bool pass = r.TryGetProperty("passed", out var pv) &&
+                        pv.ValueKind == JsonValueKind.True;
+                    string reason = r.TryGetProperty("reason", out var rr) &&
+                        rr.ValueKind == JsonValueKind.String ? rr.GetString() : "";
+                    double simS = r.TryGetProperty("sim_s", out var ss) &&
+                        ss.ValueKind == JsonValueKind.Number ? ss.GetDouble() : 0.0;
+                    int xng = r.TryGetProperty("crossings", out var xc) &&
+                        xc.ValueKind == JsonValueKind.Number ? (int)xc.GetDouble() : 0;
+                    int off = r.TryGetProperty("off_road", out var ofc) &&
+                        ofc.ValueKind == JsonValueKind.Number ? (int)ofc.GetDouble() : 0;
+                    _testVerdict = (pass ? "✅ passed" : "❌ failed: " + reason) +
+                        $" at sim {simS:F1} s · wall {(r.TryGetProperty("wall_s", out var ws) && ws.ValueKind == JsonValueKind.Number ? ws.GetDouble() : 0.0):F1} s" +
+                        $" · crossings {xng} · off-road {off}";
+                    break;
+                }
+
+            TestInfoUpdate();   // every poll: the verdict can arrive while the focus stays
+            UpdateDetailsLive();   // an open detail slot follows the live frames
 
             // Fleet flow (the quality metric of 2026-10-19): metres driven by
             // the whole fleet per second of sim time, and the absolute total
@@ -3137,7 +3437,14 @@ public partial class MapRenderer : Node2D
         // (2 samples in one frame, then 3 empty ones) cannot wiggle it.
         double nowWall = Time.GetTicksMsec() / 1000.0;
         double frameDt = Math.Max(0, nowWall - _lastFrameWall);
-        if (_simNow > double.NegativeInfinity)
+        if (_sourceOwnsClock)
+        {
+            // Nothing to estimate: `_simNow` arrived stated by the source, so
+            // the delay below is the only thing between it and the render
+            // target. (Rate measurement and servo stay live-ingest business.)
+            _lastFrameWall = nowWall;
+        }
+        else if (_simNow > double.NegativeInfinity)
         {
             // Rate bounds scale with the announced warp; an unbounded run
             // (--fast) is measured like any other stream.
@@ -3419,6 +3726,30 @@ public partial class MapRenderer : Node2D
     /// local frame, node origin = rear axle so the body centre sits
     /// RearAxleOffsetM ahead) against the world point under the cursor; the
     /// nearest hit wins. A click on empty space clears the selection.</summary>
+    /// <summary>Fire the live car paths from the script (`--test-car-menu`,
+    /// `--test-car-slot`). The screen position is the camera's own transform,
+    /// inverted: screen = (world − cam) × zoom + half the viewport.</summary>
+    void DoTestCarHook()
+    {
+        if (_carBuf.Count == 0)
+        {
+            GD.Print("TEST-CAR no car on the map yet - nothing to pick " +
+                     "(start a scenario with --run-test <n>)");
+            return;
+        }
+        long uid = _selectedUid ?? _carBuf.Keys.Min();
+        if (_testCarHook == 1)
+        {
+            var vp = GetViewport().GetVisibleRect().Size;
+            var buf = _carBuf[uid];
+            var fr = buf[^1];
+            var scr = (W(fr.X, fr.Y) - _cam.GlobalPosition) * _cam.Zoom + vp / 2f;
+            SelectCarAt(scr);       // the same entry point a click release uses
+            return;
+        }
+        OpenDetailWindow(uid);
+    }
+
     void SelectCarAt(Vector2 screenPos)
     {
         var vp = GetViewport().GetVisibleRect().Size;
@@ -3449,6 +3780,15 @@ public partial class MapRenderer : Node2D
             if (d < bestD) { bestD = d; best = kv.Key; }
         }
         _selectedUid = best;
+        // A click on a car offers what the reviewer's click offers: the MENU
+        // that decides WHERE this car gets shown - an already open detail slot
+        // or a new one (docs/CAR_DETAIL_WINDOW.md). The live viewer had only a
+        // highlight, which is the asymmetry the user named on 2026-10-25
+        // ("die Features, die wir sonst nur im Reviewerfenster haben: ein Auto
+        // anklicken und über das Pop-up-Menü auswählen, dass es in den
+        // Cardetails mitangezeigt wird").
+        if (best.HasValue && !_review)
+            OpenDetailMenu(screenPos, best.Value);
     }
 
     /// <summary>Stack the overlays under the minimap, top to bottom: speed
@@ -3615,7 +3955,7 @@ public partial class MapRenderer : Node2D
         // Review mode owns its camera: the view belongs to the TAPE frame under
         // the cursor (or to an explicit --center), never to whichever car the
         // live sim happens to have bound.
-        if (_review) return;
+        if (_review || _tapeLive) return;
         // --focus <uid>: the view belongs to the requested car (the runner
         // passes the last crashed uid), so it outranks the auto-crash latch.
         if (_focusUid != 0L && _carNodes.ContainsKey(_focusUid))
@@ -3831,10 +4171,20 @@ public partial class MapRenderer : Node2D
         float rad = Mathf.DegToRad(h);
         float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward
         float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
-        Vector2 b = W(x + rx * 3f, y + ry * 3f);           // base centre (3 m off)
-        var p1 = W(x + rx * 3f - fx * 1.3f, y + ry * 3f - fy * 1.3f);
-        var p2 = W(x + rx * 3f + fx * 1.3f, y + ry * 3f + fy * 1.3f);
-        var ap = W(x + rx * 5.2f, y + ry * 5.2f);          // apex (2.2 m further)
+        // The pennant's FOOT IS the arrival mark: it is drawn AT the point the
+        // sim stated (`SimEngine.cs` FlagRed: the centre of the line the car
+        // must reach - the driving line for a running test, the parked car's
+        // front-bumper line for the parking scenario). It used to be pushed 3 m
+        // (apex 5.2 m) to the right of that point ON TOP of the sim's own
+        // kerb offset, so the flag stood ~7 m off the centreline - in the grass
+        // beside the road - while the suite's arrival test measured a point in
+        // the LANE. Picture and criterion are now the same place (docs/TESTING.md
+        // §3, the user's decision of 2026-10-25: the red flag goes into the
+        // lane the car has to arrive in, and driving against it ends the test).
+        var b = W(x, y);
+        var p1 = W(x + fx * 0.9f, y + fy * 0.9f);
+        var p2 = W(x - fx * 0.9f, y - fy * 0.9f);
+        var ap = W(x + rx * 2.4f, y + ry * 2.4f);           // cloth leans right
         var poly = new Polygon2D
         {
             Color = fill,
@@ -3861,7 +4211,7 @@ public partial class MapRenderer : Node2D
     /// per-frame re-assert would fight every hand that touches the mouse.</summary>
     void ApplyFocus()
     {
-        if (_review || _tFocusManual) return;      // the hand outranks the run
+        if (_review || _tapeLive || _tFocusManual) return;      // the hand outranks the run
         if (_tFocusKind == "loc")
         {
             // A PLACE is the subject: no car is followed at all. Same effect as
@@ -3924,6 +4274,122 @@ public partial class MapRenderer : Node2D
     /// i.e. the framing the follow camera has always had, made explicit.</summary>
     internal const double CarFocusViewM = 120.0;
 
+    /// <summary>The motion log is a buffered writer: a run that ends through
+    /// the generation-file quit (not through --screenshot) would lose every
+    /// frame still in the buffer — which, for a trace, is the whole tail.
+    /// Disposing here flushes it on EVERY clean exit path.</summary>
+    /// <summary>Open where the window was last closed (the pattern of
+    /// docs/creating_applications "Remembering window position and size across
+    /// sessions", which Godot does not do for you): `user://window.ini` holds
+    /// screen/position/size, this reads them and states the rect ONCE, before
+    /// the first frame. Three escape hatches, in this order of rank:
+    /// `--window x y w h` (explicit), `--window-default` (ignore the memory),
+    /// and a stored rect that no longer touches any connected screen - a
+    /// monitor that has been unplugged since must not leave the window
+    /// unreachable, so that falls back to the default too. The default is the
+    /// geometry the user asked for on 2026-10-25: 2000x1000 at (100, 100).</summary>
+    void RestoreWindowPlacement()
+    {
+        var w = GetWindow();
+        if (w == null) return;
+        var def = new Rect2I(100, 100, 2000, 1000);
+        var rect = def;
+        _winPlacedBy = "default";
+        var cfg = new ConfigFile();
+        int screen = -1;
+        if (!_windowNoRestore && cfg.Load(WinCfgPath) == Error.Ok)
+        {
+            screen = (int)cfg.GetValue("main", "screen", -1);
+            var pos = (Vector2I)cfg.GetValue("main", "position", Vector2I.Zero);
+            var size = (Vector2I)cfg.GetValue("main", "size", Vector2I.Zero);
+            var stored = new Rect2I(pos, size);
+            if (size.X >= 320 && size.Y >= 200 && TouchesAScreen(stored))
+            {
+                rect = stored;
+                _winPlacedBy = "remembered";
+                if (screen >= 0 && screen < DisplayServer.GetScreenCount())
+                    w.CurrentScreen = screen;    // the monitor it was closed on
+            }
+            else
+            {
+                var scr = "";
+                for (int i = 0; i < DisplayServer.GetScreenCount(); i++)
+                    scr += $" {i}={DisplayServer.ScreenGetUsableRect(i)}";
+                GD.Print($"WINDOW-PLACEMENT stored {stored} is off every screen({scr}) " +
+                         "- using the default");
+            }
+        }
+        if (_windowAsk.Size.X >= 320 && _windowAsk.Size.Y >= 200)
+            rect = _windowAsk;          // an explicit rect outranks the memory
+        PlaceWindow(rect, _windowAsk.Size.X >= 320 ? "--window" : _winPlacedBy);
+    }
+
+    /// <summary>State the rect on the main window ONCE. Size first, position
+    /// last: a resize re-anchors on some window managers and would otherwise
+    /// undo the place. Every path (memory, `--window`, the default) ends here,
+    /// so the log line always says WHICH one ruled.</summary>
+    void PlaceWindow(Rect2I r, string by)
+    {
+        _winPlacedBy = by;
+        var w = GetWindow();
+        w.Size = r.Size;
+        w.Position = r.Position;
+        _winSavedRect = new Rect2I(w.Position, w.Size);   // what the file already says
+        GD.Print($"WINDOW-PLACEMENT {by}: asked pos {r.Position} size {r.Size} " +
+                 $"-> got {w.Position} {w.Size} screen {w.CurrentScreen} " +
+                 $"(cfg {ProjectSettings.GlobalizePath(WinCfgPath)})");
+    }
+
+    /// <summary>True when a rect would still be reachable: it must overlap one
+    /// connected screen by more than a sliver, otherwise the title bar - the
+    /// only handle to drag it back - can sit on a display that is gone.</summary>
+    static bool TouchesAScreen(Rect2I r)
+    {
+        for (int i = 0; i < DisplayServer.GetScreenCount(); i++)
+        {
+            var s = DisplayServer.ScreenGetUsableRect(i);   // the honest area: no menu bar, no Dock
+            var ov = s.Intersection(r);
+            if (ov.Size.X >= 200 && ov.Size.Y >= 120) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Persist the geometry to open at next time. Called from the
+    /// periodic tick AND from `_ExitTree`, because the docs' own note is right:
+    /// a quit that comes from outside (the runner's cleanup, a crash) never runs
+    /// the exit path, so saving only there would lose the last position. Skips
+    /// a minimized or absurd window so a weird state cannot poison the memory.</summary>
+    void SaveWindowPlacement()
+    {
+        var w = GetWindow();
+        if (w == null || w.Mode == Window.ModeEnum.Minimized) return;
+        if (w.Size.X < 320 || w.Size.Y < 200) return;
+        var now = new Rect2I(w.Position, w.Size);
+        if (now == _winSavedRect) return;           // a 0.5 s poll must not hammer the disk
+        var cfg = new ConfigFile();
+        cfg.Load(WinCfgPath);                       // keep any other section
+        cfg.SetValue("main", "screen", w.CurrentScreen);
+        cfg.SetValue("main", "position", w.Position);
+        cfg.SetValue("main", "size", w.Size);
+        cfg.Save(WinCfgPath);
+        _winSavedRect = now;
+        if (_winSaveDbg++ < 12 || _winSaveDbg % 20 == 0)
+            GD.Print($"WINDOW-PLACEMENT saved #{_winSaveDbg}: pos {w.Position} size {w.Size} " +
+                     $"screen {w.CurrentScreen} -> {WinCfgPath}");
+    }
+
+
+    public override void _ExitTree()
+    {
+        SaveWindowPlacement();      // the geometry of THIS close is next run's opening
+        if (_motionLog != null)
+        {
+            _motionLog.Dispose();
+            _motionLog = null;
+        }
+        base._ExitTree();
+    }
+
     void SaveShot(string path)
     {
         _motionLog?.Dispose();
@@ -3934,73 +4400,334 @@ public partial class MapRenderer : Node2D
         GetTree().Quit();
     }
 
-    // ---------------- test-runner UI (bottom left) ----------------
+    // ---------------- the run controls, inside the test window ----------------
 
-    void BuildRunTestUi()
+    /// <summary>The run row of the test window (the user's decision of
+    /// 2026-10-25: "integriere das Test-Panel unten mit in das Test-Fenster,
+    /// das die Ergebnisse anzeigt"). It used to sit bottom-left ON THE MAP:
+    /// a place that (a) is not where you read the verdict, so starting a test
+    /// and reading its result were two different corners of the screen, and
+    /// (b) was positioned from the viewport size at build time, so it drifted
+    /// out of place on a resize. Here it is part of a window the user drags
+    /// and that is laid out in ITS OWN coordinates - the map underneath stays
+    /// the map. Children go into the window's layer, not into `AddChild`.</summary>
+    void BuildRunTestUi(CanvasLayer into)
     {
-        var layer = new CanvasLayer { Layer = 10 };
-        AddChild(layer);
-
         var sb = new StyleBoxFlat
         {
             BgColor = new Color(20 / 255f, 20 / 255f, 20 / 255f, 180f / 255f),
-            ContentMarginLeft = 7, ContentMarginRight = 7,
-            ContentMarginTop = 5, ContentMarginBottom = 5,
+            ContentMarginLeft = 8, ContentMarginRight = 8,
+            ContentMarginTop = 4, ContentMarginBottom = 4,
         };
-
-        var box = new VBoxContainer();
-        // Bottom-left corner (stretch mode is disabled: viewport == window).
-        var vp = GetViewport().GetVisibleRect().Size;
-        box.Position = new Vector2(8, vp.Y - 96);
-        layer.AddChild(box);
-
-        var row = new HBoxContainer();
-        box.AddChild(row);
-
-        var cap = new Label { Text = "Test-Nr:" };
-        cap.AddThemeFontSizeOverride("font_size", 20);
-        row.AddChild(cap);
-
-        _testInput = new LineEdit
+        // A DROPDOWN of the scenarios instead of a number field (the user's
+        // decision of 2026-10-25: "statt Eingabe einer Testnummer lieber eine
+        // Dropdown-Box mit allen verfügbaren Tests, jeweils mit der Nummer
+        // vorangestellt, und daneben der Run-Button"): typing "22" means the
+        // list is already known, and a wrong number only fails afterwards. The
+        // entries come from GET /tests, prefixed with their number, so the
+        // dropdown IS the scenario list the docs keep generated.
+        _testPick = new OptionButton
         {
-            PlaceholderText = "z.B. 22 (Stresstest)",
-            MaxLength = 4,
+            Position = new Vector2(16, 236),
+            Size = new Vector2(700, 44),
         };
-        _testInput.CustomMinimumSize = new Vector2(170, 0);
-        row.AddChild(_testInput);
-
-        _runTestBtn = new Button { Text = "Run Test" };
+        _testPick.AddThemeFontSizeOverride("font_size", 22);
+        // Clip inside the box: without this a long scenario description drew
+        // PAST the control's width and ran under the Run button next to it
+        // (visible in the 2026-10-25 screenshot of test #20).
+        _testPick.ClipText = true;
+        into.AddChild(_testPick);
+        _runTestBtn = new Button
+        {
+            Text = "Run",
+            Position = new Vector2(728, 236),
+            Size = new Vector2(136, 44),
+        };
+        _runTestBtn.AddThemeFontSizeOverride("font_size", 22);
         _runTestBtn.Pressed += RunTestFromUi;
-        row.AddChild(_runTestBtn);
-
-        // Enter in the field also starts the test.
-        _testInput.TextSubmitted += _ => RunTestFromUi();
-
+        into.AddChild(_runTestBtn);
+        _testPick.ItemSelected += _ =>
+            GD.Print($"TEST-PICK #{(_testPick.Selected >= 0 && _testPick.Selected < _testPickNums.Count
+                ? _testPickNums[_testPick.Selected] : 0)} {_testPick.GetItemText(_testPick.Selected)}");
+        var kb = new Label { Text = "list: GET /tests · T hides/shows this window" };
+        kb.Position = new Vector2(16, 292);
+        kb.AddThemeFontSizeOverride("font_size", 18);
+        kb.AddThemeColorOverride("font_color", new Color(150 / 255f, 150 / 255f, 150 / 255f));
+        into.AddChild(kb);
+        // The run-status line (what `SetRunStatus` writes): the manual run's own
+        // feedback - start messages, errors - next to the verdict it belongs to.
         _runStatus = new Label();
+        _runStatus.Position = new Vector2(16, 330);
+        _runStatus.Size = new Vector2(848, 36);
+        _runStatus.AutowrapMode = TextServer.AutowrapMode.Off;
+        // A finished run names its log file, and that path is longer than the
+        // window: elide the tail instead of cutting a word in half at the edge.
+        _runStatus.TextOverrunBehavior = TextServer.OverrunBehavior.TrimWordEllipsis;
         _runStatus.AddThemeStyleboxOverride("normal", sb);
-        _runStatus.AddThemeColorOverride("font_color",
-            new Color(1f, 1f, 0f));
-        _runStatus.AddThemeFontSizeOverride("font_size", 18);
-        box.AddChild(_runStatus);
+        _runStatus.AddThemeColorOverride("font_color", new Color(1f, 1f, 0f));
+        _runStatus.AddThemeFontSizeOverride("font_size", 20);
+        _runStatus.Visible = false;       // no message yet - see SetRunStatus
+        into.AddChild(_runStatus);
     }
 
-    void RunTestFromUi()
+    /// <summary>Fetch the scenario list once and put it in the dropdown -
+    /// `<number> · <description>`, number first, in the suite's own order, so
+    /// the window and `GET /tests` can never disagree about what test 22 is.
+    /// Its own HttpRequest: `_cmdHttp` is single-flight and must stay free for
+    /// the run/poll traffic. Bounded retries, because a client started a
+    /// moment before its host answers would otherwise show an empty list
+    /// forever - and an empty dropdown is the kind of failure nobody reads as
+    /// "not loaded yet" instead of "there are no tests".</summary>
+    void RequestTestList()
     {
-        if (_testInput == null) return;
-        if (!int.TryParse(_testInput.Text.Trim(), out int n) || n < 1)
+        if (_testsHttp == null)
         {
-            SetRunStatus("Bitte eine Test-Nummer eingeben (Liste: GET /tests)",
-                ok: false);
+            _testsHttp = new HttpRequest { UseThreads = true, Timeout = 5.0 };
+            AddChild(_testsHttp);
+            _testsHttp.RequestCompleted += (id, code, hdr, body) => OnTestListResponse(code, body);
+        }
+        _testsTries++;
+        _testsHttp.Request($"http://127.0.0.1:{_apiPort}/tests");
+    }
+
+    void OnTestListResponse(long code, byte[] body)
+    {
+        if (code != 200)
+        {
+            if (_testsTries < 8)
+                GetTree().CreateTimer(2.0).Timeout += RequestTestList;
+            else
+                SetRunStatus($"test list unavailable: GET /tests answered {code}", ok: false);
             return;
         }
-        // A click always means "interrupt whatever is running and start
-        // this test": the server kills the old test process (interrupt)
-        // before it spawns the new one. Stop the old polling chain so its
-        // responses cannot clobber the new run.
+        int added = 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(body));
+            foreach (var t in doc.RootElement.EnumerateArray())
+            {
+                int num = t.TryGetProperty("number", out var nEl) ? nEl.GetInt32() : 0;
+                string desc = t.TryGetProperty("description", out var dEl) ? dEl.GetString() ?? "" : "";
+                string key = t.TryGetProperty("key", out var kEl) ? kEl.GetString() ?? "" : "";
+                if (num < 1) continue;
+                _testPick.AddItem($"{num} \u00b7 {(desc.Length > 0 ? desc : key)}");
+                _testPickNums.Add(num);
+                added++;
+            }
+        }
+        catch (JsonException e)
+        {
+            SetRunStatus($"test list unreadable: {e.Message}", ok: false);
+            return;
+        }
+        if (added == 0)
+        {
+            if (_testsTries < 8) GetTree().CreateTimer(2.0).Timeout += RequestTestList;
+            return;
+        }
+        if (_testPick.Selected < 0) _testPick.Selected = 0;
+        // The popup inherits the button's font only for its own label; the rows
+        // need the size on the popup itself (and it exists once in the tree).
+        _testPick.GetPopup().AddThemeFontSizeOverride("font_size", 21);
+        if (_autoRunTest > 0) SelectTestInList(_autoRunTest);
+        GD.Print($"TEST-LIST {added} scenarios from GET /tests, first=" +
+                 _testPick.GetItemText(0));
+    }
+
+    /// <summary>Move the dropdown to a given test number (`--run-test`, or any
+    /// other path that starts a test without the dropdown being the source).</summary>
+    void SelectTestInList(int n)
+    {
+        int i = _testPickNums.IndexOf(n);
+        if (i >= 0) _testPick.Selected = i;
+    }
+
+    /// <summary>The test-info surface as a real, MOVABLE window (docs/TESTING.md
+    /// §5, the user's decision of 2026-10-25: "make the window a window like the
+    /// car detail window - moveable, bigger fonts, more structured, not text-only").
+    /// Title bar = the test's own identity, body = rows (purpose / watch / state)
+    /// plus a colour CHIP that answers at a glance (amber running, green passed,
+    /// red failed) - a sentence alone is text-only and needs reading. `RegisterWindow`
+    /// makes the shared `EnforceWindows` guard apply, so the box is draggable AND
+    /// can never overlap the minimap or the readout (the readout window in
+    /// MapRenderer.review.cs uses the same pattern, including the fact that a
+    /// subwindow is a Viewport and its children sit in ITS coordinates).
+    /// Always visible: it carries the run controls, so a drive WITHOUT a test
+    /// is exactly the case where you need it (its info rows then read `idle`).
+    /// `T` hides it again if it is in the way - `--run-test` and a new focus
+    /// bring it back.</summary>
+    void BuildTestInfo()
+    {
+        if (_testInfoWin != null) return;
+        _testInfoWin = new Window
+        {
+            Title = "test",
+            Transient = true,               // belongs to this client, not to the app
+            Position = new Vector2I(13, 37),
+            // Wide enough for the scenario list at a readable size, and tall
+            // enough for the rows + the run row (the user's "die Fonts sind zu
+            // klein" of 2026-10-25 is why the type grew from 19 to 24 px).
+            Size = new Vector2I(880, 396),
+        };
+        AddChild(_testInfoWin);
+        RegisterWindow(_testInfoWin);
+        var tLayer = new CanvasLayer { Layer = 1 };
+        _testInfoWin.AddChild(tLayer);
+        _testBg = new ColorRect
+        {
+            Color = new Color(14 / 255f, 16 / 255f, 22 / 255f, 250f / 255f),
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        _testBg.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        tLayer.AddChild(_testBg);
+        // The state chip: a colour answers faster than the sentence does.
+        _testChip = new ColorRect
+        {
+            Position = new Vector2(16, 122),
+            Size = new Vector2(44, 44),
+        };
+        tLayer.AddChild(_testChip);
+        _testChipIcon = new Label { Text = "\u25b6" };
+        _testChipIcon.Position = new Vector2(24, 118);
+        _testChipIcon.AddThemeFontSizeOverride("font_size", 32);
+        tLayer.AddChild(_testChipIcon);
+        _testPurpose = new Label
+        {
+            // A scenario description that does not fit the width loses its
+            // tail with "…" rather than running under the window frame.
+            TextOverrunBehavior = TextServer.OverrunBehavior.TrimWordEllipsis,
+        };
+        _testWatch = new Label();
+        _testState = new Label();
+        _testNums = new Label();
+        foreach (var l in new[] { _testPurpose, _testWatch, _testState, _testNums })
+        {
+            l.AutowrapMode = TextServer.AutowrapMode.Off;
+            // A long scenario name or a long failure reason must not run under
+            // the window frame - the row loses its tail with "…" instead.
+            l.TextOverrunBehavior = TextServer.OverrunBehavior.TrimWordEllipsis;
+            l.AddThemeColorOverride("font_color", new Color(235 / 255f, 235 / 255f, 235 / 255f));
+            l.AddThemeFontSizeOverride("font_size", 24);
+        }
+        // A WIDTH, not just a position: `TextOverrunBehavior` trims to the
+        // label's box, and an auto-sized label has no box yet - with the trim
+        // mode on and no width the four rows rendered COMPLETELY EMPTY (the log
+        // still printed their text, so only the screenshot caught it).
+        _testPurpose.Position = new Vector2(16, 14);  _testPurpose.Size = new Vector2(848, 34);
+        _testWatch.Position = new Vector2(16, 62);    _testWatch.Size = new Vector2(848, 32);
+        _testState.Position = new Vector2(76, 124);   _testState.Size = new Vector2(788, 36);
+        _testNums.Position = new Vector2(16, 186);    _testNums.Size = new Vector2(848, 30);
+        _testNums.AddThemeFontSizeOverride("font_size", 21);
+        _testNums.AddThemeColorOverride("font_color", new Color(190 / 255f, 190 / 255f, 190 / 255f));
+        tLayer.AddChild(_testPurpose);
+        tLayer.AddChild(_testWatch);
+        tLayer.AddChild(_testState);
+        tLayer.AddChild(_testNums);
+        BuildRunTestUi(tLayer);       // the run row lives here now
+        RequestTestList();            // fill the dropdown from GET /tests
+        _testInfoWin.CloseRequested += () =>
+        {
+            _testInfoWin.Visible = false;
+            GD.Print("TEST-INFO-CLOSED the current test is off screen · the next focus re-opens it");
+        };
+    }
+
+    /// <summary>Repaint the window from the current focus + the filed verdict.
+    /// Runs on EVERY ingest, not only when the focus changes: the suite files its
+    /// verdict on a LATER poll than the focus that started the test, and a window
+    /// still saying `running` once that verdict exists is the lie this surface
+    /// prevents - it is what made a finished test look alive on screen while the
+    /// car drove on past the flag (docs/TESTING.md §3: passing the red flag ENDS
+    /// a running test, the car is not asked to stop).</summary>
+    void TestInfoUpdate()
+    {
+        if (_testInfoWin == null) return;
+        if (!_testInfoWin.Visible)
+            _testInfoWin.Visible = true;
+        if (_tFocusLabel.Length == 0)
+        {
+            // No test context: a plain drive, or a manual run whose focus the
+            // suite has not announced yet. The window keeps its controls and
+            // says what it knows - grey chip, `idle`, and where the list is.
+            _testInfoWin.Title = "test";
+            _testPurpose.Text = "no test running";
+            _testWatch.Text = "start one below · the list: GET /tests";
+            _testChip.Color = new Color(0.42f, 0.45f, 0.5f);
+            _testChipIcon.Text = "\u00b7";
+            _testState.Text = "idle";
+            _testNums.Text = "";
+            return;
+        }
+        _testInfoWin.Title = $"test {_tFocusLabel}";
+        _testPurpose.Text = _tFocusDesc.Length > 0 ? _tFocusDesc : "-";
+        _testWatch.Text = _tFocusKind == "loc" ? "watch: this PLACE"
+            : _tFocusKind == "named" ? $"watch: {_tFocusName}" : "watch: the car";
+        var verdict = _testVerdict;
+        if (verdict.Length == 0)
+        {
+            _testChip.Color = new Color(1f, 0.8f, 0.2f);           // amber: running
+            _testChipIcon.Text = "\u25b6";
+            _testState.Text = "running";
+            _testNums.Text = "";
+        }
+        else
+        {
+            var bits = verdict.Split(" · ");
+            var head = bits[0];
+            bool passed = head.StartsWith("\u2705") || head.StartsWith("✅");
+            _testChip.Color = passed ? new Color(0.2f, 0.8f, 0.3f)
+                                     : new Color(0.85f, 0.2f, 0.2f);
+            _testChipIcon.Text = passed ? "\u2713" : "\u2717";
+            _testState.Text = passed ? "passed"
+                : head.Replace("❌ failed: ", "").Replace("\u274c failed: ", "");
+            _testNums.Text = bits.Length > 1
+                ? string.Join(" · ", bits, 1, bits.Length - 1) : "";
+        }
+        if (_testDbg < 6 || (verdict.Length > 0 && _testDbg2 < 2))
+        {
+            if (verdict.Length > 0) _testDbg2++; else _testDbg++;
+            GD.Print($"TEST-INFO '{_tFocusLabel}': title={_testInfoWin.Title} | purpose=" +
+                     // the row's own text already carries the word "watch:"
+                     $"{_testPurpose.Text} | {_testWatch.Text} | " +
+                     $"state={_testChipIcon.Text} {_testState.Text} | nums={_testNums.Text}");
+        }
+    }
+
+    /// <summary>The dropdown's Run button (and `Enter` anywhere it has focus):
+    /// start the selected scenario. English-only text since the user's ruling of
+    /// 2026-10-25 ("alles auf englisch") - the strings around this button used to
+    /// be the last German ones on screen.</summary>
+    void RunTestFromUi()
+    {
+        if (_testPickNums.Count == 0)
+        {
+            SetRunStatus("scenario list still loading (GET /tests) - try again in a second",
+                ok: false);
+            RequestTestList();
+            return;
+        }
+        int i = _testPick.Selected;
+        if (i < 0 || i >= _testPickNums.Count)
+        {
+            SetRunStatus("pick a scenario from the list, then Run", ok: false);
+            return;
+        }
+        StartTestNumber(_testPickNums[i]);
+    }
+
+    /// <summary>One entry point for "run this scenario", whether it came from the
+    /// dropdown, from `--run-test`, or from a click that had to queue. A press
+    /// always means "interrupt whatever is running and start THIS test": the
+    /// server kills the old test process before it spawns the new one, so the
+    /// old polling chain is stopped here as well - its responses must not
+    /// clobber the new run.</summary>
+    void StartTestNumber(int n)
+    {
+        if (n < 1) return;
         _pollActive = false;
+        SelectTestInList(n);
         _runTestBtn.Disabled = true;
-        SetRunStatus($"Starte Test #{n} (laufender Test wird unterbrochen) …",
-            ok: true);
+        SetRunStatus($"starting test #{n} (a running test is interrupted) \u2026", ok: true);
         if (_cmdHttpBusy)
         {
             // A request (poll or older start) is in flight - _cmdHttp is
@@ -4014,12 +4741,13 @@ public partial class MapRenderer : Node2D
 
     void SendRunTest(int n)
     {
+        _lastRunNum = n;
         _cmdHttpBusy = true;
         _pendingCmd = "post";
         var body = System.Text.Encoding.UTF8.GetBytes(
             $"{{\"number\": {n}, \"interrupt\": true}}");
         // RequestRaw: raw byte body + custom headers (Godot 4.7).
-        _cmdHttp.RequestRaw(RunTestUrl,
+        _cmdHttp.RequestRaw(RunTestUrlOf(),
             new[] { "Content-Type: application/json" },
             HttpClient.Method.Post, body);
     }
@@ -4041,11 +4769,10 @@ public partial class MapRenderer : Node2D
         if (_pendingCmd == "post")
         {
             _runTestBtn.Disabled = false;
-            int reqNum = int.TryParse(_testInput?.Text.Trim(), out int nn)
-                ? nn : 0;
+            int reqNum = _lastRunNum;
             if (code == 200)
             {
-                SetRunStatus($"Test #{reqNum} läuft …", ok: true);
+                SetRunStatus($"test #{reqNum} running \u2026", ok: true);
                 StartPolling();
             }
             else
@@ -4058,7 +4785,7 @@ public partial class MapRenderer : Node2D
                         err = e.GetString() ?? txt;
                 }
                 catch { /* non-JSON error body: show raw */ }
-                SetRunStatus($"Fehler: {err}", ok: false);
+                SetRunStatus($"error: {err}", ok: false);
             }
             return;
         }
@@ -4084,7 +4811,7 @@ public partial class MapRenderer : Node2D
 
         if (running && haveNumber)
         {
-            SetRunStatus($"Test #{n} läuft …", ok: true);
+            SetRunStatus($"test #{n} running \u2026", ok: true);
             ScheduleNextPoll();
         }
         else if (!haveNumber)
@@ -4104,8 +4831,8 @@ public partial class MapRenderer : Node2D
         {
             _pollActive = false;
             SetRunStatus(rc == 0
-                ? $"Test #{n} fertig ✅ (Log: {logFile})"
-                : $"Test #{n} beendet, rc={rc} ❌ (Log: {logFile})",
+                ? $"test #{n} done \u2705 (log: {logFile})"
+                : $"test #{n} finished with rc={rc} \u274c (log: {logFile})",
                 ok: rc == 0);
             if (_quitOnTestDone)
             {
@@ -4140,13 +4867,21 @@ public partial class MapRenderer : Node2D
         if (!_pollActive || _cmdHttpBusy) return;
         _cmdHttpBusy = true;
         _pendingCmd = "poll";
-        _cmdHttp.Request(RunTestUrl);
+        _cmdHttp.Request(RunTestUrlOf());
     }
 
     void SetRunStatus(string text, bool ok)
     {
         if (_runStatus == null) return;
+        // One log line per CHANGED message (the poll repeats the same text every
+        // half second), so "did the click reach the host?" is answerable from
+        // the log instead of from a label only the screen can see.
+        if (_runStatus.Text != text) GD.Print($"RUN-STATUS: {text}");
         _runStatus.Text = text;
+        // The row is a band of its own style box, so an empty one is a black
+        // bar in the window: it appears with the first message and goes when
+        // there is nothing to say.
+        _runStatus.Visible = text.Length > 0;
         _runStatus.AddThemeColorOverride("font_color",
             ok ? new Color(0.6f, 1f, 0.6f) : new Color(1f, 0.55f, 0.4f));
     }

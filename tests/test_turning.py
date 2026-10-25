@@ -85,6 +85,22 @@ END_FLAG_PROGRESS = 0.2
 # on a running-test road (kerb_offset of a 7 m road = 2.25 m), while
 # staying far below any real miss distance.
 FLAG_REACH_RADIUS_M = 3.0
+
+# How far off the flag's own lane a car may be and still count as arriving AT
+# the flag (binding decision 2026-10-25: the arrival event is the car's body
+# crossing the pennant's line; the ONLY thing that has to keep a car on a
+# different road from firing it is this lane band). Half a lane: a 2.6 m lane
+# reaches 1.3 m either side of its centre, so 2 m covers 'our lane plus a small
+# driving wobble' and stops well before the neighbour lane's centre.
+FLAG_LANE_HALF_TOL_M = 2.0
+
+# The parking scenario's finish tolerance, measured on the car's FRONT end
+# against the pennant's foot (which the sim now places at the parked car's
+# bumper line, SimEngine.cs): a real driver parks with the nose AT the mark,
+# so tens of centimetres - not the 8 m of STOP_AT_FLAG_TOLERANCE_M, which was
+# a braking-distance allowance for the car's CENTRE and would call a car parked
+# most of a lane-length away a pass.
+NOSE_TOUCH_M = 0.5
 RUNNING_START_KMH = 50.0
 
 
@@ -478,6 +494,59 @@ SCENARIO_FOCUS = {
 # (MapRenderer.CarFocusViewM).
 FOCUS_ZOOM_PXM = {"loc": 26.0, "named": 16.0}
 
+# --- The cast's ROLES: one symbolic name per car --------------------------
+# A scenario authors its cast, so it knows what every car IS. That role —
+# not a uid, not a sprite colour — is what the camera (`POST /focus`), the
+# car detail window (`#65 oncoming_car`) and the tape header (`names=`)
+# address it by, and it travels WITH the spawn (`POST /teleport {"name": …}`)
+# so the sim sets it before the car's first tick (docs/TESTING.md "Named cars").
+#
+# The extras name themselves inline in the scenario tuple (field 10, 'name'):
+# they are staged per scenario and their role only exists in that cast.
+# The PRIMARY car's role is the maneuver it performs, so it is keyed here by
+# (start_point, direction) — that pair IS the maneuver, and the T-junction
+# turns appear twice in the table (empty bar, bar with an oncoming car) while
+# the car plays the same role in both. The NEGATIVE hairpin test is the one
+# scenario where the same maneuver plays a different role; its expect_wrong_side
+# flag says so (see run_deterministic_test).
+#
+# A scenario that names NOBODY is a big-cast run (the fig-8 tests: 51 cars
+# around a loop, 50 through a crossing). No car of that fleet has a role, so
+# they get the fallback `<vehicle_class>-<uid>` instead (see _cast_fallback_names).
+PRIMARY_CAR_ROLE = {
+    ('corner_right_entry', 'right'): 'right_turning_car',
+    ('corner_left_entry', 'left'): 'left_turning_car',
+    ('tjunction_from_top', 'left'): 'left_turning_car',
+    ('tjunction_from_top', 'right'): 'right_turning_car',
+    ('y_from_stem', 'left'): 'left_turning_car',      # the south-east fork
+    ('y_from_stem', 'right'): 'right_turning_car',    # the south-west fork
+    ('crossroads_from_north', 'left'): 'left_turning_car',
+    ('crossroads_from_north', 'right'): 'right_turning_car',
+    ('crossroads_from_north', 'straight'): 'straight_through_car',
+    ('oneway_entry', 'straight'): 'one_way_entry_car',
+    ('mixed_from_west', 'straight'): 'straight_through_car',
+    ('mixed_from_east', 'straight'): 'straight_through_car',
+    ('s_curve', 'straight'): 's_curve_car',
+    ('hairpin_entry', 'straight'): 'hairpin_entry_car',
+    ('hairpin_exit', 'straight'): 'hairpin_exit_car',  # NEGATIVE twin: overridden
+    ('park_block_overtake', 'straight'): 'overtaking_car',
+    ('park_block_priority', 'straight'): 'blocked_car',  # waits for the gap
+    ('slow_pass_overtake', 'straight'): 'overtaking_car',
+    ('slow_pass_priority', 'straight'): 'overtaking_car',  # after waiting
+    ('roundabout_from_north', 'right'): 'roundabout_exit_car',
+    ('park_6lane_right_lane', 'straight'): 'parking_car',
+}
+
+# sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
+# spawns by sprite color, the class is what the car's dynamics and footprint
+# come from). Only the big-cast fallback naming needs it: `car-118`,
+# `heavy_truck-124`. An unknown color is a car (Config.SpecForColor's fallback).
+CAR_CLASS_OF_COLOR = {
+    'blue': 'car', 'police': 'car', 'tan': 'car',
+    'silver': 'compact', 'pickup': 'pickup',
+    'tractor': 'truck', 'mixer': 'heavy_truck',
+}
+
 DETERMINISTIC_TESTS = [
     # --- Symbolic anchors -------------------------------------------------
     # expected_end_segment is a segment NAME ("startNode→endNode" - the
@@ -493,8 +562,10 @@ DETERMINISTIC_TESTS = [
     #   4 duration s   5 description 6 start_progress 7 kerb_check
     #   8 end_flag_progress  9 expect_wrong_side (NEGATIVE test)
     #  10 extra_cars: list of dicts {start_point|segment, progress, speed_mps,
-    #      throttle, expect_end} - other cars in the same world. throttle=False
+    #      throttle, expect_end, name} - other cars in the same world. throttle=False
     #      leaves a car where it was put: that is how a PARKED car is staged.
+    #      EVERY extra names its role ('name'); the primary car of the scenario
+    #      gets its role from PRIMARY_CAR_ROLE above.
     # 90-degree corners (the classic reported bug)
     ('corner_right_entry', 'right', 50, 'cornerR_c→cornerR_w', 60.0,
      "Taking a sharp 90° right corner"),
@@ -514,13 +585,13 @@ DETERMINISTIC_TESTS = [
      "at the node)",
      TURN_SPAWN_PROGRESS, False, END_FLAG_PROGRESS, False,
      [{'start_point': 'tjunction_from_east', 'progress': 0.5,
-       'speed_mps': 50 / 3.6, 'throttle': True}]),
+       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
     ('tjunction_from_top', 'right', 50, 'tjunc_center→tjunc_w', 60.0,
      "T-junction right turn WITH an oncoming car on the bar (must not collide "
      "at the node)",
      TURN_SPAWN_PROGRESS, False, END_FLAG_PROGRESS, False,
      [{'start_point': 'tjunction_from_west', 'progress': 0.5,
-       'speed_mps': 50 / 3.6, 'throttle': True}]),
+       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
     # Y-intersection (shallow ~40 degree diverging angles)
     # The stem runs NORTH->fork (y_stem 250,400 -> y_center 250,220), so the car
     # enters HEADING SOUTH: its left hand is EAST, its right hand is WEST. The
@@ -817,7 +888,7 @@ class TurnTester:
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
                                   speed_mps: float | None = None,
-                                  color: str = "blue"):
+                                  color: str = "blue", role: str | None = None):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -830,6 +901,9 @@ class TurnTester:
         baseline in this suite was calibrated with sedan numbers; without
         an explicit color the uid-based palette cycle would hand out truck
         classes (80 km/h top, 1 m/s^2) to later scenarios.
+        role: the car's ROLE in this scenario ('left_turning_car', …) - sent
+        WITH the spawn, so the label exists before the car's first tick (see
+        PRIMARY_CAR_ROLE and docs/TESTING.md "Named cars").
         """
         try:
             old_uid = self.get_state().get('car_uid')
@@ -838,6 +912,8 @@ class TurnTester:
         payload = {'start_point': name, 'progress': progress, 'color': color}
         if speed_mps is not None:
             payload['speed'] = speed_mps
+        if role:
+            payload['name'] = role
         requests.post(f"{API_URL}/teleport", json=payload)
         # Wait until the game loop has actually processed the teleport and
         # the state reflects the NEW car (see _wait_for_new_car).
@@ -1019,6 +1095,42 @@ class TurnTester:
                 return True
             self._psleep(0.05)
         return False
+
+    def _cast_fallback_names(self) -> int:
+        """Name every still-unnamed car of a big cast `<class>-<uid>`.
+
+        The fig-8 scenarios stage 51/150 cars around a loop or 50 through a
+        crossing: no car of that fleet has a ROLE - "the oncoming one" is not
+        a fact about one of 50 cars, it is true of 25 of them. They still must
+        not read `no-name` in a window, so they get the fallback the operator
+        asked for: the car's vehicle class plus its uid (`car-118`,
+        `heavy_truck-124`) - unique, and it says what kind of body made a
+        crash or a squeeze, which is what those runs measure.
+
+        A spawn name cannot carry it (the uid only exists once the sim
+        processed the teleport), so this goes through POST /label with an
+        explicit uid, sent right after the spawn poll and BEFORE the throttle -
+        the tape header keeps the FIRST name a car ever gets, so the cast is
+        named from its first moving frame. Cars that already carry a role are
+        left alone. Returns how many cars were named.
+        """
+        try:
+            cars = self._api_session.get(f"{API_URL}/state", timeout=5).json()
+        except requests.exceptions.RequestException:
+            return 0
+        named = 0
+        for c in cars.get('cars', []):
+            if c.get('hud_label'):
+                continue          # already a role from the spawn
+            uid = c.get('car_uid')
+            cls = CAR_CLASS_OF_COLOR.get(c.get('color') or '', 'car')
+            try:
+                self._api_session.post(f"{API_URL}/label", timeout=5,
+                                       json={'uid': uid, 'text': f"{cls}-{uid}"})
+                named += 1
+            except requests.exceptions.RequestException:
+                pass
+        return named
 
     def _stress_scenario_result(self, phases: dict, overall_passed: bool,
                                 crashed: bool, aborted: bool) -> dict:
@@ -1268,6 +1380,15 @@ class TurnTester:
             if not all_spawned:
                 print(f"   ❌ Only {len(uids)}/{n_cars} cars appeared - "
                       f"phase fails")
+
+            # A fleet this big has no roles - nobody is "the oncoming car" of
+            # 150. Name the cast `<class>-<uid>` so a window on any of them
+            # still reads an identity (and says which body size drove), sent
+            # BEFORE the throttle so the tape names the cast from frame one.
+            n_named = self._cast_fallback_names()
+            if n_named:
+                print(f"   🏷️  {n_named} cars named <class>-<uid> "
+                      f"(a cast this big has no roles)")
 
             # 3. Hold the throttle for every car (BICYCLE mode: without
             #    accelerate the nav's target speed is 0 and it brakes -
@@ -1616,6 +1737,14 @@ class TurnTester:
             return self._crossing_result(start_point, passed=False,
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
+
+        # No roles in a 50-car fleet either: name the cast `<class>-<uid>`. Still
+        # while FROZEN, so every car carries its name before the first moving
+        # frame and the tape header writes the cast once, not per frame.
+        n_named = self._cast_fallback_names()
+        if n_named:
+            print(f"   🏷️  {n_named} cars named <class>-<uid> "
+                  f"(a cast this big has no roles)")
 
         # 3. Hold the throttle for every car - and only now unfreeze: the
         #    fleet accelerates once ALL cars exist (see the spawn discipline
@@ -1976,6 +2105,63 @@ class TurnTester:
         # Ran out of time without coming to a stop on the target segment.
         return (last_pos or (0, 0)), False, details
     
+    def _stop_after_verdict(self, max_wait: float = 8.0) -> bool:
+        """Brake to a standstill AFTER the verdict has been filed.
+
+        Passing the red flag ENDS a running test - at speed, that is the
+        criterion (docs/TESTING.md §3) - but a car that drives out of the
+        picture leaves the watcher asking whether the run is over, which is the
+        user's request of 2026-10-25: *"es wäre schön, wenn sie nach dem
+        Überfahren der roten Flagge dann auch bremsen würden bis zum Stillstand,
+        damit man sieht, der Test ist fertig"*. So the flag still ends the test
+        and the stillstand is the period at the end of the sentence.
+
+        Three rules make this an epilogue and not a second test:
+        · it runs AFTER `POST /test_result`, so nothing it does can move a
+          verdict that is already filed and in `self.test_results`;
+        · braking is a latched `brake` through `POST /control` - the car loses
+          speed the way its physics says it may (AGENTS.md: never do physically
+          impossible things), the speed is never written to zero;
+        · a LONE car only. Standing still in traffic would drop a sudden
+          obstacle in front of whoever follows and hand the reviewer a crash the
+          scenario never tested.
+
+        Answers whether the car stands (also True when it was standing
+        already), and stays quiet about a standstill that did not happen in
+        time: the brake stays latched, the next scenario's `reset()` clears it.
+        """
+        t0 = time.time()
+        try:
+            st = self.get_state()
+        except requests.exceptions.RequestException:
+            return False
+        v0 = float(st.get('speed_kmh') or 0.0)
+        ncars = len(st.get('cars') or [])
+        if ncars > 1:
+            print(dim(f"   \U0001f6d1 skipped the stop: {ncars} cars on the field - "
+                      f"standing still in traffic is not what this tests"))
+            return False
+        if v0 < 1.0:
+            return True                       # parking tests already stand
+        print(dim(f"   \U0001f6d1 test over - braking to a standstill from {v0:.0f} km/h "
+                  f"so the picture says it ended"))
+        self.send_control(accelerate=False, brake=True)
+        v = v0
+        while time.time() - t0 < max_wait:
+            try:
+                st = self.get_state()
+            except requests.exceptions.RequestException:
+                return False
+            v = float(st.get('speed_kmh') or 0.0)
+            if v < 0.3:
+                print(dim(f"      stands still after {time.time() - t0:.1f} s "
+                          f"(sim {st.get('time', 0):.1f} s) - brake stays latched"))
+                return True
+            time.sleep(0.15)
+        print(dim(f"      still {v:.0f} km/h after {max_wait:.0f} s - verdict is "
+                  f"already filed, this changed nothing but the show"))
+        return False
+
     def _brake_to_stop(self, start_time: float, max_wait: float = 10.0,
                        abort_check: "callable | None" = None):
         """Brake and wait for the car to come to a FULL stop right where it
@@ -2101,6 +2287,7 @@ class TurnTester:
                       end_flag_progress: float = END_FLAG_PROGRESS,
                       expect_wrong_side: bool = False,
                       spawn_speed_kmh: float | None = None,
+                      car_name: str | None = None,
                       extra_cars: list[dict] | None = None) -> dict:
         """Monitor a turn for violations.
         
@@ -2146,6 +2333,12 @@ class TurnTester:
                 in turning_results.json, since the scenario was never
                 actually tested.
         
+            car_name: the ROLE this scenario gives its primary car
+                ('left_turning_car', 'blocked_car', 'parking_car', …),
+                carried WITH the spawn so the label exists before the car's
+                first tick. None leaves the car unnamed - only the big-cast
+                runners (fig8_*) do that now, and they name their whole fleet
+                `<class>-<uid>` (see _cast_fallback_names).
         Returns:
             dict with test results
         """
@@ -2201,12 +2394,20 @@ class TurnTester:
             else:
                 rolling = RUNNING_START_KMH / 3.6
             self.create_car_at_start_point(start_point, progress=start_progress,
-                                           speed_mps=rolling)
+                                           speed_mps=rolling, role=car_name)
             # Label under the minimap: the current test number ("10/27"),
             # when running as part of a suite; standalone runs fall back
-            # to the track number / start-point name.
-            self.set_hud_label(label if label is not None
-                               else str(START_POINT_NUMBER.get(start_point) or start_point))
+            # to the track number / start-point name. Only when the scenario
+            # named NOBODY: TestFlags.HudLabel is ONE field, the same one the
+            # role travels in, and a number written over a role would put the
+            # car back into `no-name` in /state, in the window and on the tape.
+            # The scenario number still travels in the focus note (POST /focus
+            # carries the same label), so nothing loses "which test is running"
+            # except a raw run of a scenario that has no role to give.
+            if car_name is None:
+                self.set_hud_label(label if label is not None
+                                   else str(START_POINT_NUMBER.get(start_point)
+                                           or start_point))
             # What the window should look at for THIS scenario (SCENARIO_FOCUS):
             # announced before the cast is staged, so the camera is already
             # aimed when the first frame of the test exists.
@@ -2412,6 +2613,15 @@ class TurnTester:
                 requests.post(f"{API_URL}/flags", json={
                     'green': [state['x'], state['y'], state['heading']],
                     'red': red_flag,
+                    # The red flag is a NAV destination only where the scenario
+                    # actually parks (`kerb_check`); for every other flagged
+                    # scenario it is a VISUAL marker - the test ends when the
+                    # car passes it (binding user decision 2026-10-25: passing
+                    # the red flag at any speed ends the test, the car may keep
+                    # driving on at full or intended speed; ONLY the parking
+                    # scenario requires a complete standstill AT the flag, and
+                    # a destination here would make the nav stage a parking
+                    # manoeuvre inside a turn test).
                     'red_nav': bool(kerb_check),
                 }, timeout=2)
             except requests.exceptions.RequestException:
@@ -2492,6 +2702,9 @@ class TurnTester:
         # tells us which side of the 50% mark it has to cross.
         end_entry_progress: float | None = None
         passed_flag = False          # crossed the flag while moving (violation)
+        flag_crossed = False         # the body reached the pennant's line (arrival)
+        mark_seen = False            # /state stated the mark at least once
+        no_mark_warned = False       # the old centreline fallback, printed once
         passed_flag_speed_kmh = 0.0
         off_road_detected = False
         instant_snap_detected = False
@@ -2739,7 +2952,63 @@ class TurnTester:
             # still be the approach arm while the car already passes the
             # flag point (hairpin: its projection onto the exit arm is
             # closer than the diagonal it really drives).
-            if not kerb_check and flag_point is not None:
+            # RUNNING TURN TEST arrival (docs/TESTING.md §3, binding user
+            # decision 2026-10-25): the SIM states the mark - `flags.red_seg`/
+            # `red_prog` (segment + progress along the route) and `flags.red`
+            # (the pennant's FOOT, placed in the line the car has to arrive in:
+            # `Config.LaneBaseOffsetM` for a running test). The scenario is done
+            # the moment the car's BODY reaches that line - it drove AGAINST the
+            # flag. No radius at all: a 3 m circle around a point in a ~2.6 m
+            # lane reaches into the next lane, and the old code measured a point
+            # on the CENTRELINE while the car drove 1.7 m off it, so the real
+            # along-window was only ±2.4 m - and on the 19.4 m avenue
+            # (pkw_n→pkw_s, lateral 7.27 m) the circle could never be reached
+            # at all. The lane condition below (≤ 2 m perpendicular) is what
+            # keeps a car on a DIFFERENT road from counting as an arrival.
+            fl = state.get('flags') or {}
+            mseg, mprog = fl.get('red_seg'), fl.get('red_prog')
+            mark = fl.get('red')
+            if not kerb_check and mseg is not None and mseg >= 0 \
+                    and mprog is not None and mprog >= 0 and mark:
+                mark_seen = True
+                fh = math.radians(float(mark[2]))
+                tdir = (math.sin(fh), math.cos(fh))       # route direction (0°=N)
+                cs = state.get('body_corners') or [[state['x'], state['y']]]
+                along = [(p[0] - mark[0]) * tdir[0] + (p[1] - mark[1]) * tdir[1]
+                         for p in cs]
+                perp = [abs((p[0] - mark[0]) * -tdir[1] + (p[1] - mark[1]) * tdir[0])
+                        for p in cs]
+                front_s = max(along)
+                in_lane = min(perp) <= FLAG_LANE_HALF_TOL_M
+                if front_s >= 0.0 and in_lane and not flag_crossed:
+                    flag_crossed = True
+                    reached_expected_segment = True
+                    primary_arrival_sim = state.get('time') or 0.0
+                    prog_pct = (state.get('progress') or 0.0) * 100
+                    print(f"\n   ✅ Reached the end flag - the car's front is "
+                          f"{front_s:.2f} m past the pennant's foot on segment "
+                          f"{state['segment']} (at {prog_pct:.0f}%, target: "
+                          f"{end_flag_progress * 100:.0f}%)")
+                    print(f"      Time: {time.time() - start_time:.2f}s")
+                    print(f"      Max heading change per frame: {max_heading_change_per_frame:.1f}°")
+                    final_pos = (state['x'], state['y'])
+                    stopped_ok = True   # running test: passing the mark ends it
+                    print(f"      Start: ({initial_pos[0]:.0f}, {initial_pos[1]:.0f}) seg {initial_segment} "
+                          f"→ End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}")
+                    print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
+                    try:
+                        self.reset_controls()   # release the throttle latch
+                    except requests.exceptions.RequestException:
+                        pass
+                    break
+            elif not kerb_check and flag_point is not None:
+                # FALLBACK only - and it belongs to the END of the run, not to
+                # the first polls: the sim resolves the flag once the ROUTE
+                # covers that segment, so early polls legitimately carry no
+                # `red_seg` yet (measured on T_273: this ⚠️ printed while the
+                # new mark-based test still fired 0.09 m later in the same run).
+                # Warning here said "the host is old" when it was only "not
+                # resolved yet". The real fact is checked after the loop.
                 fdx = state['x'] - flag_point[0]
                 fdy = state['y'] - flag_point[1]
                 if (fdx * fdx + fdy * fdy) ** 0.5 <= FLAG_REACH_RADIUS_M:
@@ -2757,7 +3026,7 @@ class TurnTester:
                           f"→ End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}")
                     print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
                     try:
-                        self.reset_controls()   # release the throttle latch
+                        self.reset_controls()
                     except requests.exceptions.RequestException:
                         pass
                     break
@@ -2894,6 +3163,37 @@ class TurnTester:
                             if stop_details.get('violation_details'):
                                 violation_details = stop_details['violation_details']
                         rolled_m = ((final_pos[0] - cross_pos[0]) ** 2 + (final_pos[1] - cross_pos[1]) ** 2) ** 0.5
+                        # THE PARKING FINISH, on the mark the SIM states (binding
+                        # decision 2026-10-25: with reverse-in ordered, the car
+                        # first drives PAST the flag, sets back, then pulls
+                        # forward until its NOSE touches the pennant's foot -
+                        # `NOSE_TOUCH_M` at rest). The 8 m centre-tolerance above
+                        # stays as the arrival gate (it decides WHO is at the
+                        # flag at all); this is what decides whether the parking
+                        # job actually finished at its mark.
+                        try:
+                            st_end = self.get_state()
+                        except requests.RequestException:
+                            st_end = None
+                        fl_p = (st_end or state).get('flags') or {}
+                        mk = fl_p.get('red')
+                        if mk and st_end:
+                            fh = math.radians(float(mk[2]))
+                            tdir = (math.sin(fh), math.cos(fh))
+                            cs = st_end.get('body_corners') or [[st_end['x'], st_end['y']]]
+                            nose = max((p[0] - mk[0]) * tdir[0] + (p[1] - mk[1]) * tdir[1]
+                                       for p in cs)
+                            perp = min(abs((p[0] - mk[0]) * -tdir[1] + (p[1] - mk[1]) * tdir[0])
+                                       for p in cs)
+                            if stopped_ok and (abs(nose) > NOSE_TOUCH_M or
+                                               perp > FLAG_LANE_HALF_TOL_M):
+                                stopped_ok = False
+                                print(f"      ⚠️  nose {nose:+.2f} m off the mark "
+                                      f"(perp {perp:.2f} m) - outside the "
+                                      f"±{NOSE_TOUCH_M:.2f} m bumper touch")
+                            elif stopped_ok:
+                                print(f"      ✅ nose touches the mark "
+                                      f"({nose:+.2f} m, perp {perp:.2f} m)")
                         if stopped_ok:
                             where = (f"{rolled_m:.1f} m after crossing it"
                                      if rolled_m > 0.5 else "right at the flag")
@@ -3027,6 +3327,16 @@ class TurnTester:
                 and not priority_failed
             )
         
+        # The run is over: if the whole run never stated a mark, the fallback
+        # circle WAS used the entire time - that is a fact worth saying once,
+        # here rather than in the early polls where "not yet resolved" is
+        # normal (see the T_273 measurement in the block above).
+        if not kerb_check and expected_end_segment is not None \
+                and flag_point is not None and not mark_seen:
+            print("   ⚠️  /state NEVER carried flags.red_seg/red_prog in this "
+                  "run - the arrival used the old centreline circle "
+                  f"(radius {FLAG_REACH_RADIUS_M:.0f} m) for the whole test")
+
         # Prepare results
         result = {
             'start_point': start_point,
@@ -3135,7 +3445,12 @@ class TurnTester:
         if results is not None:
             record_result(results, result, self.test_no)
             save_results(results)
-        
+
+        # The verdict is OUT (posted to the tape, appended, saved) - from here on
+        # the car is only allowed to make the picture clearer, never the result
+        # different. See _stop_after_verdict for why it is a lone-car epilogue.
+        self._stop_after_verdict()
+
         return result
     
     def run_random_test(self, results: dict | None = None):
@@ -3300,6 +3615,13 @@ class TurnTester:
             end_flag_progress = test[8] if len(test) > 8 else END_FLAG_PROGRESS
             expect_wrong_side = bool(test[9]) if len(test) > 9 else False
             extra_cars = test[10] if len(test) > 10 else None
+            # The primary car's ROLE: keyed by the maneuver (PRIMARY_CAR_ROLE).
+            # The NEGATIVE hairpin test drives the SAME maneuver as the
+            # positive one and is the car EXPECTED to end up wrong side - the
+            # expect_wrong_side flag is what tells the two apart, so it names
+            # this one instead of the lookup.
+            car_name = ('wrong_side_car' if expect_wrong_side
+                        else PRIMARY_CAR_ROLE.get((start_point, direction)))
             print(f"\n\n{'#'*60}")
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
             print(f"{'#'*60}")
@@ -3362,6 +3684,7 @@ class TurnTester:
                                            kerb_check=kerb_check,
                                            end_flag_progress=end_flag_progress,
                                            expect_wrong_side=expect_wrong_side,
+                                           car_name=car_name,
                                            extra_cars=extra_cars)
 
             _emit({'type': 'done', 'index': i, 'passed': result['passed'],
@@ -3635,7 +3958,9 @@ def main():
                                expected_end_segment=end_seg,
                                label=f"{test_no}/{len(DETERMINISTIC_TESTS)}"
                                      if test_no else None,
-                               spawn_speed_kmh=spawn_kmh)
+                               spawn_speed_kmh=spawn_kmh,
+                               car_name=PRIMARY_CAR_ROLE.get((start_point,
+                                                              direction)))
             save_results(results)
             tester.print_summary()
         elif '--random' in sys.argv:
