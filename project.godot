@@ -35,6 +35,9 @@ project/assembly_name="DrivingGame"
 3d/physics_engine="Jolt Physics"
 
 [rendering]
+rendering_2d/snap_2d_vertices_to_pixels=true
+
+rendering_textures/default_max_anisotropy=16
 
 rendering_device/driver.windows="d3d12"
 renderer/rendering_method="mobile"

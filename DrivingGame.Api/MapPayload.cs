@@ -31,6 +31,7 @@ public static class MapPayload
             {
                 ["left"] = M(s.Left),
                 ["right"] = M(s.Right),
+                ["highway"] = s.Highway,
             });
         var roadPolys = new List<Dictionary<string, object?>>();
         foreach (var group in net.GetRoadFillPolygons())

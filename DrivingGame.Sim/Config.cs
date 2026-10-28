@@ -203,6 +203,12 @@ public static class Config
     public const double CENTERLINE_SOLID_BEFORE_JUNCTION_M = 6.0;
     // A halt line is a band of white across the YIELDING LANE at the mouth
     // of a yielding approach - far thicker than a line marking.
+    /// Width of PAINTED road lines (centre line, lane dashes, kerb line),
+    /// metres. German markings are 0.10-0.12 m; anything above that reads as a
+    /// heavy border around a 3.5 m lane. The renderer reads THIS - there is no
+    /// second paint-width number in the client (user decision 2026-10-26: an
+    /// outer white line must never be wider than the centre line).
+    public const double ROAD_PAINT_WIDTH_M = 0.08;
     public const double STOP_LINE_WIDTH_M = 0.5;
     /// <summary>Gap (m) the halt line keeps from the road's RIGHT edge: the
     /// paint belongs to the yielding lane only, so it must not run into the

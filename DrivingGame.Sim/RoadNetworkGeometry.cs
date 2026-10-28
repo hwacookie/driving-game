@@ -983,21 +983,21 @@ public static class RoadNetworkGeometry
 
                 if (oneway)
                 {
-                    foreach (var c in OffsetOf(paint, -width / 2)) markings.Add(("solid", c, 0.15));
-                    foreach (var c in OffsetOf(paint, -shoulder / 2)) markings.Add(("dashed", c, 0.15));
-                    foreach (var c in OffsetOf(paint, width / 2 - shoulder)) markings.Add(("solid", c, 0.30));
+                    foreach (var c in OffsetOf(paint, -width / 2)) markings.Add(("solid", c, Config.ROAD_PAINT_WIDTH_M));
+                    foreach (var c in OffsetOf(paint, -shoulder / 2)) markings.Add(("dashed", c, Config.ROAD_PAINT_WIDTH_M));
+                    foreach (var c in OffsetOf(paint, width / 2 - shoulder)) markings.Add(("solid", c, Config.ROAD_PAINT_WIDTH_M));
                 }
                 else
                 {
                     // Solid centreline: crossing it = oncoming lane.
-                    markings.Add(("solid", new List<(double X, double Y)>(paint), 0.15));
+                    markings.Add(("solid", new List<(double X, double Y)>(paint), Config.ROAD_PAINT_WIDTH_M));
                     double D = width / 2 - park;            // driving strip per side
                     double l = D / lanes;            // driving-lane width
                     for (int k = 1; k < lanes; k++)
                     {
                         double dd = k * l;
-                        foreach (var c in OffsetOf(paint, dd)) markings.Add(("dashed", c, 0.15));
-                        foreach (var c in OffsetOf(paint, -dd)) markings.Add(("dashed", c, 0.15));
+                        foreach (var c in OffsetOf(paint, dd)) markings.Add(("dashed", c, Config.ROAD_PAINT_WIDTH_M));
+                        foreach (var c in OffsetOf(paint, -dd)) markings.Add(("dashed", c, Config.ROAD_PAINT_WIDTH_M));
                     }
                     if (park > 0)
                     {
@@ -1005,8 +1005,8 @@ public static class RoadNetworkGeometry
                         var trimmed = TrimEnds(new List<(double X, double Y)>(coords), pt0, pt1);
                         if (trimmed.Count > 0)
                         {
-                            foreach (var c in OffsetOf(trimmed, D)) markings.Add(("p_dash", c, 0.15));
-                            foreach (var c in OffsetOf(trimmed, -D)) markings.Add(("p_dash", c, 0.15));
+                            foreach (var c in OffsetOf(trimmed, D)) markings.Add(("p_dash", c, Config.ROAD_PAINT_WIDTH_M));
+                            foreach (var c in OffsetOf(trimmed, -D)) markings.Add(("p_dash", c, Config.ROAD_PAINT_WIDTH_M));
                         }
                     }
                 }
@@ -1023,7 +1023,7 @@ public static class RoadNetworkGeometry
                     {
                         double s = TowardSign(a, Midpoint(b));
                         foreach (var c in OffsetOf(a, s * (width / 2)))
-                            markings.Add(("guardrail", c, 0.15));
+                            markings.Add(("guardrail", c, Config.ROAD_PAINT_WIDTH_M));
                     }
                 }
         }
@@ -1292,7 +1292,7 @@ public static class RoadNetworkGeometry
             if (lineSegs.TryGetValue(line, out var lsegs) && lsegs.Count > 0 && lsegs.All(covered.Contains))
                 continue;   // painted as a width-varying ribbon below
             var (left, right) = Ribbon(line.Resampled, line.Width / 2);
-            if (left.Count >= 2) strips.Add(new RoadStroke(left, right));
+            if (left.Count >= 2) strips.Add(new RoadStroke(left, right, line.Highway));
         }
 
         var fills = new List<RoadPolygonGroup>();
@@ -1327,7 +1327,12 @@ public static class RoadNetworkGeometry
 
     /// <summary>One road's paint: two vertex-paired boundary polylines.</summary>
     public sealed record RoadStroke(List<(double X, double Y)> Left,
-        List<(double X, double Y)> Right);
+        List<(double X, double Y)> Right,
+        /// <summary>The OSM type of the road this ribbon paints (`primary`,
+        /// `residential`, …). The renderer needs it: a road's MATERIAL (which
+        /// tiling texture, how large one tile is) follows the road type, and
+        /// type is the only channel the network carries for that.</summary>
+        string Highway);
 
     /// <summary>Build ONE continuous variable-width ribbon per highway chain
     /// that changes width along its length. The chain is splined through the

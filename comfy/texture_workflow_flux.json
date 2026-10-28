@@ -1,0 +1,111 @@
+{
+  "20": {
+    "inputs": {
+      "unet_name": "flux1-schnell-Q4_0.gguf"
+    },
+    "class_type": "UnetLoaderGGUF"
+  },
+  "10": {
+    "inputs": {
+      "model": ["20", 0],
+      "tiling": "enable",
+      "seed": 42
+    },
+    "class_type": "SeamlessTileModelDiT"
+  },
+  "7": {
+    "inputs": {
+      "clip_name1": "t5xxl_fp8_e4m3fn.safetensors",
+      "clip_name2": "clip_l.safetensors",
+      "type": "flux"
+    },
+    "class_type": "DualCLIPLoader"
+  },
+  "6": {
+    "inputs": {
+      "text": "seamless dark grey asphalt road surface, fine gravel grain, uniform flat surface, orthographic top-down view, flat diffuse lighting, photoreal material, tileable texture",
+      "clip": ["7", 0]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "5": {
+    "inputs": {
+      "text": "",
+      "clip": ["7", 0]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "4": {
+    "inputs": {
+      "conditioning": ["6", 0],
+      "guidance": 3.5
+    },
+    "class_type": "FluxGuidance"
+  },
+  "3": {
+    "inputs": {
+      "seed": 42,
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["10", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["2", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "2": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage"
+  },
+  "12": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader"
+  },
+  "13": {
+    "inputs": {
+      "vae": ["12", 0],
+      "tiling": "enable",
+      "copy_vae": "Make a copy"
+    },
+    "class_type": "MakeCircularVAEDiT"
+  },
+  "8": {
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["13", 0]
+    },
+    "class_type": "VAEDecode"
+  },
+  "9": {
+    "inputs": {
+      "filename_prefix": "RoadTexture_flux",
+      "images": ["8", 0]
+    },
+    "class_type": "SaveImage"
+  },
+  "14": {
+    "inputs": {
+      "pixels": ["8", 0],
+      "x_percent": 50.0,
+      "y_percent": 50.0
+    },
+    "class_type": "OffsetImage"
+  },
+  "15": {
+    "inputs": {
+      "filename_prefix": "RoadTexture_flux_offset",
+      "images": ["14", 0]
+    },
+    "class_type": "SaveImage"
+  }
+}

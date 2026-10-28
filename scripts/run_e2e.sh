@@ -287,6 +287,20 @@ if [ "$WATCH" -eq 1 ] && [ "$RUN_GODOT" -eq 1 ]; then
   fi
   [ "${DG_FREEZE_STAGE:-0}" = "1" ] && echo "==> Staging: sim FROZEN while cars are placed, unfrozen at the announced pace"
 fi
+# The road SURFACE the window shows (docs/GODOT_FRONTEND.md, the material
+# system): default is the flat asphalt the eye judges realistic - the same
+# tile the swatch map's first leg uses, on every road type, plus the
+# procedural cracks and repair patches. DG_ROAD_STYLE=flat restores the
+# schematic grey fill for a documentation screenshot.
+GODOT_ROAD_ARGS=()
+if [ "$RUN_GODOT" -eq 1 ]; then
+  if [ "${DG_ROAD_STYLE:-asphalt}" = "flat" ]; then
+    echo "==> Roads: FLAT fill (DG_ROAD_STYLE=flat)"
+  else
+    GODOT_ROAD_ARGS=(--road-all road_main)
+    echo "==> Roads: asphalt material + procedural wear (--road-all road_main)"
+  fi
+fi
 if [ "$RUN_GODOT" -eq 1 ]; then
   GODOT_CAM_ARGS=(--zoom "${CAM_ZOOM:-14}")
   echo "==> Camera: follow mode at zoom ${CAM_ZOOM:-14} (px/m) - the window tracks the car"
@@ -355,7 +369,7 @@ if [ "$RUN_GODOT" -eq 1 ]; then
     # The runner closes this window again on exit (clean self-quit via the
     # generation file - never a signal). On failure the C# host stays up,
     # so the scene can be re-opened in a new Godot window.
-    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} ${GODOT_SIZE_ARGS[@]+"${GODOT_SIZE_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
+    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} ${GODOT_ROAD_ARGS[@]+"${GODOT_ROAD_ARGS[@]}"} ${GODOT_SIZE_ARGS[@]+"${GODOT_SIZE_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in
   fi

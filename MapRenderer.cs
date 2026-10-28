@@ -178,6 +178,7 @@ public partial class MapRenderer : Node2D
     private const int WinFrameSidePx = 8;    // chrome left and right of it
     private const int WinFrameBottomPx = 5;  // chrome below it
     private readonly List<Window> _windows = new();   // every window, guarded
+
     private CanvasLayer _mmHud;   // main-window readouts stacked UNDER the map window
     private Vector2 _mmPinVp;      // window size the map window was pinned for
     private Vector2 _lastCamPos = new(float.NaN, float.NaN);
@@ -558,6 +559,56 @@ public partial class MapRenderer : Node2D
                 _overrideZoom = float.Parse(args[i + 1]);
                 _tFocusManual = true;
             }
+            else if (args[i] == "--road-materials")
+            {
+                // Paint roads with the material table instead of the flat fill:
+                // the judgement of a generated texture needs it ON a road, at a
+                // real scale, with cars on it - not as a PNG on a screen.
+                _roadTextured = true;
+            }
+            else if (args[i] == "--road-all" && i + 1 < args.Length)
+            {
+                // One material for EVERY road type - the test maps and the
+                // OSM city all get the same surface, so a run can be watched
+                // on a realistic street instead of flat grey. <file> is the
+                // asset name without extension (road_main, road_cracked, ...).
+                _roadAllMaterial = args[i + 1];
+                _roadTextured = true;
+                i += 1;
+            }
+            else if (args[i] == "--road-flat" && i + 1 < args.Length)
+            {
+                // Types that stay FLAT: a material can only be judged worth
+                // keeping against the picture it replaces, so the comparison
+                // belongs in the same frame - half the roads textured, half
+                // plain, one camera move.
+                _roadFlat = args[i + 1];
+                i += 1;
+            }
+            else if (args[i] == "--tile-k" && i + 1 < args.Length)
+            {
+                // One tile covers K road widths. The judgement "is this
+                // gravel the right size for a street" is relative to the
+                // street, so the knob is a ratio, not metres.
+                _roadTileK = Math.Max(0.5, double.Parse(args[i + 1]));
+                i += 1;
+            }
+            else if (args[i] == "--road-tile" && i + 1 < args.Length)
+            {
+                // Metres of road one generated tile covers, for EVERY type - the
+                // one scale knob, so a material can be judged at more than one
+                // size without editing the table.
+                _roadTileOverride = double.Parse(args[i + 1]);
+                i += 1;
+            }
+            else if (args[i] == "--road-wear" && i + 1 < args.Length)
+            {
+                // Mark density: 1 = one crack per ~55 m, one patch per ~260 m
+                // of road. 0 turns the wear off (a clean map for a screenshot
+                // you want to judge on colour alone).
+                _wearDensity = Math.Clamp(float.Parse(args[i + 1]), 0f, 4f);
+                i += 1;
+            }
             else if (args[i] == "--test-pan")
                 _testPan = true;
             else if (args[i] == "--test-seek" && i + 1 < args.Length)
@@ -666,6 +717,8 @@ public partial class MapRenderer : Node2D
                 _quitOnTestDone = true;
             else if (args[i] == "--motionlog" && i + 1 < args.Length)
                 _motionLogPath = args[i + 1];
+            else if (args[i] == "--perf-probe")
+                _perfProbe = true;
             else if (args[i] == "--run-test" && i + 1 < args.Length)
                 _autoRunTest = int.Parse(args[i + 1]);
             else if (args[i] == "--source" && i + 1 < args.Length)
@@ -1756,17 +1809,19 @@ public partial class MapRenderer : Node2D
             foreach (var mark in lm.EnumerateArray())
             {
                 string style = mark.GetProperty("style").GetString();
-                float widthM = mark.TryGetProperty("width_m", out var wm) ? wm.GetSingle() : 0.15f;
+                float widthM = mark.TryGetProperty("width_m", out var wm) ? wm.GetSingle() : PaintWidthM;
+                _narrowPaint = Math.Min(_narrowPaint, widthM);
+
                 var pts = Pts(mark.GetProperty("pts"));
                 switch (style)
                 {
                     case "dashed":
                         _markings.Add(new MarkingLine { Pts = pts, DashM = _lDash, GapM = _lGap,
-                                                         Color = white, WidthM = 0.15f });
+                                                         Color = white, WidthM = widthM });
                         break;
                     case "p_dash":
                         _markings.Add(new MarkingLine { Pts = pts, DashM = _pDash, GapM = _pGap,
-                                                         Color = white, WidthM = 0.15f });
+                                                         Color = white, WidthM = widthM });
                         break;
                     case "solid":
                         _markings.Add(new MarkingLine { Pts = pts, Solid = true,
@@ -1775,7 +1830,7 @@ public partial class MapRenderer : Node2D
                         break;
                     case "guardrail":
                         _markings.Add(new MarkingLine { Pts = pts, Solid = true,
-                                                        Color = rail, WidthM = 0.15f });
+                                                        Color = rail, WidthM = widthM });
                         break;
                 }
             }
@@ -1815,7 +1870,14 @@ public partial class MapRenderer : Node2D
         // --- Kerb outline (z 3, above the road fill): the TRUE paved
         // perimeter, one closed Line2D per ring of the unioned paved area,
         // inset by EDGE_LINE_INSET_M so a tarmac shoulder stays outside the
-        // paint. Physical width - at low zoom it thins out naturally.
+        // paint. Its width is BOUNDED BY THE CENTRE LINE (user decision
+        // 2026-10-26: an outer white line must never read wider than the
+        // middle line): the narrowest paint the map declares - which is the
+        // centre/dash width, 0.15 m today - caps it. Line2D.Width measured as
+        // a HALF width in this build (a 0.4 parameter shows 0.20 m, 0.25 shows
+        // 0.125 m), so the parameter is twice the paint.
+        // Screen ceiling, converted back to metres for THIS view.
+        float edgePaint = Math.Min(PaintWidthM, _narrowPaint);
         foreach (var l in _edgeLines) l.QueueFree();
         _edgeLines.Clear();
         foreach (var l in _bridgeEdges) l.QueueFree();
@@ -1828,7 +1890,7 @@ public partial class MapRenderer : Node2D
                     Points = Pts(ring).ToArray(),
                     Closed = true,
                     DefaultColor = white,
-                    Width = EdgeLineWidthM,
+                    Width = 2f * edgePaint,
                     ZIndex = 3,
                 };
                 _world.AddChild(line);
@@ -1857,7 +1919,8 @@ public partial class MapRenderer : Node2D
                     Points = Pts(line).ToArray(),
                     Closed = false,
                     DefaultColor = white,
-                    Width = EdgeLineWidthM,
+                    Width = 2f * PaintWidthM,   // bridge decks: no centre line
+                    // there to bound it, so the paint width is the ceiling.
                     ZIndex = 22,
                 };
                 _world.AddChild(edge);
@@ -2348,18 +2411,299 @@ public partial class MapRenderer : Node2D
     /// vertex-paired, so quad i is (left[i], left[i+1], right[i+1], right[i])
     /// — no triangulation of a possibly self-crossing outline is needed, a
     /// figure-8 crossing is simply two quads of the same colour on top of
-    /// each other, which is what it looks like from above.</summary>
+    /// each other, which is what it looks like from above.
+    ///
+    /// With `--road-materials` a ribbon instead goes to DrawTexturedRibbon - a
+    /// Polygon2D whose per-vertex texture offsets place the generated tile in
+    /// metres of road; a type with no material, or a texture file that is not
+    /// in the project, still falls through to the flat fill below, so the map
+    /// is never half-painted because one file is missing.</summary>
+    /// Deterministic pseudo-random for the wear: xorshift64, seeded from the
+    /// road shape. Chosen over Godot's RandomNumberGenerator so the sequence
+    /// is a pure function of that seed - same map, same cracks, in any run.
+    private long _wearState = 0L;   // the wear PRNG, reseeded per road shape
+    private string _wearDbg = "";   // first patch centres, for a screenshot probe
+
+    /// Deterministic pseudo-random for the wear: xorshift64 over a member
+    /// state. A pure function of the seed, so the same map draws the same
+    /// wear in every run and every tape replay.
+    private double WearNext()
+    {
+        _wearState ^= _wearState << 13;
+        _wearState ^= (long)((ulong)_wearState >> 7);
+        _wearState ^= _wearState << 17;
+        var u = (ulong)_wearState;
+        return (double)(u >> 11) / (double)(1L << 53);
+    }
+
+    /// [0,1) as a float - the shape of one jitter term.
+    private float WearF()
+    {
+        var d = WearNext();
+        return (float)d;
+    }
+
+    /// [0,max) as an int - which crack shape, how many arms.
+    private int WearI(int max)
+    {
+        var d = WearNext();
+        return (int)(d * max);
+    }
+
+    private static long WearSeed(Vector2[] cen)
+    {
+        long h = 0x5DE000000000000L;
+        for (int i2 = 0; i2 < cen.Length; i2++)
+        {
+            long xx = (long)Math.Round(cen[i2].X * 769f), yy = (long)Math.Round(cen[i2].Y * 769f);
+            h = (h ^ (xx * 1000003L + yy * 4000009L)) * 1099511628211L;
+        }
+        return h == 0L ? 1L : h;
+    }
+
+    /// Point, unit direction and half-width on the ribbon at `at` metres.
+    private static bool RibbonAt(Vector2[] cen, double[] cum, float[] hw, int n,
+                                 double at, out Vector2 p, out Vector2 dir, out float halfW)
+    {
+        for (int i2 = 0; i2 + 1 < n; i2++)
+        {
+            var segLen = cum[i2 + 1] - cum[i2];
+            if (at >= cum[i2] && at < cum[i2 + 1] && segLen > 1e-6)
+            {
+                var t = (float)((at - cum[i2]) / segLen);
+                p = cen[i2] + (cen[i2 + 1] - cen[i2]) * t;
+                float dx = cen[i2 + 1].X - cen[i2].X, dy = cen[i2 + 1].Y - cen[i2].Y;
+                var dl = (float)Math.Sqrt(dx * dx + dy * dy);
+                dir = new Vector2(dx / dl, dy / dl);
+                halfW = Math.Min(hw[i2], hw[i2 + 1]);
+                return true;
+            }
+        }
+        p = new Vector2(0, 0); dir = new Vector2(0, 0); halfW = 0f;
+        return false;
+    }
+
+    /// <summary>Wear marks for ONE road ribbon: cracks and repair patches,
+    /// placed along its centreline and limited by its own edge profile. Seeded
+    /// from the ribbon's vertices, so the same map always shows the same wear
+    /// - a tape replayed next week agrees with the run it recorded. Purely
+    /// visual: the sim, the tests and the tape never see it.</summary>
+    private void AddRoadWear(List<Vector2> left, List<Vector2> right, Color roadCol)
+    {
+        if (_wearDensity <= 0f || left.Count < 3) { return; }
+        var n = Math.Min(left.Count, right.Count);
+        var cen = new Vector2[n];
+        var hw = new float[n];
+        var cum = new double[n];
+        for (int i2 = 0; i2 < n; i2++)
+        {
+            cen[i2] = new Vector2((left[i2].X + right[i2].X) * 0.5f,
+                                  (left[i2].Y + right[i2].Y) * 0.5f);
+            hw[i2] = left[i2].DistanceTo(right[i2]) * 0.5f;
+            if (i2 > 0)
+                cum[i2] = cum[i2 - 1] + cen[i2].DistanceTo(cen[i2 - 1]);
+        }
+        var total = cum[n - 1];
+        if (total < 6.0) { return; }
+        _wearState = WearSeed(cen);
+        var at = 18.0 + WearNext() * 25.0;
+        while (at < total - 5.0)
+        {
+            CrackAt(cen, cum, hw, n, at, roadCol);
+            at += 55.0 / Math.Max(0.05f, _wearDensity);
+        }
+        at = 45.0 + WearNext() * 120.0;
+        while (at < total - 12.0)
+        {
+            PatchAt(cen, cum, hw, n, at, roadCol);
+            at += 260.0 / Math.Max(0.05f, _wearDensity);
+        }
+    }
+
+    /// Cracks come in three shapes - a real street has a mix:
+    /// 0 a seam across the carriageway, 1 a long crack ALONG it with
+    /// branches, 2 a short star where the asphalt failed. Jitter changes the
+    /// kink frequency, the branch count and the width, so two cracks on the
+    /// same road never look alike.
+    private void CrackAt(Vector2[] cen, double[] cum, float[] hw, int n,
+                        double at, Color roadCol)
+    {
+        Vector2 p = new Vector2(0, 0);
+        Vector2 dir = new Vector2(0, 0);
+        float halfW = 0f;
+        if (!RibbonAt(cen, cum, hw, n, at, out p, out dir, out halfW) || halfW < 0.5f) { return; }
+        var up = new Vector2(-dir.Y, dir.X);
+        var style = WearI(3);
+        var thick = 0.045f + WearF() * 0.03f;
+        var alpha = 0.38f + WearF() * 0.22f;
+        var col = new Color(roadCol.R * 0.5f, roadCol.G * 0.5f, roadCol.B * 0.55f, alpha);
+        var along = (WearF() - 0.5f) * halfW * 0.8f;
+        var o = p + dir * along;
+        if (style == 1)
+        {
+            var l2 = halfW * (1.2f + WearF() * 2.2f);
+            var cur = o - dir * (l2 * 0.5f);
+            var steps2 = 6 + WearI(8);
+            for (int i2 = 0; i2 < steps2; i2++)
+            {
+                var wob = (WearF() - 0.5f) * halfW * 0.5f;
+                var nxt = cur + dir * (l2 / steps2) + up * wob;
+                AddStrip(_crackMesh, cur, nxt, thick, col);
+                if (WearF() < 0.45f)
+                {
+                    var side = WearF() < 0.5f ? -1f : 1f;
+                    var bl = halfW * (0.25f + WearF() * 0.5f) * side;
+                    var bend = (WearF() - 0.5f) * 0.7f;
+                    var b2 = cur + up * bl + dir * bl * bend;
+                    AddStrip(_crackMesh, cur, b2, thick * 0.75f, col);
+                    if (WearF() < 0.4f)
+                        AddStrip(_crackMesh, b2, b2 + up * bl * 0.45f, thick * 0.6f, col);
+                }
+                cur = nxt;
+            }
+        }
+        else if (style == 2)
+        {
+            var arms = 3 + WearI(3);
+            var baseA = WearF() * 3.14159f;
+            var reach = halfW * (0.25f + WearF() * 0.5f);
+            for (int i2 = 0; i2 < arms; i2++)
+            {
+                var ang = baseA + i2 * (2f * 3.14159f / arms) + (WearF() - 0.5f) * 0.6f;
+                var len2 = reach * (0.6f + WearF() * 0.7f);
+                var d2 = new Vector2((float)Math.Cos(ang), (float)Math.Sin(ang)) * len2;
+                var mid = d2 * 0.5f + up * ((WearF() - 0.5f) * 0.25f) * len2;
+                AddStrip(_crackMesh, o, o + mid, thick, col);
+                AddStrip(_crackMesh, o + mid, o + d2, thick * 0.85f, col);
+            }
+        }
+        else
+        {
+            var len = halfW * 2f * (0.45f + WearF() * 0.5f);
+            var tilt = (WearF() - 0.5f) * 0.9f;
+            var cur2 = o - up * (len * 0.5f) - dir * (len * 0.5f) * tilt;
+            var steps3 = 4 + WearI(6);
+            for (int i2 = 0; i2 < steps3; i2++)
+            {
+                var nxt2 = cur2 + up * (len / steps3)
+                    + dir * ((WearF() - 0.5f) * thick * 10f);
+                AddStrip(_crackMesh, cur2, nxt2, thick, col);
+                cur2 = nxt2;
+            }
+        }
+        _wearCracks += 1;
+    }
+
+    /// A repair patch IS basically rectangular - a tar cutter follows the
+    /// crack it covers, and that reads as a quadrilateral along the road. What
+    /// makes it look real is that the edges are not straight: each side is
+    /// subdivided and wobbles a little sideways (a few centimetres of drift
+    /// with a phase, not random spikes), and the corners are cut slightly
+    /// inside. That is the user's correction 2026-10-26: right-angled overall,
+    /// wobbling lines, never sharp-cornered, never a star.
+    private void PatchAt(Vector2[] cen, double[] cum, float[] hw, int n,
+                        double at, Color roadCol)
+    {
+        Vector2 p = new Vector2(0, 0);
+        Vector2 dir = new Vector2(0, 0);
+        float halfW = 0f;
+        if (!RibbonAt(cen, cum, hw, n, at, out p, out dir, out halfW) || halfW < 0.7f) { return; }
+        var up = new Vector2(-dir.Y, dir.X);
+        var ry = halfW * (0.55f + WearF() * 0.4f);              // across the road
+        var rx = ry * (0.8f + WearF() * 1.6f);                  // along the road
+        var c = p + up * ((WearF() - 0.5f) * halfW * 0.3f)
+            + dir * ((WearF() - 0.5f) * rx * 0.3f);
+        // four corners of the rectangle in the road's frame
+        var corners = new Vector2[4];
+        corners[0] = c - dir * rx - up * ry;
+        corners[1] = c + dir * rx - up * ry;
+        corners[2] = c + dir * rx + up * ry;
+        corners[3] = c - dir * rx + up * ry;
+        // each edge gets a few mid points that drift sideways by a phase
+        var pts = new List<Vector2>();
+        var wobX = (WearF() - 0.5f) * 0.06f;
+        var wobY = (WearF() - 0.5f) * 0.06f;
+        for (int e = 0; e < 4; e++)
+        {
+            var a = corners[e];
+            var b = corners[(e + 1) % 4];
+            var d = b - a;
+            var dl = (float)Math.Sqrt(d.X * d.X + d.Y * d.Y);
+            if (dl < 1e-4f) { continue; }
+            var nrm = new Vector2(-d.Y / dl, d.X / dl);
+            var steps2 = 4 + WearI(3);
+            pts.Add(a);
+            for (int i2 = 1; i2 < steps2; i2++)
+            {
+                var t = (float)i2 / steps2;
+                var ph = (float)Math.Sin(t * 6.283f * (1f + WearF() * 2f));
+                var off = (float)(ph * dl * 0.02f);
+                pts.Add(a + d * t + nrm * (off + (WearF() - 0.5f) * 0.06f));
+            }
+        }
+        var pick = WearF();
+        float f = pick < 0.55f ? 0.74f : 1.15f;
+        var col = new Color(Math.Min(1f, roadCol.R * f), Math.Min(1f, roadCol.G * f),
+                            Math.Min(1f, roadCol.B * f), 0.85f);
+        AddPolygon(pts, col, 1);
+        var seam = new Color(roadCol.R * 0.6f, roadCol.G * 0.6f, roadCol.B * 0.65f, 0.4f);
+        for (int i2 = 0; i2 < pts.Count; i2++)
+            AddStrip(_patchMesh, pts[i2], pts[(i2 + 1) % pts.Count], 0.05f, seam);
+        _wearPatches += 1;
+    }
+
+    private void AddTri(ImmediateMesh m, Vector2 a, Vector2 b, Vector2 c, Color col)
+    {
+        m.SurfaceSetColor(col);
+        m.SurfaceAddVertex(new Vector3(a.X, a.Y, 0));
+        m.SurfaceSetColor(col);
+        m.SurfaceAddVertex(new Vector3(b.X, b.Y, 0));
+        m.SurfaceSetColor(col);
+        m.SurfaceAddVertex(new Vector3(c.X, c.Y, 0));
+    }
+
+    private void AddStrip(ImmediateMesh m, Vector2 a, Vector2 b, float thick, Color col)
+    {
+        float dx = b.X - a.X, dy = b.Y - a.Y;
+        var dl = (float)Math.Sqrt(dx * dx + dy * dy);
+        if (dl < 1e-4f) { return; }
+        float nx = -dy / dl * thick * 0.5f, ny = dx / dl * thick * 0.5f;
+        var a1 = new Vector2(a.X - nx, a.Y - ny);
+        var a2 = new Vector2(a.X + nx, a.Y + ny);
+        var b1 = new Vector2(b.X - nx, b.Y - ny);
+        var b2 = new Vector2(b.X + nx, b.Y + ny);
+        AddQuad(m, a1, a2, b2, b1, col);
+    }
+
+    private void AddQuad(ImmediateMesh m, Vector2 a, Vector2 b, Vector2 c, Vector2 d, Color col)
+    {
+        AddTri(m, a, b, c, col);
+        AddTri(m, a, c, d, col);
+    }
+
     private void AddRoadStrips(JsonElement stripsEl, Color color)
     {
+        if (_crackMesh == null)
+        {
+            _crackMesh = new ImmediateMesh();
+            _crackMesh.SurfaceBegin(Mesh.PrimitiveType.Triangles);
+            _patchMesh = new ImmediateMesh();
+            _patchMesh.SurfaceBegin(Mesh.PrimitiveType.Triangles);
+        }
         var mesh = new ImmediateMesh();
         mesh.SurfaceBegin(Mesh.PrimitiveType.Triangles);
         mesh.SurfaceSetColor(color);
-        int quads = 0;
+        int quads = 0, textured = 0, flat = 0;
         foreach (var s in stripsEl.EnumerateArray())
         {
             var left = Pts(s.GetProperty("left"));
             var right = Pts(s.GetProperty("right"));
             if (left.Count != right.Count || left.Count < 2) continue;
+            var hw = s.TryGetProperty("highway", out var hEl) ? hEl.GetString() : "";
+            AddRoadWear(left, right, color);
+            if (_roadTextured && DrawTexturedRibbon(left, right, hw) > 0)
+            { textured += 1; continue; }
+            flat += 1;
             for (int i = 0; i + 1 < left.Count; i++)
             {
                 Vector2 a = left[i], b = left[i + 1], c = right[i + 1], d = right[i];
@@ -2372,9 +2716,229 @@ public partial class MapRenderer : Node2D
                 quads += 1;
             }
         }
-        mesh.SurfaceEnd();
-        if (quads == 0) return;
-        _world.AddChild(new MeshInstance2D { Mesh = mesh, ZIndex = 0 });
+        if (quads > 0) { mesh.SurfaceEnd(); _world.AddChild(new MeshInstance2D { Mesh = mesh, ZIndex = 0 }); }
+        if (_wearPatches > 0)
+        {
+            _patchMesh.SurfaceEnd();
+            _world.AddChild(new MeshInstance2D { Mesh = _patchMesh, ZIndex = 1 });
+        }
+        if (_wearCracks > 0)
+        {
+            _crackMesh.SurfaceEnd();
+            _world.AddChild(new MeshInstance2D { Mesh = _crackMesh, ZIndex = 2 });
+        }
+        if (_wearDensity > 0f)
+            GD.Print("ROAD-WEAR ", _wearCracks, " cracks, ", _wearPatches,
+                " repair patches at density ", _wearDensity,
+                " - deterministic per road shape, --road-wear 0 turns them off");
+        if (_wearDbg != "")
+            GD.Print("ROAD-WEAR-PLACEMENTS\n", _wearDbg);
+        if (textured > 0 || _roadTextured)
+        {
+            GD.Print("ROAD-MATERIALS ", textured, " ribbons painted with a material, ",
+                flat, " with the flat fill (types without a material)");
+        }
+    }
+
+    /// <summary>Paint one road ribbon with a tiling texture. Godot 4.7 has no
+    /// runtime sampler-repeat API any more (the old `Texture.SET_REPEAT`/
+    /// `set_repeat` surface is gone from the class docs and from the C#
+    /// binding), and 2D textures CLAMP - so one polygon spanning a whole road
+    /// would paint one stretched tile. The honest shape is one polygon per
+    /// TILE PATCH: the ribbon is walked by arc length, cut into patches of
+    /// `tileM` metres along the road and `tileM` metres across it, and every
+    /// patch carries UV inside a single tile. The generated tiles are seamless
+    /// at their own border, so patch edges meet continuously; a short final
+    /// patch just samples a partial tile, which never leaves [0,1].
+    /// Returns the number of patches painted - 0 means "no material for this
+    /// type", the caller's flat-fill fallback.</summary>
+    private int DrawTexturedRibbon(List<Vector2> left, List<Vector2> right, string highway)
+    {
+        var tileK = _roadTileK;
+        var file = "";
+        var tint = ColorPlain;
+        if (_roadAllMaterial != "")
+        {
+            file = _roadAllMaterial;
+        }
+        else
+        {
+            if (!ROAD_MATERIALS.TryGetValue(highway, out var mm)) { return 0; }
+            if (_roadFlat.Split(",").Any(x => x.Trim() == highway)) { return 0; }
+            var (f2, k2, t2) = mm;
+            file = f2;
+            tileK = k2;
+            tint = t2;
+        }
+        var tileM = tileK;
+        if (_roadTileOverride > 0.0) { tileM = _roadTileOverride; }
+        var tex = RoadTexture(file);
+        if (tex is null) { return 0; }
+        var n = left.Count;
+        if (n < 2) { return 0; }
+        // Cumulative arc length along the ribbon's centreline, in metres.
+        var cum = new double[n];
+        var acc = 0.0;
+        for (int i = 1; i < n; i++)
+        {
+            var m0 = (left[i - 1] + right[i - 1]) * 0.5f;
+            var m1 = (left[i] + right[i]) * 0.5f;
+            acc += m0.DistanceTo(m1);
+            cum[i] = acc;
+        }
+        var total = acc;
+        if (total <= 1e-6) { return 0; }
+        // These ribbons are constant-width by construction, so the lateral
+        // split is the same everywhere; a wider-than-one-tile road is cut into
+        // bands of tileM metres, each band keeping its UV inside one tile.
+        var widthM = (double)left[n / 2].DistanceTo(right[n / 2]);
+        if (widthM <= 1e-6) { return 0; }
+        // The tile scale follows the ROAD: one tile covers `_roadTileK` road
+        // widths, so a material reads with the same feature size relative to
+        // the street it paints, on a 3.5 m lane and on a 14 m motorway alike.
+        // A generator prompt cannot know the road it will be pasted onto, so
+        // the metre-scale belongs here, not in the asset or in a per-type
+        // constant. `--road-tile <m>` still overrides it for one run.
+        if (_roadTileOverride <= 0.0) { tileM = _roadTileK * widthM; }
+        int bands = widthM <= tileM ? 1 : (int)(widthM / tileM) + 1;
+        var pxPerM = (double)tex.GetWidth() / tileM;
+        int patches = 0;
+        // Chunk boundaries are PROFILE POINTS, never an arc length between two
+        // of them: with `s0 += tileM` the next chunk started at a point whose
+        // cum is BELOW s0, so its first vertices got a negative u - clamped to
+        // the texture's last column, which painted a combed band at every
+        // chunk boundary (measured: one band per 8 m at 20 px/m).
+        var i0 = 0;
+        while (i0 + 1 < n)
+        {
+            var i1 = i0 + 1;
+            while (i1 + 1 < n && cum[i1 + 1] - cum[i0] <= tileM) { i1 += 1; }
+            for (int b = 0; b < bands; b++)
+            {
+                var f0 = (double)b * tileM / widthM;
+                var f1 = Math.Min((double)(b + 1) * tileM / widthM, 1.0);
+                if (f1 <= f0) { continue; }
+                var pts = new List<Vector2>();
+                var uv = new List<Vector2>();
+                for (int i = i0; i <= i1; i++)
+                {
+                    var e = (float)(cum[i] - cum[i0]) * (float)pxPerM;
+                    pts.Add(left[i].Lerp(right[i], (float)f0));
+                    uv.Add(new(e, 0f));
+                }
+                for (int i = i1; i >= i0; i--)
+                {
+                    var e = (float)(cum[i] - cum[i0]) * (float)pxPerM;
+                    var v = (float)((f1 - f0) * widthM) * (float)pxPerM;
+                    pts.Add(left[i].Lerp(right[i], (float)f1));
+                    uv.Add(new(e, v));
+                }
+                if (pts.Count >= 3)
+                {
+                    var poly = new Polygon2D { Polygon = pts.ToArray(), Texture = tex,
+                        Color = tint, ZIndex = 0 };
+                    poly.Call("set_uv", Variant.From(uv.ToArray()));
+                    _world.AddChild(poly);
+                    patches += 1;
+                }
+            }
+            i0 = i1;
+        }
+        _texPolys += patches;
+        return patches;
+    }
+
+    private static readonly Color ColorPlain = new(1f, 1f, 1f);
+
+    /// <summary>Which material paints which OSM road type. Textures generated
+    /// by scripts/comfy_texture.py at a metre scale that suits the type: a
+    /// motorway reads its tiles over 8 m, a residential lane over 4 m. Tints
+    /// stay near white so the judgement is about the picture, not about a
+    /// darkening filter.</summary>
+    /// <summary>Which material paints which OSM road type, and how large one
+    /// tile is ON THAT ROAD: `TileK` is metres-per-tile as a multiple of the
+    /// road's own width, so a material can never read as boulders on a lane or
+    /// as wallpaper on a motorway. The values come from what the material must
+    /// depict at real size, not from taste: fine asphalt aggregate is millimetres
+    /// -> a tile must cover ~1.5 m of a 7 m road (K=0.2); the worn concrete that
+    /// read right at full-road scale keeps K=1; paving stones at ~0.2 m need a
+    /// tile of ~2.5 m on a 3.5 m lane (K=0.7). Tint stays near white so the
+    /// judgement is about the picture. A type without a material keeps the flat
+    /// fill; `--road-flat` forces flat per run without touching this table.</summary>
+    private static readonly Dictionary<string, (string File, double TileK, Color Tint)>
+        ROAD_MATERIALS = new()
+    {
+        ["motorway"] = ("road_main", 1.0, ColorPlain),
+        ["motorway_link"] = ("road_main", 1.0, ColorPlain),
+        ["trunk"] = ("road_main", 1.0, ColorPlain),
+        ["trunk_link"] = ("road_main", 1.0, ColorPlain),
+        ["primary"] = ("road_main", 1.0, ColorPlain),
+        ["primary_link"] = ("road_main", 1.0, ColorPlain),
+        ["secondary"] = ("road_cracked", 1.0, ColorPlain),
+        ["secondary_link"] = ("road_cracked", 1.0, ColorPlain),
+        ["tertiary"] = ("road_cracked", 1.0, ColorPlain),
+        ["tertiary_link"] = ("road_cracked", 1.0, ColorPlain),
+        ["residential"] = ("road_cobble", 0.7, ColorPlain),
+        ["unclassified"] = ("road_cobble", 0.7, ColorPlain),
+        ["service"] = ("road_cracked", 0.5, ColorPlain),
+    };
+
+    private bool _roadTextured = false;        // --road-materials
+    private double _roadTileOverride = 0.0;    // --road-tile <m>: one scale for every type
+    private double _roadTileK = 1.0;           // --tile-k: metres per tile = K * road width
+    /// Dev flag: log the client's own frame cost and node count, every 2 s,
+    /// so the material/wear path can be compared against the flat fill
+    /// (docs/GODOT_FRONTEND.md: the renderer's cost scales with polygons, not
+    /// with the tile's origin).
+    private bool _perfProbe;
+    private double _perfAccMs, _perfMaxMs, _perfWall0;
+    private double _perfFrameAccMs, _perfFrameMaxMs;
+    private int _perfFrames;
+    private string _roadAllMaterial = "";      // --road-all <file>: one material for every type
+    private float _wearDensity = 1.0f;         // --road-wear <0..4>
+    private ImmediateMesh _crackMesh, _patchMesh;
+    private int _wearCracks = 0, _wearPatches = 0;
+    private int _texPolys = 0;   // textured polygons painted (the cost driver)
+    /// The OFF-ROAD ground (docs/GODOT_FRONTEND.md, "the housing area"): the
+    /// villa district between the streets is not flat green - it is gardens,
+    /// hedges and lawn. Three generated aerial tiles are laid as a grid UNDER
+    /// the road fill (the roads are opaque, so no boolean with the paved area
+    /// is needed), and every cell picks its variant, rotation and mirror from
+    /// its own coordinates - so the same map always gets the same patchwork,
+    /// and a tape replay agrees with the run. Tile metres are the user's
+    /// `--ground`; the count is capped, so the tile grows instead of the
+    /// frame time exploding at a zoomed-out view.
+    private const int GroundMaxTiles = 4000;
+    /// How many tiles may be visible side by side at most. Below that number
+    /// the user's --ground metres are kept (a real plot is ~40 m deep); above
+    /// it the tile grows with the view, so a zoomed-out city shows whole
+    /// blocks of greenery instead of a mosaic of individual gardens - a
+    /// satellite-style map view, and the reason "too green and popping" (user,
+    /// 2026-10-26) stopped at the overview rather than in the tiles.
+    private const int GroundTilesAcross = 26;
+    /// Zoom ramp (px/m) for the ground fade: at or above the first value the
+    /// texture is untouched, below the second it is fully washed to the plain
+    /// ground colour. Chosen around what a person actually reads as a city map.
+    private const float GroundFadeAtPxPerM = 8.0f;
+    private const float GroundFadeFullAtPxPerM = 2.2f;
+
+    private string _roadFlat = "";             // --road-flat "a,b": types that keep the flat fill
+    private readonly Dictionary<string, Texture2D> _roadTexCache = new();
+
+    private Texture2D RoadTexture(string file)
+    {
+        if (_roadTexCache.ContainsKey(file)) { return _roadTexCache[file]; }
+        var path = $"res://assets/textures/{file}.png";
+        Texture2D tex = null;
+        if (GD.Load<Texture2D>(path) is Texture2D t) { tex = t; }
+        else
+        {
+            GD.Print("ROAD-MATERIAL '", file, "' is not in the project at ", path,
+                " - that type falls back to the flat fill (generate with scripts/comfy_texture.py,",
+                " then import with `Godot --headless --path . --import`)");
+        }
+        _roadTexCache[file] = tex;
+        return tex;
     }
 
     /// <summary>Bridge decks (z 20) sit above everything else in the world,
@@ -2435,7 +2999,15 @@ public partial class MapRenderer : Node2D
     // Paint widths in METRES: a kerb line, a centreline and a tyre track are
     // all ~15 cm of paint, so they scale with the view instead of being
     // floored to screen pixels.
-    const float EdgeLineWidthM = 0.15f;
+    /// Paint fallback/cap, METRES: it mirrors the SIM's one paint width
+    /// (Config.ROAD_PAINT_WIDTH_M - German markings are 0.10-0.12 m) so the
+    /// client cannot invent a heavier line than the map declares. The payload's
+    /// own widths are used where present; this value only caps the kerb line,
+    /// which must never exceed the centre line (user decision 2026-10-26).
+    const float PaintWidthM = (float)DrivingGame.Sim.Config.ROAD_PAINT_WIDTH_M;
+    /// Narrowest paint width the current map declares (set while reading
+    /// `lane_markings`, 9.9f = nothing seen).
+    private float _narrowPaint = 9.9f;
     const float TrailWidthM = 0.15f;
     // Edge lines are hidden entirely below this zoom (6 px/m) instead of
     // turning into sub-pixel noise (user decision).
@@ -2753,6 +3325,7 @@ public partial class MapRenderer : Node2D
 
     public override void _Process(double delta)
     {
+        var perfT0 = Time.GetTicksMsec();
         // "save this information regularly, so that the window state can be
         // restored after a crash or when terminated externally" - the runner
         // does terminate this client from outside, so the memory may not hang
@@ -2833,6 +3406,26 @@ public partial class MapRenderer : Node2D
 
         // M2: interpolate cars from the /state buffer + camera follow.
         UpdateCars();
+        if (_perfProbe)
+        {
+            _perfAccMs += Time.GetTicksMsec() - perfT0;
+            _perfFrameAccMs += delta * 1000.0;   // TRUE frame time incl. Godot's draw
+            _perfFrameMaxMs = Math.Max(_perfFrameMaxMs, delta * 1000.0);
+            _perfMaxMs = Math.Max(_perfMaxMs, Time.GetTicksMsec() - perfT0);
+            _perfFrames += 1;
+            var wall = Time.GetTicksMsec() / 1000.0;
+            if (_perfWall0 == 0.0) { _perfWall0 = wall; }
+            if (wall - _perfWall0 >= 2.0)
+            {
+                GD.Print($"PERF frames={_perfFrames} fps={_perfFrames / (wall - _perfWall0):F1} " +
+                         $"avg_frame_ms={_perfFrameAccMs / _perfFrames:F3} max_frame_ms={_perfFrameMaxMs:F2} " +
+                         $"avg_process_ms={_perfAccMs / _perfFrames:F2} wall_span={(wall - _perfWall0):F1} " +
+                         $"world_nodes={_world.GetChildCount()} textured_polys={_texPolys} " +
+                         $"wear={_wearCracks + _wearPatches}");
+                _perfFrames = 0; _perfAccMs = 0; _perfMaxMs = 0; _perfWall0 = wall;
+                _perfFrameAccMs = 0; _perfFrameMaxMs = 0;
+            }
+        }
 
         if (_motionLog != null)
             foreach (var kv in _carNodes)
@@ -3545,7 +4138,13 @@ public partial class MapRenderer : Node2D
             // Sprite nose points up (north) -> rotation = heading directly.
             node.RotationDegrees = hdg;
             // Above its own deck, below any higher level (M2 occlusion).
-            node.ZIndex = 10 + 20 * level;
+            // The C# property assignment does NOT reach Godot's z_index here
+            // (measured: a car node reports z_index 0 after `node.ZIndex = 10`,
+            // so it sits at the road's own level and gets buried when the map
+            // is rebuilt above it - the reviewer's "cars are invisible"). The
+            // dynamic call is the binding that works in this build (same
+            // pattern as Polygon2D's set_uv).
+            node.Call("set_z_index", 10 + 20 * level);
 
             // bitteschön: the conceder signals TOWARD the car it lets through.
             if (_carMeta.TryGetValue(kv.Key, out var metaC))

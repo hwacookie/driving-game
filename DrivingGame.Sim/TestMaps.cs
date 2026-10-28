@@ -232,6 +232,7 @@ public static class TestMaps
     private static readonly Dictionary<string, Func<RoadNetwork>> Registry = new()
     {
         ["basic"] = BuildBasicTestMap,
+        ["swatch"] = BuildSwatchMap,
     };
 
     /// <summary>Build a named synthetic test map.</summary>
@@ -271,6 +272,73 @@ public static class TestMaps
     ///               Vorfahrt signs (Priority SE-NW, Yield SW-NE)
     ///   Tile (3,3): Un-signed figure-8 - REAL degree-4 crossing with NO
     ///               signs (right-before-left / Rechts vor Links governs)</summary>
+    /// <summary>SWATCH map: one road per MATERIAL, driven as one route.
+    /// Ten parallel legs, each a different OSM road type, joined by alternating
+    /// semicircular connectors so the whole thing is one continuous serpentine:
+    /// a car can be started at one end and drive through every material. That
+    /// is the shape a generated texture is judged in — the question "does this
+    /// contrast work against the ground and a car" only has an answer while the
+    /// material is under traffic at real metre scale, not next to a PNG.
+    ///
+    /// Layout (metres, x east, y north): legs at x = i*PITCH from y=0..LEG,
+    /// connectors alternate above (odd) and below (even), radius PITCH/2. PITCH
+    /// is 60 m so even a 14 m motorway keeps a 23 m inner radius on the bend.
+    /// The types are the ones ROAD_MATERIALS in the renderer knows: the map
+    /// states the road type, the renderer decides its material.</summary>
+    public static RoadNetwork BuildSwatchMap()
+    {
+        var b = new MapBuilder();
+        const int LEGS = 10;
+        const double PITCH = 60.0, LEG = 400.0, R = PITCH / 2.0;
+        string[] types = ["primary_link", "secondary", "secondary_link", "tertiary",
+            "tertiary_link", "residential", "unclassified", "service", "motorway_link",
+            "trunk_link"];   // every leg at NORMAL width (7 m, service 3.5 m) - a
+                            // 14 m motorway reads as a different thing than the
+                            // material being judged on an ordinary street
+
+        static string Leg(int i, int k) => $"sw{i}_{k}";
+
+        for (int i = 0; i < LEGS; i++)
+        {
+            var x = i * PITCH;
+            bool up = i % 2 == 0;                        // even legs run north
+            var y0 = up ? 0.0 : LEG;
+            var y1 = up ? LEG : 0.0;
+            b.Node(Leg(i, 0), x, y0);
+            b.Node(Leg(i, 1), x, y1);
+            b.Road(Leg(i, 0), Leg(i, 1), highway: types[i]);
+        }
+
+        // The connectors: a semicircular chain of nodes between the EXIT of leg
+        // i (always its Leg(i,1) node, since legs are built in driving order)
+        // and the ENTRY of leg i+1 (always Leg(i+1,0)). Even legs exit in the
+        // north, so their join bulges up; odd joins bulge down.
+        const int ARC = 8;
+        for (int i = 0; i + 1 < LEGS; i++)
+        {
+            var x0 = i * PITCH;
+            var x1 = (i + 1) * PITCH;
+            bool topJoin = i % 2 == 0;
+            var cy = topJoin ? LEG : 0.0;
+            var cx = (x0 + x1) / 2.0;
+            var prev = Leg(i, 1);
+            for (int k = 1; k < ARC; k++)               // k == ARC is the entry node itself
+            {
+                var a = Math.PI * (1.0 - (double)k / ARC);          // 180deg -> 0deg
+                var px = cx + R * Math.Cos(a);
+                var py = cy + (topJoin ? R : -R) * Math.Sin(a);
+                var nid = $"swj{i}_{k}";
+                b.Node(nid, px, py);
+                b.Road(prev, nid, highway: types[i + 1]);   // the bend belongs to the road it leads into
+                prev = nid;
+            }
+            b.Road(prev, Leg(i + 1, 0), highway: types[i + 1]);
+        }
+
+        b.Start("swatch_drive", Leg(0, 0));             // one drive through every material
+        return b.Build();
+    }
+
     public static RoadNetwork BuildBasicTestMap()
     {
         var b = new MapBuilder();
