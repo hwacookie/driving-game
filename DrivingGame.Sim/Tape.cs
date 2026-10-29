@@ -621,10 +621,38 @@ public static class RunTape
             _carOpts.Clear();        // ...and a new set of view options
             _focus.Clear();          // ...and a new camera intent per scenario
             _results.Clear();
-            _mapName = mapName ?? "";
+            _mapName = SanitiseMapName(mapName);
             _mapHash = mapHash ?? "";
             DtFixedS = dtFixedS > 0.0 ? dtFixedS : 1.0 / 60.0;
         }
+    }
+
+    /// <summary>A map name that can survive the header line. The header is
+    /// space-separated `key=value` tokens and the reader takes the first token
+    /// after `map=` - so a name holding a space does not fail, it LIES:
+    /// issue #11 recorded `map=engine boot`, which read back as a map called
+    /// 'engine', and the reviewer then refused to paint cars on a ground it
+    /// could not build. An unusable name is therefore replaced - and said out
+    /// loud - instead of being written and mis-read.</summary>
+    static string SanitiseMapName(string raw)
+    {
+        string s = (raw ?? "").Trim();
+        if (s.Length == 0) return s;
+        bool bad = false;
+        foreach (char c in s)
+            if (char.IsWhiteSpace(c) || c == '=' || c == ',') { bad = true; break; }
+        if (!bad) return s;
+        var buf = new char[s.Length];
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            buf[i] = (char.IsWhiteSpace(c) || c == '=' || c == ',') ? '_' : c;
+        }
+        var clean = new string(buf);
+        System.Console.WriteLine(
+            $"TAPE-MAP-NAME '{s}' cannot stand in the header (space, ',' and '=' " +
+            $"separate tokens) → '{clean}'");
+        return clean;
     }
 
     public static void Stop()
