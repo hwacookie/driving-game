@@ -2126,6 +2126,10 @@ public partial class MapRenderer : Node2D
         w.CloseRequested += () => CloseDetailWindow(w);
         w.FollowAsked = ToggleDetailFollow;
         w.CenterAsked = CenterDetail;
+        // The per-car track toggle (issue #9): the box shows the EFFECTIVE state
+        // and a press overrides the test for this window.
+        w.TracksAsked = (win, on) => SetTyreLinesOverride(win.Uid, on);
+        w.TracksChecked = WantsTyreLines(uid);
         w.SwitchAsked = (win, other) =>
         {
             // "click an id, read about THAT car" — the window changes subject,
@@ -2326,6 +2330,23 @@ public partial class MapRenderer : Node2D
                          $"({(w.ListHeightForProbe() - listPre > 150 ? "took the growth" : "DID NOT take the growth — wrong")}) " +
                          $"· rows={w.RowCountForProbe()}");
                 GD.Print($"DETAIL-PROBE layout after the resize: {w.LayoutForProbe()}");
+                // The "tyre lines" checkbox (issue #9), pressed the way an
+                // operator presses it: the chain under test is signal → operator
+                // override → the nodes on the map, so it is read at BOTH ends.
+                var tracksBox = w.TracksButtonForProbe();
+                bool wantBefore = WantsTyreLines(w.Uid);
+                int nodesBefore = TyreLineNodeCount();
+                ClickInWindow(w, tracksBox, "DETAIL-PROBE tyre lines");
+                GetTree().CreateTimer(0.45).Timeout += () =>
+                {
+                    bool now = WantsTyreLines(w.Uid);
+                    int nodesNow = TyreLineNodeCount();
+                    bool chain = now != wantBefore && (now ? nodesNow > 0 : nodesNow == 0);
+                    GD.Print($"DETAIL-PROBE tyre lines: wanted {wantBefore} → {now} " +
+                             $"· box={w.TracksChecked} · track nodes {nodesBefore} → {nodesNow} " +
+                             $"· verdict={(chain ? "the press flipped the state and the map followed"
+                                                 : "MISMATCH — state and map disagree")}");
+                };
                 var cam0 = _cam.GlobalPosition;
                 ClickInWindow(w, w.FollowButton, "DETAIL-PROBE follow");
                 GetTree().CreateTimer(0.8).Timeout += () =>
@@ -2537,6 +2558,7 @@ public partial class MapRenderer : Node2D
         foreach (var w in _details)
         {
             if (!w.Showing) continue;
+            w.TracksChecked = WantsTyreLines(w.Uid);   // the box follows the picture
             if (!_carBuf.TryGetValue(w.Uid, out var buf) || buf.Count == 0) continue;
             var fr = buf[^1];
             var d = new CarDetailData
@@ -2582,6 +2604,7 @@ public partial class MapRenderer : Node2D
         foreach (var w in _details)
         {
             if (!w.Showing) continue;
+            w.TracksChecked = WantsTyreLines(w.Uid);   // the box follows the picture
             w.CarTexture = CarTexture(ColorOf(w.Uid));
             w.Update(BuildDetailData(w.Uid, fr, holderOf));
         }

@@ -4858,6 +4858,10 @@ public partial class MapRenderer : Node2D
             foreach (var kv in _trails)
                 if (kv.Value.Count > 0 && WantsTyreLines(kv.Key))
                     sig.Append(kv.Key).Append('#').Append(kv.Value.Count).Append(';');
+        // A checkbox press must repaint at once, so the overrides are part of
+        // what counts as "changed".
+        foreach (var kv in _tyreOverride)
+            sig.Append("o").Append(kv.Key).Append(kv.Value ? '1' : '0');
         string sigNow = sig.ToString();
         if (sigNow != _lastTrailSig || drift)
         {
@@ -4896,6 +4900,31 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, Line2D[]> _tyreLineNodes = new();
     private string _lastTrailSig = "";
 
+    /// <summary>The OPERATOR's per-car toggle (the checkbox in the car detail
+    /// window, issue #9): it outranks what the test declared, for this window and
+    /// session, in the live view and in a review alike. Deliberately NOT written
+    /// to the tape — a decision about the picture is not a fact of the run, and
+    /// someone reviewing the recording must see what the recording says.</summary>
+    private readonly Dictionary<long, bool> _tyreOverride = new();
+
+    void SetTyreLinesOverride(long uid, bool on)
+    {
+        _tyreOverride[uid] = on;
+        GD.Print($"TYRE-LINES uid {uid} → {(on ? "on" : "off")} by the operator " +
+                 "(outranks the test for this window; not recorded to the tape)");
+    }
+
+    /// <summary>How many track lines are on the map right now — the far end of
+    /// the checkbox chain, read by the detail probe (issue #9).</summary>
+    int TyreLineNodeCount()
+    {
+        int n = 0;
+        foreach (var arr in _tyreLineNodes.Values)
+            foreach (var l in arr)
+                if (l != null && GodotObject.IsInstanceValid(l)) n++;
+        return n;
+    }
+
     /// <summary>The four-corner scheme of the old single-car view, kept as the
     /// debug mode issue #9 asked to preserve.</summary>
     static readonly Color[] CornerDebugColors = {
@@ -4922,6 +4951,8 @@ public partial class MapRenderer : Node2D
     /// followed car only.</summary>
     bool WantsTyreLines(long uid)
     {
+        // The operator's click is the loudest voice (issue #9).
+        if (_tyreOverride.TryGetValue(uid, out var forced)) return forced;
         if (_review || _tapeLive)
         {
             // In a review the TAPE decides, and /state never does: the window

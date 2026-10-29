@@ -160,6 +160,28 @@ public partial class CarDetailWindow : Window
     // --- what the client is asked to do (a window never moves the camera or
     //     the cursor itself: it names the ask, the client owns the state) -----
     public System.Action<CarDetailWindow> FollowAsked;
+
+    /// <summary>Asked when the operator flips the "tyre lines" checkbox (issue
+    /// #9), with the state they chose — the window does not have to know how the
+    /// client stores the decision.</summary>
+    public System.Action<CarDetailWindow, bool> TracksAsked;
+
+    /// <summary>Shows the car's EFFECTIVE track state (declaration or operator
+    /// override alike): the box answers "what is on screen", not "what did the
+    /// test say".</summary>
+    public bool TracksChecked
+    {
+        get => _tracksChk.ButtonPressed;
+        set
+        {
+            if (_tracksChk.ButtonPressed == value) return;
+            // Blocked signals: writing the box from the frame must not read as an
+            // operator press and bounce straight back into the override.
+            _tracksChk.SetBlockSignals(true);
+            _tracksChk.ButtonPressed = value;
+            _tracksChk.SetBlockSignals(false);
+        }
+    }
     public System.Action<CarDetailWindow> CenterAsked;
     public System.Action<CarDetailWindow, long> SwitchAsked;     // chain id clicked
     public System.Action<CarDetailWindow, long, bool> HighlightAsked;  // held / released
@@ -189,6 +211,10 @@ public partial class CarDetailWindow : Window
     private readonly Button _earlierBtn;
     private readonly Button _laterBtn;
     private readonly Button _nowBtn;
+    // "tyre lines" (issue #9): the operator's per-car toggle for the wheel
+    // tracks, living in the same row as follow/centre — the row every control
+    // that must always be reachable uses.
+    private readonly CheckBox _tracksChk;
     private string _rowStamp = "";
     private bool _showAllStamp;
     private long _hoverUid;                 // meta the pointer sits on
@@ -199,6 +225,11 @@ public partial class CarDetailWindow : Window
     /// can push a real click at them instead of calling a private method
     /// (MapRenderer.ClickInWindow).</summary>
     public Button FollowButton => _followBtn;
+
+    /// <summary>The "tyre lines" checkbox, for the detail probe's synthetic click
+    /// (issue #9): the probe presses controls through the real input path, so a
+    /// broken signal is caught rather than mocked around.</summary>
+    public Control TracksButtonForProbe() => _tracksChk;
     public Button CentreButton => _centreBtn;
 
     public Texture2D CarTexture
@@ -367,6 +398,17 @@ public partial class CarDetailWindow : Window
         _nowBtn = MkIconBtn(status, "res://assets/ic_now.svg",
                             "back to the event this car is acting under at this frame");
         _nowBtn.Pressed += () => PageBy(0, absolute: true);
+        // Between the paging group and the status text: it is a per-car VIEW
+        // decision, so it belongs with the other per-car controls, not in the
+        // event list (which scrolls away — see the paging comment below).
+        _tracksChk = new CheckBox
+        {
+            Text = "tyre lines",
+            TooltipText = "draw this car's wheel tracks (the test may already have said so; your click wins for this window)",
+            FocusMode = Control.FocusModeEnum.None,
+        };
+        _tracksChk.Toggled += on => TracksAsked?.Invoke(this, on);
+        status.AddChild(_tracksChk);
         status.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
         _status = MkLabel(status, BtnFontPx + 3, new Color(0.62f, 0.66f, 0.74f));
     }
