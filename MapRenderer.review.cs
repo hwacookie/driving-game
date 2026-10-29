@@ -45,7 +45,7 @@ public partial class MapRenderer : Node2D
         public int Lamps;                 // bit0 headlights, bit1 taillights
         public int HeldBy;                // the CAR owning CapKey, 0 = nobody
         public int Level;                 // the DECK (0 = ground, 1 = bridge)
-        public string Color = "", CapKey = "";
+        public string Vehicle = "", CapKey = "";
     }
     private sealed class TapeEventRev { public long Uid; public string Msg = ""; }
     private sealed class TapeFrameRev
@@ -121,6 +121,40 @@ public partial class MapRenderer : Node2D
     /// NOT the same fact as a declared "off": the first keeps the standing
     /// behaviour, the second turns it off.</summary>
     private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _tapeOpts = new();
+
+    // Option CHANGES during the run (issue #10): the tape's `# caropts step=…`
+    // lines, and the fold of them over the staged header at the cursor.
+    private readonly List<(long Step, long Uid, bool? Detail, bool? Tracks, string? Livery)>
+        _tapeOptEvents = new();
+    private long _optFoldStep = -1L;
+    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)>
+        _tapeOptsAtCursor = new();
+
+    /// <summary>The per-car options IN FORCE at the cursor: what the cast was
+    /// born with (the header's `caropts=`), then every change whose substep the
+    /// cursor has passed. Rebuilt when the cursor lands on another substep and
+    /// cached otherwise, so scrubbing does not walk the event list per car per
+    /// frame. This is what lets one recording show the paint a car wore at 12 s
+    /// and the one it wore at 40 s as two facts of the same run (#10).</summary>
+    (bool? Detail, bool? Tracks, string? Livery) TapeOptionAt(long uid)
+    {
+        long step = _tape.Count == 0 ? -1L : _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)].Step;
+        if (step != _optFoldStep)
+        {
+            _optFoldStep = step;
+            _tapeOptsAtCursor.Clear();
+            foreach (var kv in _tapeOpts) _tapeOptsAtCursor[kv.Key] = kv.Value;
+            foreach (var ev in _tapeOptEvents)
+            {
+                if (ev.Step > step) break;       // the list is ascending by construction
+                _tapeOptsAtCursor.TryGetValue(ev.Uid, out var cur);
+                _tapeOptsAtCursor[ev.Uid] = (ev.Detail ?? cur.Detail,
+                                             ev.Tracks ?? cur.Tracks,
+                                             string.IsNullOrEmpty(ev.Livery) ? cur.Livery : ev.Livery);
+            }
+        }
+        return _tapeOptsAtCursor.TryGetValue(uid, out var v) ? v : (null, null, null);
+    }
 
     private bool _review;
     private string _reviewPath = "";
@@ -370,7 +404,7 @@ public partial class MapRenderer : Node2D
         _reviewAt = 0;
         _selected.Clear();
         _carBuf.Clear();
-        _carColors.Clear();
+        _carVehicles.Clear();
         _lastCheckedCursor = -1;
     }
 
@@ -1043,7 +1077,7 @@ public partial class MapRenderer : Node2D
                 Blinkers = (int)ParseNum(fld[5], 0.0),
                 Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                 Crashes = (long)ParseNum(fld[8], 0.0),
-                Color = fld.Length >= 11 ? fld[9] : "",
+                Vehicle = fld.Length >= 11 ? fld[9] : "",
                 Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
                 HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,
                 Level = _legendSeen ? (_legendHasLevel && fld.Length >= 14 ? (int)ParseNum(fld[12], 0.0) : 0)
@@ -1081,6 +1115,8 @@ public partial class MapRenderer : Node2D
         _tapeKinds.Clear();
         _tapeNames.Clear();
         _tapeOpts.Clear();
+        _tapeOptEvents.Clear();     // … and no changes during a tape that has
+        _optFoldStep = -1L;         //   not been read yet (#10)
         _detailDeclaredShown.Clear();
         _detailDismissed.Clear();
         _legendSeen = _legendHasLevel = false;
@@ -1158,6 +1194,29 @@ public partial class MapRenderer : Node2D
                         if (det is not null || trk is not null || liv is not null)
                             _tapeOpts[optUid] = (det, trk, liv);
                     }
+                }
+                if (line.StartsWith("# caropts "))
+                {
+                    // One option CHANGE during the run (#10): the substep, the car,
+                    // and only the fields that were set. Folded over the staged
+                    // header by TapeOptionAt, never written back into it — the
+                    // header stays "how the cast was born".
+                    long ceStep = 0, ceUid = 0;
+                    bool? ceDet = null, ceTrk = null;
+                    string? ceLiv = null;
+                    foreach (var tok in line.Substring(10).Split(' '))
+                    {
+                        int ceq = tok.IndexOf('=');
+                        if (ceq <= 0) continue;
+                        string ck = tok.Substring(0, ceq), cv = tok.Substring(ceq + 1);
+                        if (ck == "step") long.TryParse(cv, out ceStep);
+                        else if (ck == "uid") long.TryParse(cv, out ceUid);
+                        else if (ck == "livery" && cv.Length == 6) ceLiv = "#" + cv;
+                        else if (ck == "detail") ceDet = cv == "on";
+                        else if (ck == "tracks") ceTrk = cv == "on";
+                    }
+                    if (ceUid != 0)
+                        _tapeOptEvents.Add((ceStep, ceUid, ceDet, ceTrk, ceLiv));
                 }
                 if (line.Contains("kinds="))
                 {
@@ -1328,7 +1387,7 @@ public partial class MapRenderer : Node2D
                 }
                 continue;
             }
-            _carColors[cf.Uid] = cf.Color;
+            _carVehicles[cf.Uid] = cf.Vehicle;
             // The lamps, the brake and the blinkers come from the RECORDED
             // substep, not from the live sim beside the tape. The per-frame
             // light pass only runs for a car that has a _carMeta entry, and
@@ -1340,11 +1399,11 @@ public partial class MapRenderer : Node2D
             // per frame, which is why the wrong ones read as holes.
             if (!_carMeta.TryGetValue(cf.Uid, out var meta))
                 _carMeta[cf.Uid] = meta = new CarMeta();
-            meta.Color = cf.Color;
+            meta.Vehicle = cf.Vehicle;
             // The PAINT the test declared (issue #10). Absent means "photographed
             // colour", so a run staged before liveries existed - or one that says
             // nothing - reviews exactly as it did yesterday.
-            _tapeOpts.TryGetValue(cf.Uid, out var carOpts);
+            var carOpts = TapeOptionAt(cf.Uid);   // staged + changes up to here
             meta.Livery = carOpts.Livery ?? "";
             meta.BlinkL = (cf.Blinkers & 1) > 0;
             meta.BlinkR = (cf.Blinkers & 2) > 0;
@@ -2185,7 +2244,7 @@ public partial class MapRenderer : Node2D
         }
         if (_highlightBox.GetParent() != node) node.AddChild(_highlightBox);
         var color = ColorOf(uid);
-        var (bw, bl) = DrivingGame.Sim.Config.SizeForColor(color);
+        var (bw, bl) = DrivingGame.Sim.Config.SizeForVehicle(color);
         float y0 = (float)(-DrivingGame.Sim.Config.REAR_AXLE_OFFSET_M - bl / 2.0);
         float y1 = y0 + (float)bl, x0 = (float)(-bw / 2.0), x1 = x0 + (float)bw;
         _highlightBox.Points = new[] { new Vector2(x0, y0), new Vector2(x1, y0),
@@ -2529,9 +2588,9 @@ public partial class MapRenderer : Node2D
     /// <summary>Hand the window the vehicle's footprint, so the header icon
     /// keeps the class's shape: the first build drew every sprite into a square
     /// box and a 4.4 × 1.8 m car came out as a bus (reported 2026-10-24).</summary>
-    private static void ApplyCarSize(CarDetailWindow w, string color)
+    private static void ApplyCarSize(CarDetailWindow w, string vehicle)
     {
-        var (cw, cl) = DrivingGame.Sim.Config.SizeForColor(color);
+        var (cw, cl) = DrivingGame.Sim.Config.SizeForVehicle(vehicle);
         w.SetCarSize(cw, cl);
     }
 
@@ -2615,8 +2674,7 @@ public partial class MapRenderer : Node2D
         // tape header, exactly as the live window opens them from /state - and,
         // as there, BEFORE the "is a window open" gate below.
         foreach (var cf in fr.Cars)
-            ApplyDeclaredDetails(cf.Uid,
-                _tapeOpts.TryGetValue(cf.Uid, out var detOpt) ? detOpt.Detail : null);
+            ApplyDeclaredDetails(cf.Uid, TapeOptionAt(cf.Uid).Detail);
         if (_details.Count == 0) return;
         // One pass over the cast for the holder relation — the chain's other
         // direction is a walk over THIS map, not a scan per car per frame.
@@ -2758,9 +2816,9 @@ public partial class MapRenderer : Node2D
     /// window without a colour would draw a spriteless box.</summary>
     string ColorOf(long uid)
     {
-        var c = _carColors.GetValueOrDefault(uid, "");
+        var c = _carVehicles.GetValueOrDefault(uid, "");
         if (c.Length > 0) return c;
-        return _carMeta.TryGetValue(uid, out var m) ? m.Color : "";
+        return _carMeta.TryGetValue(uid, out var m) ? m.Vehicle : "";
     }
 
     private void OpenDetailMenu(Vector2 atPointer, long uid)
@@ -3029,7 +3087,7 @@ public partial class MapRenderer : Node2D
         _markerHits.Sort((a, b) => b.Step.CompareTo(a.Step));   // newest hit wins a tie
     }
 
-    private readonly Dictionary<long, string> _carColors = new();
+    private readonly Dictionary<long, string> _carVehicles = new();
 
     /// <summary>The bar's axis: ten frame ticks with the sim time at every
     /// other one, so a point on the curve can be named ("the dip at 60 s")

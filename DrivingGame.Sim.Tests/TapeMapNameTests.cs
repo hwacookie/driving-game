@@ -97,7 +97,7 @@ public class TapeMapNameTests : IDisposable
         var eng = new SimEngine(net, new ObstacleManager("basic"), "basic");
         // One recorded substep: a tape with no frames is refused by Load (by
         // design - an empty file is not a run), so the round trip needs a car.
-        var car = new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Color = "blue" };
+        var car = new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Vehicle = "blue" };
         RunTape.Record(1, new List<Car> { car }, new Dictionary<int, bool>(),
                        new Dictionary<int, string> { [car.Uid] = "probe" },
                        4.0, 1.0, net);

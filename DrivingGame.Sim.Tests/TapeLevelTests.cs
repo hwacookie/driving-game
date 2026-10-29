@@ -57,7 +57,7 @@ public class TapeLevelTests : IDisposable
         var deck = FirstDeckSegment(net);
         Assert.True(deck >= 0,
             "the basic test map must still have a level-1 (bridge) segment");
-        var on = new Car(0.0, 0.0, 90.0, deck, new BicycleDriver()) { Color = "blue" };
+        var on = new Car(0.0, 0.0, 90.0, deck, new BicycleDriver()) { Vehicle = "blue" };
 
         RunTape.Start("unittest", 1.0 / 60.0, "hash42");
         RunTape.Record(801, new List<Car> { on }, new Dictionary<int, bool>(),
@@ -93,7 +93,7 @@ public class TapeLevelTests : IDisposable
             { ground = i; break; }
         Assert.True(ground >= 0, "the figure-8's ground branch must still be at level 0");
 
-        var under = new Car(0.0, 0.0, 90.0, ground, new BicycleDriver()) { Color = "tan" };
+        var under = new Car(0.0, 0.0, 90.0, ground, new BicycleDriver()) { Vehicle = "tan" };
         RunTape.Start("unittest", 1.0 / 60.0, "hash42");
         RunTape.Record(802, new List<Car> { under }, new Dictionary<int, bool>(),
                        new Dictionary<int, string>(), 5.0, 1.0, net);
@@ -155,7 +155,7 @@ public class TapeLevelTests : IDisposable
         // One car, not an empty frame: a frame with no cars is not reviewable
         // and `Load` drops it on purpose (a scrub would otherwise land on a
         // moment that shows nothing).
-        var one = new Car(1.0, 2.0, 90.0, 0, new BicycleDriver()) { Color = "blue" };
+        var one = new Car(1.0, 2.0, 90.0, 0, new BicycleDriver()) { Vehicle = "blue" };
         RunTape.Record(11, new List<Car> { one }, new Dictionary<int, bool>(),
                        new Dictionary<int, string>(), 0.0, 0.0, net);
         var path = RunTape.Save(file);

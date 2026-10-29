@@ -31,11 +31,11 @@ public class Car
 
     /// <summary>Display color (multi-car): assigned deterministically from
     /// the uid by the main loop; "blue" (the sedan) is the default.</summary>
-    public string Color { get; set; } = "blue";
+    public string Vehicle { get; set; } = "blue";
 
     /// <summary>Dynamics of this car's vehicle class (top speed, accel,
     /// cornering budget) - see Config.VEHICLE_CLASS_SPECS.</summary>
-    public Config.VehicleSpec Spec => Config.SpecForColor(Color);
+    public Config.VehicleSpec Spec => Config.SpecForVehicle(Vehicle);
     public double TopSpeedMps => Spec.TopSpeedMps;
     /// <summary>What this car CHOOSES to drive at, m/s (0 = no choice, use the
     /// class limit). The class top speed stays the physical ceiling - a mixer
@@ -69,7 +69,7 @@ public class Car
 
     /// <summary>Physical footprint of this car's sprite class (width × length,
     /// metres) - the same table the renderer draws from (Config.VEHICLE_SIZES).</summary>
-    public (double WidthM, double LengthM) Size => Config.SizeForColor(Color);
+    public (double WidthM, double LengthM) Size => Config.SizeForVehicle(Vehicle);
     public double WidthM => Size.WidthM;
     public double LengthM => Size.LengthM;
 

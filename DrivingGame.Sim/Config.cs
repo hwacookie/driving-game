@@ -95,10 +95,16 @@ public static class Config
     /// <summary>Car sprite palette: names the vehicle model each car renders
     /// (the seven vehicles extracted by tools/make_car_sprites.py; the old
     /// classic red sprite was dropped - style mismatch, user decision).
-    /// Default assignment for spawned cars: car N gets CAR_COLORS[(N-1) % 7];
-    /// POST /teleport may override it via "color" (validated against this
-    /// list).</summary>
-    public static readonly string[] CAR_COLORS =
+    /// Default assignment for spawned cars: car N gets VEHICLES[(N-1) % 7];
+    /// POST /teleport may override it (validated against this list).
+    ///
+    /// This is the VEHICLE, not its paint: the id decides sprite, physics class
+    /// (VEHICLE_CLASS) and footprint (VEHICLE_SIZES). The colour the bodywork is
+    /// drawn in is the separate, visual-only `livery` (#10). The field was called
+    /// `color` while it only picked a picture; on the wire both names are still
+    /// accepted and `/state` answers both, so old clients and tapes stay valid.
+    /// </summary>
+    public static readonly string[] VEHICLES =
         { "blue", "silver", "police", "tan", "tractor", "pickup", "mixer" };
 
     // --- Per-class dynamics (user decision 2026-09-08: trucks accelerate
@@ -140,7 +146,7 @@ public static class Config
 
     /// <summary>Dynamics for a sprite color (unknown colors fall back to the
     /// sedan class).</summary>
-    public static VehicleSpec SpecForColor(string? color) =>
+    public static VehicleSpec SpecForVehicle(string? color) =>
         VEHICLE_CLASS_SPECS[VEHICLE_CLASS.GetValueOrDefault(color ?? "", "car")];
 
     // --- Vehicle footprint (width × length, metres) -------------------------
@@ -160,7 +166,7 @@ public static class Config
     };
 
     /// <summary>Footprint for a color; unknown colors fall back to the sedan box.</summary>
-    public static (double WidthM, double LengthM) SizeForColor(string? color) =>
+    public static (double WidthM, double LengthM) SizeForVehicle(string? color) =>
         VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH_M, CAR_LENGTH_M));
 
     // --- Liveries (issue #10: the paint, not the vehicle) -----------------

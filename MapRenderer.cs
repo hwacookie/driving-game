@@ -398,7 +398,7 @@ public partial class MapRenderer : Node2D
     // color name, blinker/hazard lights, the car's OWN test flags + label.
     private class CarMeta
     {
-        public string Color = "blue";
+        public string Vehicle = "blue";
         public string Driver = "BICYCLE";   // driver class (BICYCLE/FREE), from /state
         public bool BlinkL, BlinkR, Hazard, Braking, HeadlightsOn, TaillightsOn;
         public long CourtesyFor = 0L;
@@ -445,7 +445,7 @@ public partial class MapRenderer : Node2D
     // by tools/make_car_sprites.py (nose = texture top, transparent bg).
     // The "color" field names a vehicle model, not just a tint.
     static readonly Dictionary<string, Texture2D> _carTextures = new();
-    static Texture2D CarTexture(string color)
+    static Texture2D CarTexture(string vehicle)
     {
         if (_carTextures.Count == 0)
         {
@@ -457,7 +457,7 @@ public partial class MapRenderer : Node2D
             _carTextures["pickup"]  = GD.Load<Texture2D>("res://assets/car_pickup.png");
             _carTextures["mixer"]   = GD.Load<Texture2D>("res://assets/car_mixer.png");
         }
-        return color != null && _carTextures.TryGetValue(color, out var t)
+        return vehicle != null && _carTextures.TryGetValue(vehicle, out var t)
             ? t : _carTextures["blue"];
     }
 
@@ -527,9 +527,9 @@ public partial class MapRenderer : Node2D
     // Per-sprite physical footprint (width × length, metres) - the shared
     // table in Config.VEHICLE_SIZES is the single source of truth (the
     // simulation's collision math uses the same numbers).
-    static (float W, float L) CarSizeOf(string color)
+    static (float W, float L) CarSizeOf(string vehicle)
     {
-        var (w, l) = DrivingGame.Sim.Config.SizeForColor(color);
+        var (w, l) = DrivingGame.Sim.Config.SizeForVehicle(vehicle);
         return ((float)w, (float)l);
     }
 
@@ -3758,9 +3758,13 @@ public partial class MapRenderer : Node2D
                     // Per-car display state: color, lights, OWN flags/label.
                     if (!_carMeta.TryGetValue(uid, out var m))
                         _carMeta[uid] = m = new CarMeta();
-                    m.Color = c.TryGetProperty("color", out var cc)
-                               && cc.ValueKind == JsonValueKind.String
-                           ? cc.GetString() : "blue";
+                    // Prefer the new name, fall back to the historical one (#10):
+                    // a client of either vintage keeps painting the right sprite.
+                    m.Vehicle = (c.TryGetProperty("vehicle", out var cv)
+                                 && cv.ValueKind == JsonValueKind.String ? cv
+                                 : c.TryGetProperty("color", out var cc)
+                                 && cc.ValueKind == JsonValueKind.String ? cc
+                                 : default).GetString() ?? "blue";
                     // The livery (issue #10): null/absent means the photographed
                     // colour, so a cast that declares nothing looks exactly as it
                     // did before this field existed.
@@ -4107,9 +4111,9 @@ public partial class MapRenderer : Node2D
         // Multi-car: each car gets its own vehicle sprite (see CarTexture).
         // Meta may not exist yet on the very first sample - red is the
         // safe default.
-        string color = _carMeta.TryGetValue(uid, out var meta) ? meta.Color : "blue";
-        var tex = CarTexture(color);
-        var size = CarSizeOf(color);
+        string vehicle = _carMeta.TryGetValue(uid, out var meta) ? meta.Vehicle : "blue";
+        var tex = CarTexture(vehicle);
+        var size = CarSizeOf(vehicle);
         // The texture is stretched to the sprite's physical size: the blue
         // sedan matches the game's 1.8 x 4.4 m car box, the trucks keep
         // their photo proportions (CarSizes). Nose = texture top; with
@@ -4339,7 +4343,7 @@ public partial class MapRenderer : Node2D
                     if (metaLivery.Sprite == null || !GodotObject.IsInstanceValid(metaLivery.Sprite))
                         metaLivery.Sprite = node.GetChild<Sprite2D>(0);
                     metaLivery.LiveryApplied = metaLivery.Livery;
-                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Color, metaLivery.Livery);
+                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Vehicle, metaLivery.Livery);
                 }
             }
 
@@ -4396,7 +4400,7 @@ public partial class MapRenderer : Node2D
                     }
                     if (lab.Text != lbl) lab.Text = lbl;
                     // Center on the car's axis (Label origin is top-left).
-                    float noseLenM = CarSizeOf(meta.Color).L;
+                    float noseLenM = CarSizeOf(meta.Vehicle).L;
                     lab.Position = pos + new Vector2(
                         -lab.Size.X * 0.1f * 0.5f,
                         -(RearAxleOffsetM + noseLenM / 2f + 0.6f));
@@ -4428,7 +4432,7 @@ public partial class MapRenderer : Node2D
                     ? node.GlobalPosition
                     : new Vector2(buf[^1].X, -buf[^1].Y);   // samples are sim metres, y north
                 string col = _carMeta.TryGetValue(kv.Key, out var m)
-                    ? m.Color : "blue";
+                    ? m.Vehicle : "blue";
                 _minimap.Cars.Add((pos, kv.Key == _followUid, CarColors[col]));
             }
             _minimap.QueueRedraw();
@@ -4483,9 +4487,9 @@ public partial class MapRenderer : Node2D
                         $"http://127.0.0.1:{_embeddedPort}/car/{uid}/decisions");
                 }
                 var mSel = _carMeta.GetValueOrDefault(uid);
-                string color = mSel?.Color ?? "blue";
+                string vehicle = mSel?.Vehicle ?? "blue";
                 string cls = DrivingGame.Sim.Config.VEHICLE_CLASS
-                    .GetValueOrDefault(color, "car");
+                    .GetValueOrDefault(vehicle, "car");
                 float kmh = 0f;
                 if (_carBuf.TryGetValue(uid, out var bufSel) && bufSel.Count > 0)
                     kmh = bufSel[^1].SpeedKmh;
@@ -4495,7 +4499,7 @@ public partial class MapRenderer : Node2D
                 // the scroll position, so it must not happen more often.
                 _infoSpeed.Text = $"speed   {kmh:F1} km/h";
                 var sb = new System.Text.StringBuilder();
-                sb.Append($"#{uid}   {color} ({cls})\n");
+                sb.Append($"#{uid}   {vehicle} ({cls})\n");
                 sb.Append($"driver  {mSel?.Driver ?? "?"}\n");
                 sb.Append("decisions (newest first):\n");
                 foreach (var line in _decLines)
@@ -4559,7 +4563,7 @@ public partial class MapRenderer : Node2D
             // Hit area == the sim's crash-detection footprint
             // (CollLenM/CollWidM from body_corners), falling back to the
             // sprite size before the first sample.
-            var size = CarSizeOf(m?.Color ?? "blue");
+            var size = CarSizeOf(m?.Vehicle ?? "blue");
             float halfW = (m != null && m.CollWidM > 0 ? m.CollWidM : size.W) / 2f;
             float halfL = (m != null && m.CollLenM > 0 ? m.CollLenM : size.L) / 2f;
             Vector2 bodyCentre = node.GlobalPosition +
@@ -4989,7 +4993,8 @@ public partial class MapRenderer : Node2D
             // still polls the live host (its readout and flags come from there),
             // but those cars belong to a different run and must not override what
             // this recording says (issue #9).
-            if (_tapeOpts.TryGetValue(uid, out var o) && o.Tracks is not null)
+            var o = TapeOptionAt(uid);        // staged declaration + changes up
+            if (o.Tracks is not null)         // to this substep (#10)
                 return o.Tracks == true;
             // Standing rule: the PRIMARY car of the frame under the cursor - the
             // same car the reviewer's default focus names ("focus: the primary

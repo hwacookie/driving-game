@@ -289,10 +289,17 @@ public static class GameApi
             bool reverse = false;
             if (data.TryGetProperty("reverse", out var rv))
                 reverse = rv.GetBoolean();
-            string? color = null;
-            if (data.TryGetProperty("color", out var cd) && cd.ValueKind == JsonValueKind.String
-                && !string.IsNullOrEmpty(cd.GetString()))
-                color = cd.GetString();
+            // The VEHICLE — the one field that decides sprite, physics class and
+            // footprint. Its historical wire name is `color`, chosen back when the
+            // field only picked a picture; `vehicle` is the name that says what it
+            // means now (#10). BOTH are accepted, `vehicle` wins when both are
+            // given, and `color` keeps working so every existing client, script
+            // and recorded tape stays valid.
+            string? vehicle = null;
+            foreach (var vkey in new[] { "vehicle", "color" })
+                if (data.TryGetProperty(vkey, out var cd) && cd.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrEmpty(cd.GetString()))
+                    vehicle ??= cd.GetString();
             // A slow vehicle: the km/h this car chooses to drive at (its class
             // ceiling still applies). Staging real slow traffic - R32 passes a
             // crawler, it does not pass a queue lead.
@@ -336,21 +343,69 @@ public static class GameApi
                     }, 400);
             }
 
-            if (color is not null && !Config.CAR_COLORS.Contains(color))
+            if (vehicle is not null && !Config.VEHICLES.Contains(vehicle))
                 return Json(new Dictionary<string, object?>
                 {
-                    ["error"] = $"invalid color '{color}': expected one of " +
-                                string.Join(", ", Config.CAR_COLORS),
+                    ["error"] = $"invalid vehicle '{vehicle}': expected one of " +
+                                string.Join(", ", Config.VEHICLES),
                 }, 400);
 
             engine.EnqueueCommand(
-                new TeleportCommand(startPoint, segment, progress, add, speed, color,
+                new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,
                                     reverse, cruiseKmh, name, detailWindow, tyreLines,
                                     livery));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
                 ["command"] = "teleport",
+                ["params"] = data,
+            });
+        });
+
+        app.MapPost("/caropts", async (HttpRequest req) =>
+        {
+            // One car's VIEW options, changed while it drives (issue #10). The
+            // spawn fields on /teleport are for a car that does not exist yet;
+            // this is for the one that does — a repaint at the kerb, tyre lines
+            // switched on to look at a wobble — and it names the car instead of
+            // letting the engine guess which car the caller meant.
+            var data = await ReadJsonBody(req);
+            if (!data.TryGetProperty("uid", out var uv) || uv.ValueKind != JsonValueKind.Number)
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "caropts needs a numeric 'uid' — which car?" }, 400);
+            int cuid = (int)uv.GetDouble();
+
+            string? cliv = null;
+            if (data.TryGetProperty("livery", out var clv) &&
+                clv.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrEmpty(clv.GetString()))
+            {
+                cliv = Config.ResolveLivery(clv.GetString());
+                if (cliv is null)
+                    return Json(new Dictionary<string, object?>
+                    {
+                        ["error"] = $"unknown livery '{clv.GetString()}': expected one of " +
+                                    string.Join(", ", Config.LIVERIES.Keys) +
+                                    ", or #rrggbb, or hue:<0..360>",
+                    }, 400);
+            }
+            bool? ctracks = null, cdetail = null;
+            if (data.TryGetProperty("tyre_lines", out var ctl) && ctl.ValueKind != JsonValueKind.Null)
+                ctracks = ctl.GetBoolean();
+            if (data.TryGetProperty("detail_window", out var cdt) && cdt.ValueKind != JsonValueKind.Null)
+                cdetail = cdt.GetBoolean();
+            if (cliv is null && ctracks is null && cdetail is null)
+                return Json(new Dictionary<string, object?>
+                {
+                    ["error"] = "caropts changes nothing: give at least one of " +
+                                "livery, tyre_lines, detail_window",
+                }, 400);
+
+            engine.EnqueueCommand(new CarOptsCommand(cuid, cliv, ctracks, cdetail));
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true,
+                ["command"] = "caropts",
                 ["params"] = data,
             });
         });

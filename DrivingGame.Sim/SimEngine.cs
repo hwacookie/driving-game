@@ -12,13 +12,13 @@ public abstract record SimCommand;
 /// <summary>Teleport: default REPLACES the current car(s) (legacy behavior -
 /// the e2e suite relies on it); Add=true ADDS a fresh car alongside them (parallel
 /// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).
-/// Color (validated against Config.CAR_COLORS at the API layer) overrides
+/// Vehicle (validated against Config.VEHICLES at the API layer) overrides
 /// the default uid-based color of the spawned car. Reverse=true spawns the
 /// car facing the OTHER way along the segment (two-way traffic); it starts
 /// in its own right-hand lane and drives the loop backwards.</summary>
 public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      double? Progress, bool Add, double? Speed,
-                                     string? Color = null, bool Reverse = false,
+                                     string? Vehicle = null, bool Reverse = false,
                                      double? CruiseKmh = null,
                                      // The car's NAME (docs/TESTING.md): a
                                      // scenario authors its cast, so it knows
@@ -53,6 +53,21 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
+
+/// <summary>Change one car's per-car options WHILE IT DRIVES (issue #10): its
+/// paint, its own tyre lines, whether a detail window belongs to it.
+///
+/// The SPAWN carries the same three (TeleportCommand), because a staged car has
+/// to own its facts before its first tick. This command is for the change that
+/// comes later — a repaint at the kerb, lines switched on to look at a wobble —
+/// and it therefore demands a UID: "the primary car" is not a fact the engine
+/// may guess, it is a conclusion the client would have to re-derive every frame.
+/// Nothing set is a no-op; an unknown uid is dropped, because the car may have
+/// completed between the request and the tick that runs it. Every accepted
+/// change is written to the tape as a substep-keyed event, so a review replays
+/// the MOMENT rather than only the result.</summary>
+public sealed record CarOptsCommand(int Uid, string? Livery, bool? TyreLines,
+                                    bool? DetailWindow) : SimCommand;
 
 /// <summary>"validator" is global; "breadcrumbs"/"mode" are per-car when a
 /// Uid is given (omit = primary/followed car).</summary>
@@ -396,8 +411,8 @@ public sealed class SimEngine
         car.TrailEnabled = true;
         // Multi-car color: deterministic per uid, red first, then the old
         // pygame obstacle palette colors.
-        car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
-        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
+        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
+        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -442,8 +457,8 @@ public sealed class SimEngine
         car.Forward = !reverse;
         car.LaneOffsetOverrideM = offsetM;
         car.TrailEnabled = true;
-        car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
-        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
+        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
+        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -518,8 +533,8 @@ public sealed class SimEngine
                 if (tp.Speed is not null) newCar.Speed = tp.Speed.Value;
                 // Explicit color override (validated at the API layer);
                 // otherwise the uid-based palette assignment above stands.
-                if (!string.IsNullOrEmpty(tp.Color)) newCar.Color = tp.Color;
-                newCar.EmergencyRole = newCar.Color == "police";   // R35
+                if (!string.IsNullOrEmpty(tp.Vehicle)) newCar.Vehicle = tp.Vehicle;
+                newCar.EmergencyRole = newCar.Vehicle == "police";   // R35
                 // A SLOW VEHICLE (km/h): the class top speed stays what the
                 // sprite's class says, this car just chooses to drive slower -
                 // a tractor, a delivery van, a car hunting a parking spot. The
@@ -558,7 +573,7 @@ public sealed class SimEngine
                 RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Livery);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
-                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +
+                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Vehicle}) at segment " +
                     $"{newCar.SegIdx}, heading {newCar.Heading:F1}°" +
                     $"{(tp.Speed is not null ? " (rolling start)" : "")}\n");
                 break;
@@ -648,6 +663,27 @@ public sealed class SimEngine
                         Console.WriteLine($"API: Switched to FREE mode (car #{tuid})");
                     }
                 }
+                break;
+            }
+
+            case CarOptsCommand co:
+            {
+                if (!_cars.TryGetValue(co.Uid, out var oc)) break;   // gone by now
+                bool any = false;
+                if (!string.IsNullOrEmpty(co.Livery) && oc.Livery != co.Livery)
+                { oc.Livery = co.Livery; any = true; }
+                if (co.TyreLines.HasValue && oc.OptTyreLines != co.TyreLines)
+                { oc.OptTyreLines = co.TyreLines; any = true; }
+                if (co.DetailWindow.HasValue && oc.OptDetailWindow != co.DetailWindow)
+                { oc.OptDetailWindow = co.DetailWindow; any = true; }
+                if (!any) break;      // a change that changes nothing records nothing
+                RunTape.NoteCarOptions(_simStepsTotal, oc.Uid,
+                                       co.DetailWindow, co.TyreLines, co.Livery);
+                Console.WriteLine($"\n🎨 API: car #{oc.Uid} options changed — " +
+                                  (co.Livery != null ? $"livery {co.Livery} " : "") +
+                                  (co.TyreLines.HasValue ? $"tyre_lines {(co.TyreLines == true ? "on" : "off")} " : "") +
+                                  (co.DetailWindow.HasValue ? $"detail_window {(co.DetailWindow == true ? "on" : "off")}" : "") +
+                                  $"(step {_simStepsTotal})");
                 break;
             }
 
@@ -1403,7 +1439,11 @@ public sealed class SimEngine
                 ["braking"] = c.IsBraking,
                 ["headlights_on"] = c.HeadlightsOn,
                 ["taillights_on"] = c.TaillightsOn,
-                ["color"] = c.Color,
+                // The vehicle id under BOTH names during the transition (#10):
+                // `color` is what every client, script and log reader so far asks
+                // for, `vehicle` is the name that says what the field decides.
+                ["color"] = c.Vehicle,
+                ["vehicle"] = c.Vehicle,
                 // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
                 // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
                 // the CAR that owns it (0 = nobody). The viewer's car detail
@@ -1552,7 +1592,8 @@ public sealed class SimEngine
                 ["blinker_right"] = car.Driver is BicycleDriver br2 ? br2.BlinkerRight : false,
                 ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(car)),
                 // Multi-car: display color + the full car list.
-                ["color"] = car.Color,
+                ["color"] = car.Vehicle,      // legacy spelling, still answered
+                ["vehicle"] = car.Vehicle,    // (#10) — see the per-car array
                 // The same two keys the fleet builder answers — a client must
                 // not get a different contract because the map held one car
                 // instead of fifty.

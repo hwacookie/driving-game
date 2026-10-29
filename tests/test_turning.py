@@ -540,7 +540,7 @@ PRIMARY_CAR_ROLE = {
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
 # come from). Only the big-cast fallback naming needs it: `car-118`,
-# `heavy_truck-124`. An unknown color is a car (Config.SpecForColor's fallback).
+# `heavy_truck-124`. An unknown color is a car (Config.SpecForVehicle's fallback).
 CAR_CLASS_OF_COLOR = {
     'blue': 'car', 'police': 'car', 'tan': 'car',
     'silver': 'compact', 'pickup': 'pickup',
@@ -683,6 +683,31 @@ DETERMINISTIC_TESTS = [
      [{'segment': 'straight_n→straight_m', 'progress': 0.35,
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        'name': 'slow_car'}]),
+    # A LIVERIED CAST (issues #9, #10). Same road, same manoeuvre as the
+    # crawler above - what this scenario tests is the CHAIN, not the driving:
+    # every extra carries the picture facts a scenario authors on purpose (its
+    # own paint, its own tyre lines, a detail window the client is to open by
+    # itself), and the staging code ASSERTS those facts came back on /state
+    # before anything drives. A declaration lost on the wire fails the run
+    # instead of quietly falling back to the standing behaviour - which is the
+    # only way a picture bug becomes a red test rather than a screenshot nobody
+    # compared. The parked one sits BEHIND the primary (progress 0.10, and the
+    # primary drives 0.15 → 0.85) so it cannot change the manoeuvre: this
+    # scenario must fail on a broken declaration or not at all.
+    # `livery` is the RESOLVED hex on purpose: /state answers #rrggbb, so
+    # comparing a livery NAME against a resolved answer would be a false failure.
+    ('slow_pass_overtake', 'straight', 50, 'straight_n→straight_m', 60.0,
+     "Liveried cast: paint + tyre lines + detail window declared per car "
+     "(#9, #10)",
+     0.15, False, 0.85, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 0.35,
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'name': 'slow_car', 'color': 'pickup', 'livery': '#ef6c00',
+       'tyre_lines': True},
+      {'segment': 'straight_n→straight_m', 'progress': 0.10,
+       'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'name': 'kerb_car', 'color': 'tan', 'livery': '#00897b',
+       'tyre_lines': False, 'detail_window': True}]),
     # The SAME crawler with traffic coming from the OTHER end. The shared lane
     # is a single-file resource, so the overtaking car may NOT enter it while
     # an oncoming car owns it. What a driver does - and what this scenario
@@ -1689,7 +1714,7 @@ class TurnTester:
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
-        # Cycle through ALL vehicle classes (Config.CAR_COLORS) so the run
+        # Cycle through ALL vehicle classes (Config.VEHICLES) so the run
         # exercises every per-class collision footprint, not just the sedan.
         # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
         # "nearest segment midpoint" quantization could put two cars on the
@@ -2451,6 +2476,14 @@ class TurnTester:
                     # and the tape header names the cast once for the review.
                     if spec.get('name'):
                         payload['name'] = spec['name']
+                    # The vehicle sprite and the three per-car VIEW facts
+                    # (issues #9, #10): a scenario that authors a cast says what
+                    # the client should show for each car. Absent = undeclared,
+                    # which the client reads as "standing behaviour" - so these
+                    # keys are forwarded only when the spec carries them.
+                    for k in ('color', 'livery', 'tyre_lines', 'detail_window'):
+                        if spec.get(k) is not None:
+                            payload[k] = spec[k]
                     requests.post(f"{API_URL}/teleport", json=payload)
                     got = None
                     for _ in range(60):
@@ -2483,6 +2516,38 @@ class TurnTester:
                         throttle_uids.append(got)
                     print(f"   👤 extra car uid {got} "
                           f"({'driving' if spec.get('throttle') else 'PARKED'})")
+                # A declared option that never reaches /state is a broken
+                # plumbing, not a bad manoeuvre - and the client would silently
+                # fall back to its standing behaviour, so the run would LOOK
+                # right and prove nothing. Assert the three states survived the
+                # wire before driving anything: declared on, declared off, and
+                # (for a spec that says nothing) absent.
+                if extra_cars:
+                    want = {uid: spec for spec, uid in zip(extra_cars, extra_uids)
+                            if any(spec.get(k) is not None
+                                   for k in ('livery', 'tyre_lines', 'detail_window'))}
+                    if want:
+                        byUid = {c['car_uid']: c for c in self.get_state().get('cars', [])}
+                        for uid, spec in want.items():
+                            c = byUid.get(uid) or {}
+                            for k in ('livery', 'tyre_lines', 'detail_window'):
+                                if spec.get(k) is None:
+                                    continue
+                                got_v = c.get(k)
+                                if k == 'livery':
+                                    ok = (got_v or '').lower() == spec['livery'].lower()
+                                else:
+                                    ok = got_v is spec[k]
+                                if not ok:
+                                    print(f"   ❌ car {uid} declared {k}="
+                                          f"{spec[k]!r} but /state answers "
+                                          f"{got_v!r} — the declaration did not "
+                                          f"reach the sim")
+                                    return self._aborted_result(
+                                        start_point, direction, target_speed, results)
+                        print("   🎨 declared per-car options confirmed on /state: " +
+                              ", ".join(f"{u}:{','.join(k for k in ('livery', 'tyre_lines', 'detail_window') if want[u].get(k) is not None)}"
+                                        for u in want))
                 st0 = self.get_state()
                 crash_base_extra = {c['car_uid']: c.get('crash_episodes', 0)
                                     for c in st0.get('cars', [])}

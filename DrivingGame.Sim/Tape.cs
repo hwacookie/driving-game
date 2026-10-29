@@ -45,7 +45,7 @@ public sealed class TapeCar
     public bool Brake { get; internal set; }
     public bool WrongSide { get; internal set; }
     public int CrashEpisodes { get; internal set; }
-    public string Color { get; internal set; }      // the sprite -> vehicle class
+    public string Vehicle { get; internal set; }      // the sprite -> vehicle class
     public int Lamps { get; internal set; }         // bit0 headlights, bit1 taillights
     /// <summary>The CAR owning this car's cap (0 = nobody: free, or held by
     /// the kerb rather than a driver). Written BEFORE `capKey`, which is the
@@ -187,6 +187,45 @@ public static class RunTape
     /// looking exactly like yesterday. Header token per car:
     /// `caropts=2:detail=on+tracks=on+livery=c62828,7:tracks=off`.</summary>
     private static readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _carOpts = new();
+
+    /// <summary>A per-car option that changed DURING the run (issue #10) — a
+    /// repaint at the kerb, tyre lines switched on to look at a wobble. The
+    /// staged header (`caropts=`) can only say what the cast was BORN with, so a
+    /// change needs a fact of its own, keyed on a substep like a focus note:
+    /// a review then shows the value the run had AT THE CURSOR, not the value it
+    /// happened to end with. Only the fields that changed carry a token, so the
+    /// line never invents a value nobody set.</summary>
+    public readonly record struct CarOptionEvent(long Step, long Uid,
+                                                 bool? Detail, bool? Tracks,
+                                                 string? Livery)
+    {
+        public string Line =>
+            $"# caropts step={Step} uid={Uid}" +
+            (!string.IsNullOrEmpty(Livery) ? $" livery={Livery!.Replace("#", "").ToLowerInvariant()}" : "") +
+            (Tracks.HasValue ? $" tracks={(Tracks.Value ? "on" : "off")}" : "") +
+            (Detail.HasValue ? $" detail={(Detail.Value ? "on" : "off")}" : "");
+    }
+
+    private static readonly List<CarOptionEvent> _carOptEvents = new();
+
+    /// <summary>Option changes in tape order (ascending substep).</summary>
+    public static IReadOnlyList<CarOptionEvent> CarOptionEvents
+    {
+        get { lock (Lock) return _carOptEvents; }
+    }
+
+    /// <summary>Record one per-car option change at this substep. A call that
+    /// says nothing (no field set) records nothing.</summary>
+    public static void NoteCarOptions(long step, long uid, bool? detail,
+                                      bool? tracks, string? livery)
+    {
+        if (!detail.HasValue && !tracks.HasValue && string.IsNullOrEmpty(livery)) return;
+        // Same rule as Record: a sim that is not recording writes no tape, so it
+        // must not accumulate events either - they would surface on the next,
+        // unrelated Save.
+        if (!_recording) return;
+        lock (Lock) _carOptEvents.Add(new CarOptionEvent(step, uid, detail, tracks, livery));
+    }
     private static readonly List<FocusNote> _focus = new();
     private static readonly List<TestResultNote> _results = new();
 
@@ -352,6 +391,7 @@ public static class RunTape
         var namesLoaded = new Dictionary<long, string>();
         var kindsLoaded = new Dictionary<long, string>();
         var carOptsLoaded = new Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)>();
+        var carOptEventsLoaded = new List<CarOptionEvent>();
         bool headerDeclaresLevel = false, hasLegend = false;
         try
         {
@@ -394,7 +434,7 @@ public static class RunTape
                                 namesLoaded[ParseL(kv2[0], -1L)] = kv2[1];
                         }
                     }
-                    if (line.Contains("caropts="))
+                    if (line.Contains("caropts=") && line.StartsWith("# DGTAP1"))
                     {
                         // uid:detail=on+tracks=off+livery=c62828 - the per-car
                         // view options the test declared (issues #9 and #10). An
@@ -433,6 +473,33 @@ public static class RunTape
                             if (kvk.Length == 2)
                                 kindsLoaded[ParseL(kvk[0], -1L)] = kvk[1];
                         }
+                    }
+                    if (line.StartsWith("# caropts "))
+                    {
+                        // One option CHANGE during the run (#10): the substep, the
+                        // car, and only the fields that were actually set. They
+                        // fold over the staged header at the cursor, which is what
+                        // lets a review show the paint a car wore at 12 s instead
+                        // of the one it finished with.
+                        long ceStep = 0, ceUid = 0;
+                        bool? ceDet = null, ceTrk = null;
+                        string? ceLiv = null;
+                        foreach (var tok in line.Substring(10).Split(' '))
+                        {
+                            int eq = tok.IndexOf('=');
+                            if (eq <= 0) continue;
+                            string ck = tok.Substring(0, eq), cv = tok.Substring(eq + 1);
+                            switch (ck)
+                            {
+                                case "step": ceStep = ParseL(cv, 0); break;
+                                case "uid": ceUid = ParseL(cv, 0); break;
+                                case "livery": ceLiv = "#" + cv; break;
+                                case "detail": ceDet = cv == "on"; break;
+                                case "tracks": ceTrk = cv == "on"; break;
+                            }
+                        }
+                        if (ceUid != 0)
+                            carOptEventsLoaded.Add(new CarOptionEvent(ceStep, ceUid, ceDet, ceTrk, ceLiv));
                     }
                     if (line.StartsWith("# focus "))
                     {
@@ -517,7 +584,7 @@ public static class RunTape
                         SpeedMps = ParseD(fld[4], 0.0), Blinkers = ParseI(fld[5], 0),
                         Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                         CrashEpisodes = ParseI(fld[8], 0),
-                        Color = fld.Length >= 11 ? fld[9] : "",
+                        Vehicle = fld.Length >= 11 ? fld[9] : "",
                         // FIVE field generations: ...,color,capKey (lamps
                         // absent), ...,color,lamps,capKey, ...,color,lamps,
                         // heldBy,capKey and ...,color,lamps,heldBy,level,
@@ -585,6 +652,8 @@ public static class RunTape
             foreach (var kv in kindsLoaded) _kinds[kv.Key] = kv.Value;
             _carOpts.Clear();
             foreach (var kv in carOptsLoaded) _carOpts[kv.Key] = kv.Value;
+            _carOptEvents.Clear();
+            foreach (var ce in carOptEventsLoaded) _carOptEvents.Add(ce);
         }
         return true;
     }
@@ -619,6 +688,7 @@ public static class RunTape
             _recording = true;
             _names.Clear();          // a new run is a new cast
             _carOpts.Clear();        // ...and a new set of view options
+            _carOptEvents.Clear();   // ...and no changes yet
             _focus.Clear();          // ...and a new camera intent per scenario
             _results.Clear();
             _mapName = SanitiseMapName(mapName);
@@ -666,6 +736,10 @@ public static class RunTape
         {
             _frames.Clear();
             _events.Clear();
+            // The option changes belong to the run they were noted in. Leaving
+            // them behind would give the NEXT tape another run's repaints - and
+            // Clear() is what a fresh run calls, so the leak would be silent.
+            _carOptEvents.Clear();
         }
     }
 
@@ -703,7 +777,7 @@ public static class RunTape
                 Blinkers = blinkers, Brake = c.IsBraking,
                 WrongSide = wrongSide.GetValueOrDefault(c.Uid, false),
                 CrashEpisodes = c.CrashEpisodes,
-                Color = c.Color ?? "",
+                Vehicle = c.Vehicle ?? "",
                 // The lamps are part of the picture: the renderer draws
                 // white head dots and red tail dots, and a tape that does
                 // not carry them cannot say what the lamps of the frame
@@ -765,7 +839,7 @@ public static class RunTape
         foreach (var cf in f.Cars)
             parts.Add($"{cf.Uid},{cf.X:F3},{cf.Y:F3},{cf.HeadingDeg:F2}," +
                       $"{cf.SpeedMps:F3},{cf.Blinkers},{(cf.Brake ? 1 : 0)}," +
-                      $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Color}," +
+                      $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Vehicle}," +
                       $"{cf.Lamps},{cf.HeldByUid},{cf.Level},{cf.CapKey}");
         return $"{f.Step};{f.FluidityMpsPerCar:F4};{f.MovingShare:F3};" +
                string.Join("|", parts) +
@@ -866,6 +940,9 @@ public static class RunTape
                 lines.Add(FrameLegend);
                 foreach (var fn in _focus) lines.Add(fn.ToHeaderLine());
                 foreach (var rn in _results) lines.Add(rn.ToHeaderLine());
+                // Option CHANGES, after the staged declarations: the header says
+                // how the cast was born, these say what it became (#10).
+                foreach (var ce in _carOptEvents) lines.Add(ce.Line);
                 foreach (var f in _frames)
                     lines.Add(FrameLine(f));
                 File.WriteAllText(path, string.Join("\n", lines) + "\n");
