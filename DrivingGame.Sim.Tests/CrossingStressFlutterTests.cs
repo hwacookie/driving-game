@@ -205,7 +205,7 @@ public class CrossingStressTests
         car.Progress = progress;
         car.Forward = !reverse;
         car.LaneOffsetOverrideM = offsetM;
-        car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
+        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
         car.Speed = speedMps;
         return car;
     }

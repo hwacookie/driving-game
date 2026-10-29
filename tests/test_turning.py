@@ -540,7 +540,7 @@ PRIMARY_CAR_ROLE = {
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
 # come from). Only the big-cast fallback naming needs it: `car-118`,
-# `heavy_truck-124`. An unknown color is a car (Config.SpecForColor's fallback).
+# `heavy_truck-124`. An unknown color is a car (Config.SpecForVehicle's fallback).
 CAR_CLASS_OF_COLOR = {
     'blue': 'car', 'police': 'car', 'tan': 'car',
     'silver': 'compact', 'pickup': 'pickup',
@@ -1714,7 +1714,7 @@ class TurnTester:
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
-        # Cycle through ALL vehicle classes (Config.CAR_COLORS) so the run
+        # Cycle through ALL vehicle classes (Config.VEHICLES) so the run
         # exercises every per-class collision footprint, not just the sedan.
         # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
         # "nearest segment midpoint" quantization could put two cars on the

@@ -585,7 +585,7 @@ Only roads with these highway types are loaded:
   anything that draws or measures the body
 - **Color**: the classic red sprite was DROPPED (user decision 2026-09-08,
   style mismatch); cars render as one of seven photo-derived vehicle sprites
-  (`Config.CAR_COLORS`)
+  (`Config.VEHICLES`)
 - **Rotation**: Smooth heading (0° = north/up)
 
 ### Lights
@@ -909,7 +909,7 @@ is the home for the post-port additions and the forward roadmap.
 ### Vehicle classes & per-class dynamics — DONE
 
 Seven real vehicle sprites (`blue` sedan, `silver`, `police`, `tan`,
-`tractor`, `pickup`, `mixer`), assigned per car as `CAR_COLORS[(uid-1) % 7]`
+`tractor`, `pickup`, `mixer`), assigned per car as `VEHICLES[(uid-1) % 7]`
 ([REST_API.md → Multi-car](REST_API.md)). Each has its own physical
 footprint (`Config.VEHICLE_SIZES`, single source of truth for renderer + sim)
 and its own longitudinal/lateral dynamics (`Config.VEHICLE_CLASS_SPECS`):

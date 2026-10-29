@@ -45,7 +45,7 @@ public class TapeHeldByTests : IDisposable
 
     static Car HeldCar(int byUid, string capKey)
     {
-        var c = new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Color = "van" };
+        var c = new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Vehicle = "van" };
         c.ActiveCapKey = capKey;
         c.HeldByUid = byUid;
         return c;
@@ -93,7 +93,7 @@ public class TapeHeldByTests : IDisposable
         var back = f!.Cars.First(cf => cf.Uid == held.Uid);
         Assert.Equal(holder.Uid, back.HeldByUid);
         Assert.Equal("r32#12,passage#4", back.CapKey);
-        Assert.Equal("van", back.Color);
+        Assert.Equal("van", back.Vehicle);
         Assert.Equal(0, f.Cars.First(cf => cf.Uid == holder.Uid).HeldByUid);
         // The deck survives the round trip - the field that decides whether the
         // reviewer draws a bridge car ON the deck or AT grade.
@@ -113,7 +113,7 @@ public class TapeHeldByTests : IDisposable
             if (net.Segments[i].Level >= 1) { deck = i; break; }
         Assert.True(deck >= 0, "the basic test map must still have a level-1 (bridge) segment");
 
-        var on = new Car(750.0, 1750.0, 90.0, deck, new BicycleDriver()) { Color = "blue" };
+        var on = new Car(750.0, 1750.0, 90.0, deck, new BicycleDriver()) { Vehicle = "blue" };
         var wrong = new Dictionary<int, bool>();
         var names = new Dictionary<int, string> { [on.Uid] = "deck_car" };
 

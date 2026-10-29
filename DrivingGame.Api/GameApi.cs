@@ -289,10 +289,17 @@ public static class GameApi
             bool reverse = false;
             if (data.TryGetProperty("reverse", out var rv))
                 reverse = rv.GetBoolean();
-            string? color = null;
-            if (data.TryGetProperty("color", out var cd) && cd.ValueKind == JsonValueKind.String
-                && !string.IsNullOrEmpty(cd.GetString()))
-                color = cd.GetString();
+            // The VEHICLE — the one field that decides sprite, physics class and
+            // footprint. Its historical wire name is `color`, chosen back when the
+            // field only picked a picture; `vehicle` is the name that says what it
+            // means now (#10). BOTH are accepted, `vehicle` wins when both are
+            // given, and `color` keeps working so every existing client, script
+            // and recorded tape stays valid.
+            string? vehicle = null;
+            foreach (var vkey in new[] { "vehicle", "color" })
+                if (data.TryGetProperty(vkey, out var cd) && cd.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrEmpty(cd.GetString()))
+                    vehicle ??= cd.GetString();
             // A slow vehicle: the km/h this car chooses to drive at (its class
             // ceiling still applies). Staging real slow traffic - R32 passes a
             // crawler, it does not pass a queue lead.
@@ -336,15 +343,15 @@ public static class GameApi
                     }, 400);
             }
 
-            if (color is not null && !Config.CAR_COLORS.Contains(color))
+            if (vehicle is not null && !Config.VEHICLES.Contains(vehicle))
                 return Json(new Dictionary<string, object?>
                 {
-                    ["error"] = $"invalid color '{color}': expected one of " +
-                                string.Join(", ", Config.CAR_COLORS),
+                    ["error"] = $"invalid vehicle '{vehicle}': expected one of " +
+                                string.Join(", ", Config.VEHICLES),
                 }, 400);
 
             engine.EnqueueCommand(
-                new TeleportCommand(startPoint, segment, progress, add, speed, color,
+                new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,
                                     reverse, cruiseKmh, name, detailWindow, tyreLines,
                                     livery));
             return Results.Json(new Dictionary<string, object?>

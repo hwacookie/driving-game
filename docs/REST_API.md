@@ -53,7 +53,7 @@ hosts):
 | GET | `/car/{uid}/decisions` | that car's rule log (events, newest last) |
 | POST | `/control` | sustained keys + one-shot `hazard` |
 | POST | `/reset` | all control inputs false |
-| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `color`, `reverse`, `livery`, `detail_window`, `tyre_lines`) |
+| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `vehicle`/`color`, `reverse`, `livery`, `detail_window`, `tyre_lines`) |
 | POST | `/caropts` | change one car's `livery` / `tyre_lines` / `detail_window` during the run (uid required) |
 | POST | `/park` | park an existing car where it stands — the R32 obstruction primitive |
 | POST | `/follow` | re-point the PRIMARY (followed) car at another uid |
@@ -280,7 +280,7 @@ exported in a `cars` array:
   {"car_uid": 1, "x": ..., "y": ..., "heading": ..., "speed_kmh": ...,
    "level": 0, "segment": 42, "progress": 0.65, "on_road": true,
    "wrong_side": false, "blinker_left": false, "blinker_right": true,
-   "hazard": false, "color": "blue",
+   "hazard": false, "color": "blue", "vehicle": "blue",
    "detail_window": true, "tyre_lines": false, "livery": "#c62828",
    "in_contact": false, "crash_episodes": 0, "contact_with": 0,
    "body_corners": [[x, y], [x, y], [x, y], [x, y]],
@@ -289,10 +289,19 @@ exported in a `cars` array:
    "hud_label": "1/24" | null}
 ]
 ```
-`color` names the car's vehicle sprite: `blue`, `silver`, `police`,
-`tan`, `tractor` (Sattelschlepper engine unit), `pickup`, `mixer` -
-assigned deterministically as
-`CAR_COLORS[(uid-1) % 7]`.
+`vehicle` names what the car IS — sprite, physics class and footprint all come
+from it: `blue`, `silver`, `police`, `tan`, `tractor` (Sattelschlepper engine
+unit), `pickup`, `mixer` - assigned deterministically as
+`VEHICLES[(uid-1) % 7]`.
+
+> **`vehicle` and `color` are the same field** (#10). The historical name is
+> `color` — coined when the field only picked a picture, before it also picked
+> class and size — and it is what every existing client, cockpit script and
+> recorded tape asks for. So `/state` answers **both** keys with one value and
+> `/teleport` **accepts both**, `vehicle` winning when a request gives both.
+> What did NOT move is the tape's file format: its record line keeps the field in
+> place and the legend keeps saying `color`, because renaming a column would
+> silently re-read every old tape.
 
 The last three fields are the **per-car view options** a scenario declared at
 staging (issues #9, #10) and answer `null` when nothing was said — which is a
@@ -376,9 +385,10 @@ Content-Type: application/json
 # heading, so the car still starts in its own right-hand lane):
 {"segment": 128, "progress": 0.5, "reverse": true, "add": true}
 
-# Choose the vehicle sprite (validated against Config.CAR_COLORS; 400 on
-# an unknown name):
-{"start_point": "www_entry", "color": "mixer", "add": true}
+# Choose the vehicle (validated against Config.VEHICLES; 400 on an unknown
+# name). `vehicle` is the name; `color` is the historical spelling and still
+# accepted — and when a request gives both, `vehicle` wins:
+{"start_point": "www_entry", "vehicle": "mixer", "add": true}
 
 # Say what the CLIENT should show for this car (issue #9) and paint it
 # (issue #10). Absent = undeclared = the standing behaviour; `livery` is

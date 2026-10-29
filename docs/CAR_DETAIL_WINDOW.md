@@ -83,7 +83,7 @@ were true of the build, and each is now what the table above states.
 
 | complaint | what it was | the fix |
 |---|---|---|
-| "the icons of the cars are stretched" | `CarSpriteView` drew every sprite into its SQUARE box, so a 4.4 × 1.8 m sedan came out as a bus and the truck as a squashed van | the window is handed the vehicle's footprint (`Config.SizeForColor`) and draws the TEXTURE into a rect of that aspect, long side along the row, rotated to the heading |
+| "the icons of the cars are stretched" | `CarSpriteView` drew every sprite into its SQUARE box, so a 4.4 × 1.8 m sedan came out as a bus and the truck as a squashed van | the window is handed the vehicle's footprint (`Config.SizeForVehicle`) and draws the TEXTURE into a rect of that aspect, long side along the row, rotated to the heading |
 | "the chain uses too small fonts" | the chain ran at the 24 px body size under a 36 px speed | `ChainFontPx` 32 |
 | "increase the font-size of the event log" | rows at 24 px read as footnotes | `EventFontPx` 30 (address 26, seconds 24) |
 | "prefer the cars' names over their number" | the chain said `#27 → me → #61` | each entry is the **role the scenario gave it** (`slow_car`, `oncoming_car`) — the uid stays inside the token for the click/hold; a car the run never named keeps its number, and a test label like `20/27` is NOT a name (it would read as noise in a chain), so those fall back to `#uid` too |
@@ -228,7 +228,7 @@ holding up: #71, #68        me        held up by: #59 → #61 → #44
 - **Ids in the chain are interactive** (user decision 2026-10-24):
   - **press and hold** an id → that car is highlighted **on the map** for as
     long as the button is down (a red box around its body — the reviewer draws
-    it from the tape pose and `Config.SizeForColor`, the viewer from `/state`);
+    it from the tape pose and `Config.SizeForVehicle`, the viewer from `/state`);
   - a **short click** → this window switches to that car.
   Implementation: a `RichTextLabel` with `[url=#71]#71[/url]` per id, so the
   engine does the per-token hit testing. What it offers (verified against the

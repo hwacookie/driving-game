@@ -29,7 +29,7 @@ API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
 # Everything this script reads is in METRES now (as /state, /map and
 # /segment all answer - see docs/UNITS.md); nothing converts any more.
 
-# (color, width_m, length_m) - MUST mirror Config.CAR_COLORS
+# (color, width_m, length_m) - MUST mirror Config.VEHICLES
 # (DrivingGame.Sim/Config.cs) and CarSizes in MapRenderer.cs.
 # Order = line-up order.
 CARS = [

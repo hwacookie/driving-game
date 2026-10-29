@@ -12,13 +12,13 @@ public abstract record SimCommand;
 /// <summary>Teleport: default REPLACES the current car(s) (legacy behavior -
 /// the e2e suite relies on it); Add=true ADDS a fresh car alongside them (parallel
 /// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).
-/// Color (validated against Config.CAR_COLORS at the API layer) overrides
+/// Vehicle (validated against Config.VEHICLES at the API layer) overrides
 /// the default uid-based color of the spawned car. Reverse=true spawns the
 /// car facing the OTHER way along the segment (two-way traffic); it starts
 /// in its own right-hand lane and drives the loop backwards.</summary>
 public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      double? Progress, bool Add, double? Speed,
-                                     string? Color = null, bool Reverse = false,
+                                     string? Vehicle = null, bool Reverse = false,
                                      double? CruiseKmh = null,
                                      // The car's NAME (docs/TESTING.md): a
                                      // scenario authors its cast, so it knows
@@ -411,8 +411,8 @@ public sealed class SimEngine
         car.TrailEnabled = true;
         // Multi-car color: deterministic per uid, red first, then the old
         // pygame obstacle palette colors.
-        car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
-        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
+        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
+        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -457,8 +457,8 @@ public sealed class SimEngine
         car.Forward = !reverse;
         car.LaneOffsetOverrideM = offsetM;
         car.TrailEnabled = true;
-        car.Color = Config.CAR_COLORS[(car.Uid - 1) % Config.CAR_COLORS.Length];
-        car.EmergencyRole = car.Color == "police";   // R35: the sprite is on duty
+        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
+        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
         return car;
     }
 
@@ -533,8 +533,8 @@ public sealed class SimEngine
                 if (tp.Speed is not null) newCar.Speed = tp.Speed.Value;
                 // Explicit color override (validated at the API layer);
                 // otherwise the uid-based palette assignment above stands.
-                if (!string.IsNullOrEmpty(tp.Color)) newCar.Color = tp.Color;
-                newCar.EmergencyRole = newCar.Color == "police";   // R35
+                if (!string.IsNullOrEmpty(tp.Vehicle)) newCar.Vehicle = tp.Vehicle;
+                newCar.EmergencyRole = newCar.Vehicle == "police";   // R35
                 // A SLOW VEHICLE (km/h): the class top speed stays what the
                 // sprite's class says, this car just chooses to drive slower -
                 // a tractor, a delivery van, a car hunting a parking spot. The
@@ -573,7 +573,7 @@ public sealed class SimEngine
                 RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Livery);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
-                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +
+                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Vehicle}) at segment " +
                     $"{newCar.SegIdx}, heading {newCar.Heading:F1}°" +
                     $"{(tp.Speed is not null ? " (rolling start)" : "")}\n");
                 break;
@@ -1439,7 +1439,11 @@ public sealed class SimEngine
                 ["braking"] = c.IsBraking,
                 ["headlights_on"] = c.HeadlightsOn,
                 ["taillights_on"] = c.TaillightsOn,
-                ["color"] = c.Color,
+                // The vehicle id under BOTH names during the transition (#10):
+                // `color` is what every client, script and log reader so far asks
+                // for, `vehicle` is the name that says what the field decides.
+                ["color"] = c.Vehicle,
+                ["vehicle"] = c.Vehicle,
                 // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
                 // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
                 // the CAR that owns it (0 = nobody). The viewer's car detail
@@ -1588,7 +1592,8 @@ public sealed class SimEngine
                 ["blinker_right"] = car.Driver is BicycleDriver br2 ? br2.BlinkerRight : false,
                 ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(car)),
                 // Multi-car: display color + the full car list.
-                ["color"] = car.Color,
+                ["color"] = car.Vehicle,      // legacy spelling, still answered
+                ["vehicle"] = car.Vehicle,    // (#10) — see the per-car array
                 // The same two keys the fleet builder answers — a client must
                 // not get a different contract because the map held one car
                 // instead of fifty.

@@ -26,7 +26,7 @@ import urllib.request
 import json
 
 API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
-# Must mirror Config.CAR_COLORS (DrivingGame.Sim/Config.cs).
+# Must mirror Config.VEHICLES (DrivingGame.Sim/Config.cs).
 Config_COLORS = ["blue", "silver", "police", "tan", "tractor", "pickup", "mixer"]
 START_POINT = "crossroads_from_north"
 PROGRESS = 0.6
@@ -71,7 +71,7 @@ def spawn_stationary_car(color=""):
     """Spawn one stationary car at START_POINT.
 
     If `color` is given, it is passed to /teleport and the spawned car gets
-    that color (validated server-side against Config.CAR_COLORS: red, blue,
+    that color (validated server-side against Config.VEHICLES: red, blue,
     yellow, white) instead of the default uid-based assignment."""
     _req("POST", "/cars", {"action": "clear"})
     t0 = time.time()

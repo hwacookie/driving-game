@@ -37,7 +37,7 @@ public class TapeCarOptionEventsTests : IDisposable
     }
 
     static Car ProbeCar(string color) =>
-        new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Color = color };
+        new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Vehicle = color };
 
     [Fact]
     public void Change_WithoutRecording_WritesNothing()
