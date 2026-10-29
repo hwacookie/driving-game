@@ -291,15 +291,17 @@ public static class GameApi
                 reverse = rv.GetBoolean();
             // The VEHICLE — the one field that decides sprite, physics class and
             // footprint. Its historical wire name is `color`, chosen back when the
-            // field only picked a picture; `vehicle` is the name that says what it
-            // means now (#10). BOTH are accepted, `vehicle` wins when both are
-            // given, and `color` keeps working so every existing client, script
-            // and recorded tape stays valid.
+            // The MODEL: what kind of vehicle this is (issue #18). `model` is the
+            // name; `vehicle` (#10's word) and the original `color` stay accepted,
+            // in that precedence. A value that arrived under `color` is announced as
+            // DEPRECATED, because #18's second slice gives `color` back to PAINT —
+            // and a request whose meaning silently moves is worse than one that 400s.
             string? vehicle = null;
-            foreach (var vkey in new[] { "vehicle", "color" })
+            bool vehicleFromColorKey = false;
+            foreach (var vkey in new[] { "model", "vehicle", "color" })
                 if (data.TryGetProperty(vkey, out var cd) && cd.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrEmpty(cd.GetString()))
-                    vehicle ??= cd.GetString();
+                    && !string.IsNullOrEmpty(cd.GetString()) && vehicle is null)
+                { vehicle = cd.GetString(); vehicleFromColorKey = vkey == "color"; }
             // A slow vehicle: the km/h this car chooses to drive at (its class
             // ceiling still applies). Staging real slow traffic - R32 passes a
             // crawler, it does not pass a queue lead.
@@ -343,12 +345,18 @@ public static class GameApi
                     }, 400);
             }
 
-            if (vehicle is not null && !Config.VEHICLES.Contains(vehicle))
+            // IsModel, not MODEL_NAMES.Contains: the seven photo names are still
+            // legal as aliases, and the suite stages 'color': 'pickup' today — a
+            // check that knows only the new names would 400 an existing scenario.
+            if (vehicle is not null && !Config.IsModel(vehicle))
                 return Json(new Dictionary<string, object?>
                 {
-                    ["error"] = $"invalid vehicle '{vehicle}': expected one of " +
-                                string.Join(", ", Config.VEHICLES),
+                    ["error"] = $"invalid model '{vehicle}': expected one of " +
+                                string.Join(", ", Config.MODEL_NAMES),
                 }, 400);
+            if (vehicle is not null && vehicleFromColorKey)
+                Console.WriteLine($"DEPRECATED color='{vehicle}' → send model=\"{Config.ModelFor(vehicle).Name}\" " +
+                                  "(`color` becomes the paint, issue #18)");
 
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,

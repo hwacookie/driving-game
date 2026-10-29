@@ -585,7 +585,7 @@ Only roads with these highway types are loaded:
   anything that draws or measures the body
 - **Color**: the classic red sprite was DROPPED (user decision 2026-09-08,
   style mismatch); cars render as one of seven photo-derived vehicle sprites
-  (`Config.VEHICLES`)
+  (`Config.MODELS`)
 - **Rotation**: Smooth heading (0° = north/up)
 
 ### Lights

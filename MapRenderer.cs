@@ -398,7 +398,7 @@ public partial class MapRenderer : Node2D
     // color name, blinker/hazard lights, the car's OWN test flags + label.
     private class CarMeta
     {
-        public string Vehicle = "blue";
+        public string Model = "blue";
         public string Driver = "BICYCLE";   // driver class (BICYCLE/FREE), from /state
         public bool BlinkL, BlinkR, Hazard, Braking, HeadlightsOn, TaillightsOn;
         public long CourtesyFor = 0L;
@@ -443,7 +443,9 @@ public partial class MapRenderer : Node2D
 
     // Car sprites: seven vehicles extracted from assets/source/vehicles_green.png
     // by tools/make_car_sprites.py (nose = texture top, transparent bg).
-    // The "color" field names a vehicle model, not just a tint.
+    // Keyed by PHOTO, because that is what an asset is: a picture of one vehicle.
+    // A car names a MODEL (#18) and the model says which photo shows it, so
+    // "what do I draw" is answered by the table rather than by string equality.
     static readonly Dictionary<string, Texture2D> _carTextures = new();
     static Texture2D CarTexture(string vehicle)
     {
@@ -457,8 +459,10 @@ public partial class MapRenderer : Node2D
             _carTextures["pickup"]  = GD.Load<Texture2D>("res://assets/car_pickup.png");
             _carTextures["mixer"]   = GD.Load<Texture2D>("res://assets/car_mixer.png");
         }
-        return vehicle != null && _carTextures.TryGetValue(vehicle, out var t)
-            ? t : _carTextures["blue"];
+        // Model name → its photo. An old caller that still hands over a photo
+        // word gets it back unchanged (ModelFor resolves both vocabularies).
+        string photo = DrivingGame.Sim.Config.ModelFor(vehicle).Photo;
+        return _carTextures.TryGetValue(photo, out var t) ? t : _carTextures["blue"];
     }
 
     // --- Livery (issue #10): paint the bodywork, leave the glass alone ------
@@ -477,7 +481,12 @@ public partial class MapRenderer : Node2D
     static ShaderMaterial LiveryMaterial(string vehicle, string livery)
     {
         if (string.IsNullOrEmpty(livery) || string.IsNullOrEmpty(vehicle)) return null;
-        string key = vehicle + "|" + livery;
+        // The MASK belongs to the photo (the picture whose bodywork is being
+        // recoloured), so a model resolves to its photo first: the cache then
+        // holds one material per (photo, paint) and a 51-car run in three paints
+        // is still three materials.
+        string photo = DrivingGame.Sim.Config.ModelFor(vehicle).Photo;
+        string key = photo + "|" + livery;
         if (_liveryMats.TryGetValue(key, out var cached)) return cached;
         _liveryShader ??= GD.Load<Shader>("res://assets/livery.gdshader");
         if (_liveryShader == null)
@@ -485,12 +494,12 @@ public partial class MapRenderer : Node2D
             GD.PrintErr("livery: res://assets/livery.gdshader missing - cars keep their photographed colour");
             return null;
         }
-        if (!_maskTextures.TryGetValue(vehicle, out var mask))
-            _maskTextures[vehicle] = mask =
-                GD.Load<Texture2D>($"res://assets/car_{vehicle}_mask.png");
+        if (!_maskTextures.TryGetValue(photo, out var mask))
+            _maskTextures[photo] = mask =
+                GD.Load<Texture2D>($"res://assets/car_{photo}_mask.png");
         if (mask == null)
         {
-            GD.PrintErr($"livery: no body mask for vehicle '{vehicle}' - not painting it");
+            GD.PrintErr($"livery: no body mask for photo '{photo}' (model '{vehicle}') - not painting it");
             return null;
         }
         var mat = new ShaderMaterial { Shader = _liveryShader };
@@ -527,6 +536,14 @@ public partial class MapRenderer : Node2D
     // Per-sprite physical footprint (width × length, metres) - the shared
     // table in Config.VEHICLE_SIZES is the single source of truth (the
     // simulation's collision math uses the same numbers).
+    /// <summary>Which PHOTO shows a model. The client's picture-keyed tables
+    /// (the sprite atlas, the body mask, the minimap dots) are keyed by the photo
+    /// they were cut from, while a car now names a MODEL (#18) — so every crossing
+    /// from one vocabulary to the other goes through here. Skipping it is not a
+    /// silent wrong colour but a per-frame exception: `CarColors["mixer_truck"]`
+    /// threw 946 times before this helper existed.</summary>
+    static string PhotoOf(string model) => DrivingGame.Sim.Config.ModelFor(model).Photo;
+
     static (float W, float L) CarSizeOf(string vehicle)
     {
         var (w, l) = DrivingGame.Sim.Config.SizeForVehicle(vehicle);
@@ -3760,7 +3777,7 @@ public partial class MapRenderer : Node2D
                         _carMeta[uid] = m = new CarMeta();
                     // Prefer the new name, fall back to the historical one (#10):
                     // a client of either vintage keeps painting the right sprite.
-                    m.Vehicle = (c.TryGetProperty("vehicle", out var cv)
+                    m.Model = (c.TryGetProperty("vehicle", out var cv)
                                  && cv.ValueKind == JsonValueKind.String ? cv
                                  : c.TryGetProperty("color", out var cc)
                                  && cc.ValueKind == JsonValueKind.String ? cc
@@ -4111,7 +4128,7 @@ public partial class MapRenderer : Node2D
         // Multi-car: each car gets its own vehicle sprite (see CarTexture).
         // Meta may not exist yet on the very first sample - red is the
         // safe default.
-        string vehicle = _carMeta.TryGetValue(uid, out var meta) ? meta.Vehicle : "blue";
+        string vehicle = _carMeta.TryGetValue(uid, out var meta) ? meta.Model : "blue";
         var tex = CarTexture(vehicle);
         var size = CarSizeOf(vehicle);
         // The texture is stretched to the sprite's physical size: the blue
@@ -4343,7 +4360,7 @@ public partial class MapRenderer : Node2D
                     if (metaLivery.Sprite == null || !GodotObject.IsInstanceValid(metaLivery.Sprite))
                         metaLivery.Sprite = node.GetChild<Sprite2D>(0);
                     metaLivery.LiveryApplied = metaLivery.Livery;
-                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Vehicle, metaLivery.Livery);
+                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Model, metaLivery.Livery);
                 }
             }
 
@@ -4400,7 +4417,7 @@ public partial class MapRenderer : Node2D
                     }
                     if (lab.Text != lbl) lab.Text = lbl;
                     // Center on the car's axis (Label origin is top-left).
-                    float noseLenM = CarSizeOf(meta.Vehicle).L;
+                    float noseLenM = CarSizeOf(meta.Model).L;
                     lab.Position = pos + new Vector2(
                         -lab.Size.X * 0.1f * 0.5f,
                         -(RearAxleOffsetM + noseLenM / 2f + 0.6f));
@@ -4431,9 +4448,9 @@ public partial class MapRenderer : Node2D
                 Vector2 pos = node != null
                     ? node.GlobalPosition
                     : new Vector2(buf[^1].X, -buf[^1].Y);   // samples are sim metres, y north
-                string col = _carMeta.TryGetValue(kv.Key, out var m)
-                    ? m.Vehicle : "blue";
-                _minimap.Cars.Add((pos, kv.Key == _followUid, CarColors[col]));
+                string photo = PhotoOf(_carMeta.TryGetValue(kv.Key, out var m) ? m.Model : "blue");
+                _minimap.Cars.Add((pos, kv.Key == _followUid,
+                                   CarColors.TryGetValue(photo, out var dot) ? dot : CarColors["blue"]));
             }
             _minimap.QueueRedraw();
         }
@@ -4487,9 +4504,11 @@ public partial class MapRenderer : Node2D
                         $"http://127.0.0.1:{_embeddedPort}/car/{uid}/decisions");
                 }
                 var mSel = _carMeta.GetValueOrDefault(uid);
-                string vehicle = mSel?.Vehicle ?? "blue";
-                string cls = DrivingGame.Sim.Config.VEHICLE_CLASS
-                    .GetValueOrDefault(vehicle, "car");
+                // The header used to read `tan (car)` - a PHOTO name plus a class
+                // no part of the sim consults. A model answers for itself now (#18);
+                // ModelFor resolves the old photo words, so a tape or a host that
+                // still says `tan` shows what it actually is.
+                var model = DrivingGame.Sim.Config.ModelFor(mSel?.Model);
                 float kmh = 0f;
                 if (_carBuf.TryGetValue(uid, out var bufSel) && bufSel.Count > 0)
                     kmh = bufSel[^1].SpeedKmh;
@@ -4499,7 +4518,7 @@ public partial class MapRenderer : Node2D
                 // the scroll position, so it must not happen more often.
                 _infoSpeed.Text = $"speed   {kmh:F1} km/h";
                 var sb = new System.Text.StringBuilder();
-                sb.Append($"#{uid}   {vehicle} ({cls})\n");
+                sb.Append($"#{uid}   {model.Name}\n");
                 sb.Append($"driver  {mSel?.Driver ?? "?"}\n");
                 sb.Append("decisions (newest first):\n");
                 foreach (var line in _decLines)
@@ -4563,7 +4582,7 @@ public partial class MapRenderer : Node2D
             // Hit area == the sim's crash-detection footprint
             // (CollLenM/CollWidM from body_corners), falling back to the
             // sprite size before the first sample.
-            var size = CarSizeOf(m?.Vehicle ?? "blue");
+            var size = CarSizeOf(m?.Model ?? "blue");
             float halfW = (m != null && m.CollWidM > 0 ? m.CollWidM : size.W) / 2f;
             float halfL = (m != null && m.CollLenM > 0 ? m.CollLenM : size.L) / 2f;
             Vector2 bodyCentre = node.GlobalPosition +

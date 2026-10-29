@@ -45,7 +45,7 @@ public sealed class TapeCar
     public bool Brake { get; internal set; }
     public bool WrongSide { get; internal set; }
     public int CrashEpisodes { get; internal set; }
-    public string Vehicle { get; internal set; }      // the sprite -> vehicle class
+    public string Model { get; internal set; }      // the sprite -> vehicle class
     public int Lamps { get; internal set; }         // bit0 headlights, bit1 taillights
     /// <summary>The CAR owning this car's cap (0 = nobody: free, or held by
     /// the kerb rather than a driver). Written BEFORE `capKey`, which is the
@@ -584,7 +584,7 @@ public static class RunTape
                         SpeedMps = ParseD(fld[4], 0.0), Blinkers = ParseI(fld[5], 0),
                         Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                         CrashEpisodes = ParseI(fld[8], 0),
-                        Vehicle = fld.Length >= 11 ? fld[9] : "",
+                        Model = fld.Length >= 11 ? fld[9] : "",
                         // FIVE field generations: ...,color,capKey (lamps
                         // absent), ...,color,lamps,capKey, ...,color,lamps,
                         // heldBy,capKey and ...,color,lamps,heldBy,level,
@@ -777,7 +777,7 @@ public static class RunTape
                 Blinkers = blinkers, Brake = c.IsBraking,
                 WrongSide = wrongSide.GetValueOrDefault(c.Uid, false),
                 CrashEpisodes = c.CrashEpisodes,
-                Vehicle = c.Vehicle ?? "",
+                Model = c.Model ?? "",
                 // The lamps are part of the picture: the renderer draws
                 // white head dots and red tail dots, and a tape that does
                 // not carry them cannot say what the lamps of the frame
@@ -839,7 +839,7 @@ public static class RunTape
         foreach (var cf in f.Cars)
             parts.Add($"{cf.Uid},{cf.X:F3},{cf.Y:F3},{cf.HeadingDeg:F2}," +
                       $"{cf.SpeedMps:F3},{cf.Blinkers},{(cf.Brake ? 1 : 0)}," +
-                      $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Vehicle}," +
+                      $"{(cf.WrongSide ? 1 : 0)},{cf.CrashEpisodes},{cf.Model}," +
                       $"{cf.Lamps},{cf.HeldByUid},{cf.Level},{cf.CapKey}");
         return $"{f.Step};{f.FluidityMpsPerCar:F4};{f.MovingShare:F3};" +
                string.Join("|", parts) +

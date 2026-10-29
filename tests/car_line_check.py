@@ -29,17 +29,17 @@ API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
 # Everything this script reads is in METRES now (as /state, /map and
 # /segment all answer - see docs/UNITS.md); nothing converts any more.
 
-# (color, width_m, length_m) - MUST mirror Config.VEHICLES
+# (model, width_m, length_m) - MUST mirror Config.MODELS
 # (DrivingGame.Sim/Config.cs) and CarSizes in MapRenderer.cs.
 # Order = line-up order.
 CARS = [
-    ("blue",    1.80, 4.40),
-    ("silver",  1.71, 3.14),
-    ("police",  1.86, 4.71),
-    ("tan",     1.86, 4.75),
-    ("tractor", 2.55, 7.00),
-    ("pickup",  2.09, 5.25),
-    ("mixer",   2.50, 8.40),
+    ("mercedes_c220", 1.80, 4.40),
+    ("fiat_500",      1.71, 3.14),
+    ("bmw_police",    1.86, 4.71),
+    ("vw_passat",     1.86, 4.75),
+    ("tractor_unit",  2.55, 7.00),
+    ("ford_f150",     2.09, 5.25),
+    ("mixer_truck",   2.50, 8.40),
 ]
 GAP_M = 3.0      # clear gap between consecutive vehicles
 MARGIN_M = 5.0   # keep off the junction ends of the segment
@@ -125,7 +125,7 @@ def main():
     print(cyan("\nPlacing the line (from the segment start node towards the end):"))
     for name, l, p in plan:
         _req("POST", "/teleport", {"segment": idx, "progress": p,
-                                   "color": name, "add": True})
+                                   "model": name, "add": True})
 
     # Verify: every car present with the right color and at the planned
     # longitudinal position (chord placement is exact on straight segments;
@@ -134,13 +134,13 @@ def main():
     wanted = {name for name, _, _ in CARS}
     t0 = time.time()
     while time.time() - t0 < 10.0:
-        cars = {c["color"]: c for c in get_state().get("cars", [])}
+        cars = {c["model"]: c for c in get_state().get("cars", [])}
         if set(cars) == wanted:
             break
         time.sleep(0.2)
     dx, dy = seg["x2"] - seg["x1"], seg["y2"] - seg["y1"]
     norm2 = dx * dx + dy * dy
-    print(f"\n{'#':>2} {'color':8s} {'len':>5s} {'planned m':>10s} {'actual m':>9s}  pos (x, y)")
+    print(f"\n{'#':>2} {'model':>14s} {'len':>5s} {'planned m':>10s} {'actual m':>9s}  pos (x, y)")
     ok = True
     for i, (name, l, p) in enumerate(plan, start=1):
         c = cars.get(name)

@@ -45,7 +45,7 @@ public partial class MapRenderer : Node2D
         public int Lamps;                 // bit0 headlights, bit1 taillights
         public int HeldBy;                // the CAR owning CapKey, 0 = nobody
         public int Level;                 // the DECK (0 = ground, 1 = bridge)
-        public string Vehicle = "", CapKey = "";
+        public string Model = "", CapKey = "";
     }
     private sealed class TapeEventRev { public long Uid; public string Msg = ""; }
     private sealed class TapeFrameRev
@@ -404,7 +404,7 @@ public partial class MapRenderer : Node2D
         _reviewAt = 0;
         _selected.Clear();
         _carBuf.Clear();
-        _carVehicles.Clear();
+        _carModels.Clear();
         _lastCheckedCursor = -1;
     }
 
@@ -1077,7 +1077,7 @@ public partial class MapRenderer : Node2D
                 Blinkers = (int)ParseNum(fld[5], 0.0),
                 Brake = fld[6] == "1", WrongSide = fld[7] == "1",
                 Crashes = (long)ParseNum(fld[8], 0.0),
-                Vehicle = fld.Length >= 11 ? fld[9] : "",
+                Model = fld.Length >= 11 ? fld[9] : "",
                 Lamps = fld.Length >= 12 ? (int)ParseNum(fld[10], 0.0) : 0,
                 HeldBy = fld.Length >= 13 ? (int)ParseNum(fld[11], 0.0) : 0,
                 Level = _legendSeen ? (_legendHasLevel && fld.Length >= 14 ? (int)ParseNum(fld[12], 0.0) : 0)
@@ -1387,7 +1387,7 @@ public partial class MapRenderer : Node2D
                 }
                 continue;
             }
-            _carVehicles[cf.Uid] = cf.Vehicle;
+            _carModels[cf.Uid] = cf.Model;
             // The lamps, the brake and the blinkers come from the RECORDED
             // substep, not from the live sim beside the tape. The per-frame
             // light pass only runs for a car that has a _carMeta entry, and
@@ -1399,7 +1399,7 @@ public partial class MapRenderer : Node2D
             // per frame, which is why the wrong ones read as holes.
             if (!_carMeta.TryGetValue(cf.Uid, out var meta))
                 _carMeta[cf.Uid] = meta = new CarMeta();
-            meta.Vehicle = cf.Vehicle;
+            meta.Model = cf.Model;
             // The PAINT the test declared (issue #10). Absent means "photographed
             // colour", so a run staged before liveries existed - or one that says
             // nothing - reviews exactly as it did yesterday.
@@ -2816,9 +2816,9 @@ public partial class MapRenderer : Node2D
     /// window without a colour would draw a spriteless box.</summary>
     string ColorOf(long uid)
     {
-        var c = _carVehicles.GetValueOrDefault(uid, "");
+        var c = _carModels.GetValueOrDefault(uid, "");
         if (c.Length > 0) return c;
-        return _carMeta.TryGetValue(uid, out var m) ? m.Vehicle : "";
+        return _carMeta.TryGetValue(uid, out var m) ? m.Model : "";
     }
 
     private void OpenDetailMenu(Vector2 atPointer, long uid)
@@ -3087,7 +3087,7 @@ public partial class MapRenderer : Node2D
         _markerHits.Sort((a, b) => b.Step.CompareTo(a.Step));   // newest hit wins a tie
     }
 
-    private readonly Dictionary<long, string> _carVehicles = new();
+    private readonly Dictionary<long, string> _carModels = new();
 
     /// <summary>The bar's axis: ten frame ticks with the sim time at every
     /// other one, so a point on the curve can be named ("the dip at 60 s")
