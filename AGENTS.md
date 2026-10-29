@@ -272,7 +272,9 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
   the current branch when the fix is wrong without it — and say so explicitly
   (full rule: `docs/WORKFLOW.md`, "Scope creep: stop, warn, ask").
 - **A behaviour change never lands on `main` directly.** Docs/comments/log
-  wording may. When in doubt, take the loop. History up to `f09890b`
+  wording may — such a direct push trips GitHub's `Bypassed rule violations`
+  notice, which is expected, not an error (see `docs/WORKFLOW.md`).
+  When in doubt, take the loop. History up to `f09890b`
   (2026-10-29) is **grandfathered** - it predates this rule, see
   `docs/WORKFLOW.md`. The rule is absolute from there on.
 - **`scripts/pr.sh` is not done until the PR body carries the verdict lines**

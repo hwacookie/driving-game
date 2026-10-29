@@ -122,6 +122,31 @@ go straight to `main` with a short commit message. Anything that changes
 behaviour, a verdict, a default, a file format, or a UI affordance takes the
 loop — when in doubt, take the loop.
 
+### The `Bypassed rule violations` notice on such a push is expected
+
+`main` is protected on GitHub ("Changes must be made through a pull request",
+2 required status checks), and that protection knows nothing about the
+exemption above — it judges every push, not the kind of change. So an exempt
+push is answered with:
+
+```
+remote: Bypassed rule violations for refs/heads/main:
+remote: - Changes must be made through a pull request.
+remote: - 2 of 2 required status checks are expected.
+```
+
+**This notice is expected, not an error** (user decision, 2026-11-06): the repo
+owner pushes as an admin, the bypass is the mechanism the exemption relies on,
+and it is the documented way a docs-only commit lands. Nothing to fix, nothing
+to apologise for — but the push output should still be read, and the notice
+belongs in the report to the user.
+
+What the notice does NOT license: putting a **behaviour** change through it. The
+bypass is legal strictly inside the exemption; a behaviour change that arrives
+this way is a loop violation no matter how clean the push looked. And the bypass
+does not skip the build judgement either — `ci.yml` also runs on `push: main`, so
+the exempt commit is still built and unit-tested immediately after landing.
+
 ## Rules inside the loop
 
 - **Reproduce before fixing** (project rule): the issue body carries the exact
