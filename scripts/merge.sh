@@ -44,7 +44,7 @@ fi
 
 gh pr merge "$BR" --merge --delete-branch
 echo "==> merged $BR, branch deleted on origin"
-git checkout -q main
+git switch -q main
 git pull -q --ff-only origin main
 echo "==> main at $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
 echo "==> rebuilding the merged tree ..."

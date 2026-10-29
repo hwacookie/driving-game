@@ -99,8 +99,8 @@ case "${1:-status}" in
       echo "==> created branch 'offline' at $(git rev-parse --short HEAD)"
     fi
     BASE=$(git rev-parse --short offline)
-    git checkout -q offline
-    git merge --no-ff -q "$BR" -m "$TITLE
+    git switch -q offline
+    git merge --no-ff -q -m "$TITLE
 
 Local-issue: ${N:+#$N}${N:-none}
 Branch: $BR
@@ -108,11 +108,14 @@ Local-CI: core build + unit tests run on $(hostname) $(date '+%Y-%m-%d %H:%M') -
 Verdicts:
 ${PR_VERDICTS:-_paste the e2e verdict lines here (docs/WORKFLOW.md)_}
 
-Rebased-onto: $BASE"
+Rebased-onto: $BASE" "$BR"
     git checkout -q "$BR"
     echo "==> landed $BR into 'offline' ($(git rev-parse --short offline)); local main untouched"
-    [ -n "$N" ] && [ -f "$REC/${N}-"*.md ] 2>/dev/null && \
-      printf -- '- landed: %s into offline as %s\n' "$BR" "$(git rev-parse --short offline)" >> "$REC/${N}-"*.md
+    if [ -n "$N" ]; then
+      rec=$(ls "$REC/${N#L}-"*.md 2>/dev/null | head -1 || true)
+      [ -n "$rec" ] && printf -- '- landed: %s into offline as %s (%s)\n' \
+        "$BR" "$(git rev-parse --short offline)" "$(date '+%Y-%m-%d %H:%M')" >> "$rec"
+    fi
     echo "    when online: scripts/offline.sh replay"
     ;;
 

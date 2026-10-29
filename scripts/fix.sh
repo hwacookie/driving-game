@@ -39,7 +39,10 @@ if [ -f .git/offline-mode ] || [ "${N#L}" != "$N" ]; then
     git commit -q -m "issue: local record ${N} for $(basename $(printf '%s' "$rec_files" | head -1) .md)"
     echo "==> committed the record on $BR ($(printf '%s' "$rec_files" | tr '\n' ' '))"
   fi
-  echo "    record: issues/${N#L}-*.md   land with: scripts/offline.sh land $N"
+  rec2=$(ls "issues/${N#L}"-*.md 2>/dev/null | head -1 || true)
+  [ -n "$rec2" ] && sed -i '' "s|- branch: (not started.*|- branch: $BR|" "$rec2" && \
+    git add "$rec2" && git commit -q --amend --no-edit
+  echo "    record: ${rec2:-none}   land with: scripts/offline.sh land $N"
   exit 0
 fi
 git fetch -q origin
