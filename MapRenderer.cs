@@ -3551,8 +3551,14 @@ public partial class MapRenderer : Node2D
             // data): skip it silently instead of erroring.
             if (!root.TryGetProperty("time", out var tEl)) return;
             double t = tEl.GetDouble();
-            // Time went backwards => the sim restarted: wipe everything.
-            if (t < _lastMaxTime - 0.5) ClearCars();
+            // Time went backwards => the sim restarted: wipe everything. Only
+            // for a stream that OWNS the clock: a review window reads the live
+            // /state beside its tape, and the live clock (a host started
+            // minutes later, at t≈0) is not behind the tape's 98 s - it is a
+            // different clock entirely. Without this guard the wipe ran every
+            // frame and deleted the cars ReviewFeed had just fed (issue #1's
+            // "reviewer beside a live host paints no cars").
+            if (!(_review || _tapeLive) && t < _lastMaxTime - 0.5) ClearCars();
             double prevMax = _lastMaxTime;
             _lastMaxTime = Math.Max(_lastMaxTime, t);
 
@@ -3888,9 +3894,17 @@ public partial class MapRenderer : Node2D
                 _flagRed = ParseFlag(root, "red");
             }
 
-            // Cars missing from this response are gone.
-            foreach (var uid in _carBuf.Keys.Where(u => !seen.Contains(u)).ToArray())
-                RemoveCar(uid);
+            // Cars missing from this response are gone - for a LIVE surface.
+            // A review window still polls /state (its readout and flags come
+            // from there) but its cars belong to the TAPE, and this prune ran
+            // AFTER ReviewFeed had filled the buffers: an idle live sim means
+            // "no cars", so every recorded car was deleted in the same frame
+            // it was fed - a reviewer beside any running host painted an
+            // empty map. The tape owns the car buffers, so the live teardown
+            // has no claim on them.
+            if (!_review && !_tapeLive)
+                foreach (var uid in _carBuf.Keys.Where(u => !seen.Contains(u)).ToArray())
+                    RemoveCar(uid);
         }
         catch (System.Exception e)
         {
