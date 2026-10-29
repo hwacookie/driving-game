@@ -229,6 +229,31 @@ public partial class MapRenderer : Node2D
     /// click that loaded nothing.</summary>
     private static string TapeDir() => ProjectSettings.GlobalizePath("res://tests");
 
+    /// <summary>The `map=` token of a tape's header line, without loading the
+    /// recording ("basic"; "" when the tape names the OSM ground or the header
+    /// cannot be read). The review window needs it BEFORE it picks a source:
+    /// in review mode the ground to build is the one the tape names (issue #2).
+    /// `map_hash=` never matches the search - "map=" wants the equals sign
+    /// right after "map".</summary>
+    static string TapeMapNameOf(string path)
+    {
+        if (path.Length == 0) return "";
+        try
+        {
+            foreach (var line in File.ReadLines(path).Take(4))
+            {
+                if (!line.StartsWith("#")) continue;
+                int at = line.IndexOf("map=", StringComparison.Ordinal);
+                if (at < 0) continue;
+                string rest = line.Substring(at + 4);
+                int sp = rest.IndexOf(' ');
+                return (sp > 0 ? rest.Substring(0, sp) : rest).Trim();
+            }
+        }
+        catch { }
+        return "";
+    }
+
     private static string NewestTape()
     {
         var d = DirAccess.Open("res://tests");
@@ -1189,9 +1214,25 @@ public partial class MapRenderer : Node2D
     /// blinkers, trails, occlusion) is reused unchanged.
     /// play  → two adjacent frames bracket the render target (the lerp).
     /// step  → one frame, and the target sits exactly on it (no lerp).</summary>
+    private int _noGroundDbg;
+
     private void ReviewFeed()
     {
         if (_cursor < 0 || _cursor >= _tape.Count) return;
+        // NO GROUND at all (the tape names a map this machine cannot build):
+        // painting the cars in a void would read as a street, so the window
+        // says it instead - the readout carries the same verdict every frame.
+        if (_noGround)
+        {
+            if (_noGroundDbg < 3)
+            {
+                _noGroundDbg++;
+                GD.Print("REVIEW-NO-GROUND the tape's ground could not be built " +
+                         "— no cars painted (--source http reviews against a " +
+                         "host that has the ground)");
+            }
+            return;
+        }
         // A foreign ground: the cars would be painted somewhere they never
         // drove. Refuse rather than lie (the decision goes with the map
         // REFERENCE of 2026-10-25; --ignore-map-hash shows it anyway).
@@ -1549,7 +1590,8 @@ public partial class MapRenderer : Node2D
             $"view: {(_playing ? "play (lerp between recorded frames)" : "step (exact substep)")}" +
             " · units: meters",
             $"map {_tapeMap} · tape hash {_tapeHash} · drawn {_drawnMapHash} " +
-            $"· {(_mapMismatch ? "MAP MISMATCH — refused, --ignore-map-hash to force ⚠⚠"
+            $"· {(_noGround ? "NO GROUND (cannot build this map) — cars not painted ⚠⚠"
+                : _mapMismatch ? "MAP MISMATCH — refused, --ignore-map-hash to force ⚠⚠"
                     : _tapeHash.StartsWith("v2:") && _drawnMapHash.StartsWith("v2:")
                         ? "map check: ok" : "map check: pre-wide stamp, unverifiable")} " +
             $"· fluidity {(fr != null ? fr.Fluidity : 0.0):F2} m/s/car" +
