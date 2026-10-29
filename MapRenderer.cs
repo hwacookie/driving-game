@@ -4989,7 +4989,8 @@ public partial class MapRenderer : Node2D
             // still polls the live host (its readout and flags come from there),
             // but those cars belong to a different run and must not override what
             // this recording says (issue #9).
-            if (_tapeOpts.TryGetValue(uid, out var o) && o.Tracks is not null)
+            var o = TapeOptionAt(uid);        // staged declaration + changes up
+            if (o.Tracks is not null)         // to this substep (#10)
                 return o.Tracks == true;
             // Standing rule: the PRIMARY car of the frame under the cursor - the
             // same car the reviewer's default focus names ("focus: the primary

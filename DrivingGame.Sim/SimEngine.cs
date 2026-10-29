@@ -54,6 +54,21 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
 
+/// <summary>Change one car's per-car options WHILE IT DRIVES (issue #10): its
+/// paint, its own tyre lines, whether a detail window belongs to it.
+///
+/// The SPAWN carries the same three (TeleportCommand), because a staged car has
+/// to own its facts before its first tick. This command is for the change that
+/// comes later — a repaint at the kerb, lines switched on to look at a wobble —
+/// and it therefore demands a UID: "the primary car" is not a fact the engine
+/// may guess, it is a conclusion the client would have to re-derive every frame.
+/// Nothing set is a no-op; an unknown uid is dropped, because the car may have
+/// completed between the request and the tick that runs it. Every accepted
+/// change is written to the tape as a substep-keyed event, so a review replays
+/// the MOMENT rather than only the result.</summary>
+public sealed record CarOptsCommand(int Uid, string? Livery, bool? TyreLines,
+                                    bool? DetailWindow) : SimCommand;
+
 /// <summary>"validator" is global; "breadcrumbs"/"mode" are per-car when a
 /// Uid is given (omit = primary/followed car).</summary>
 public sealed record ToggleCommand(bool? Breadcrumbs, bool? Validator,
@@ -648,6 +663,27 @@ public sealed class SimEngine
                         Console.WriteLine($"API: Switched to FREE mode (car #{tuid})");
                     }
                 }
+                break;
+            }
+
+            case CarOptsCommand co:
+            {
+                if (!_cars.TryGetValue(co.Uid, out var oc)) break;   // gone by now
+                bool any = false;
+                if (!string.IsNullOrEmpty(co.Livery) && oc.Livery != co.Livery)
+                { oc.Livery = co.Livery; any = true; }
+                if (co.TyreLines.HasValue && oc.OptTyreLines != co.TyreLines)
+                { oc.OptTyreLines = co.TyreLines; any = true; }
+                if (co.DetailWindow.HasValue && oc.OptDetailWindow != co.DetailWindow)
+                { oc.OptDetailWindow = co.DetailWindow; any = true; }
+                if (!any) break;      // a change that changes nothing records nothing
+                RunTape.NoteCarOptions(_simStepsTotal, oc.Uid,
+                                       co.DetailWindow, co.TyreLines, co.Livery);
+                Console.WriteLine($"\n🎨 API: car #{oc.Uid} options changed — " +
+                                  (co.Livery != null ? $"livery {co.Livery} " : "") +
+                                  (co.TyreLines.HasValue ? $"tyre_lines {(co.TyreLines == true ? "on" : "off")} " : "") +
+                                  (co.DetailWindow.HasValue ? $"detail_window {(co.DetailWindow == true ? "on" : "off")}" : "") +
+                                  $"(step {_simStepsTotal})");
                 break;
             }
 

@@ -355,6 +355,54 @@ public static class GameApi
             });
         });
 
+        app.MapPost("/caropts", async (HttpRequest req) =>
+        {
+            // One car's VIEW options, changed while it drives (issue #10). The
+            // spawn fields on /teleport are for a car that does not exist yet;
+            // this is for the one that does — a repaint at the kerb, tyre lines
+            // switched on to look at a wobble — and it names the car instead of
+            // letting the engine guess which car the caller meant.
+            var data = await ReadJsonBody(req);
+            if (!data.TryGetProperty("uid", out var uv) || uv.ValueKind != JsonValueKind.Number)
+                return Json(new Dictionary<string, object?>
+                    { ["error"] = "caropts needs a numeric 'uid' — which car?" }, 400);
+            int cuid = (int)uv.GetDouble();
+
+            string? cliv = null;
+            if (data.TryGetProperty("livery", out var clv) &&
+                clv.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrEmpty(clv.GetString()))
+            {
+                cliv = Config.ResolveLivery(clv.GetString());
+                if (cliv is null)
+                    return Json(new Dictionary<string, object?>
+                    {
+                        ["error"] = $"unknown livery '{clv.GetString()}': expected one of " +
+                                    string.Join(", ", Config.LIVERIES.Keys) +
+                                    ", or #rrggbb, or hue:<0..360>",
+                    }, 400);
+            }
+            bool? ctracks = null, cdetail = null;
+            if (data.TryGetProperty("tyre_lines", out var ctl) && ctl.ValueKind != JsonValueKind.Null)
+                ctracks = ctl.GetBoolean();
+            if (data.TryGetProperty("detail_window", out var cdt) && cdt.ValueKind != JsonValueKind.Null)
+                cdetail = cdt.GetBoolean();
+            if (cliv is null && ctracks is null && cdetail is null)
+                return Json(new Dictionary<string, object?>
+                {
+                    ["error"] = "caropts changes nothing: give at least one of " +
+                                "livery, tyre_lines, detail_window",
+                }, 400);
+
+            engine.EnqueueCommand(new CarOptsCommand(cuid, cliv, ctracks, cdetail));
+            return Results.Json(new Dictionary<string, object?>
+            {
+                ["ok"] = true,
+                ["command"] = "caropts",
+                ["params"] = data,
+            });
+        });
+
         app.MapPost("/flags", async (HttpRequest req) =>
         {
             var data = await ReadJsonBody(req);
