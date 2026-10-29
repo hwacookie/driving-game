@@ -265,6 +265,12 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
 `scripts/issue.sh` → `scripts/fix.sh <n>` → fix → test → `scripts/pr.sh` →
 `scripts/merge.sh`. One issue, one branch, one PR.
 
+- **Creep gets a warning and a question, never a quiet commit.** When a new
+  idea, feature or bug shows up while working an issue, stop, name it in one or
+  two sentences, and ask: "wouldn't this be better in its own issue + branch?"
+  Then keep working the original issue until the user answers. Only fold it into
+  the current branch when the fix is wrong without it — and say so explicitly
+  (full rule: `docs/WORKFLOW.md`, "Scope creep: stop, warn, ask").
 - **A behaviour change never lands on `main` directly.** Docs/comments/log
   wording may. When in doubt, take the loop. History up to `f09890b`
   (2026-10-29) is **grandfathered** - it predates this rule, see

@@ -24,6 +24,30 @@ as the repo owner, token scope `repo`), git over ssh.
 One issue → one branch → one PR. A second problem is a second issue, even when
 it is found while fixing the first (note it in the PR, then file it).
 
+## Scope creep: stop, warn, ask (binding user decision, 2026-11-06)
+
+While working an issue, new ideas arrive: "while I'm here, this could also…",
+a nicer default, a latent bug spotted in the code I am passing through, a
+refactor that would make the fix cleaner. **Do not fold any of it into the
+current branch, and do not silently drop it either.** As soon as one appears:
+
+1. **Finish saying what it is** — one or two sentences: the idea/bug/feature,
+   what it would cost, and why it is not part of the issue at hand.
+2. **Ask the question explicitly**: *"wouldn't this be better placed in its own
+   issue + branch?"* — that is the user's call, not mine.
+3. **Then continue with the issue I was actually working on**, leaving the
+   creep out of the diff, until the answer comes.
+
+Why it is a question and not a rule to "just file it": the judgement of what
+belongs together is the user's. A creep that genuinely cannot be separated from
+the current change (the fix is wrong without it) stays in — but then I say so
+and give the reason, rather than letting the branch grow quietly.
+
+The test for "does this belong here": **would the PR title still describe the
+diff if this piece were in it?** If not, it is a second issue. A branch that
+carries an unrelated refactor next to a bug fix makes the merge, the review and
+the revert all worse.
+
 ## Offline mode: the same loop with no GitHub
 
 `scripts/offline.sh` exists for the train, the plane and the dead Tailnet. The
@@ -108,6 +132,9 @@ loop — when in doubt, take the loop.
   whole watched run worthless).
 - **Never signal Godot** (`SIGTERM` kills .NET's exit path into an abort):
   close windows through the generation file / `scripts/open.sh --close`.
+- **Creep is asked about, not absorbed**: an idea, feature or bug found on the
+  way is raised with the user and (on their word) filed as its own issue/branch
+  — see "Scope creep: stop, warn, ask".
 - **The PR body states the verdict lines verbatim** (the `✅ PASSED` /
   `❌ FAILED` / measured numbers), not "tested".
 - Merge style: **merge commit** (`gh pr merge --merge`) so the branch history
