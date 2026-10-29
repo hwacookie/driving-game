@@ -50,9 +50,13 @@ dotnet run  --project DrivingGame.Server -- --map basic --warp 4   # REST API on
 # THE REVIEWER — a second window on a tape (path optional: without one it
 # opens the newest tape in tests/). --review-at parks the cursor on a step,
 # --review-name aims the camera at the car with that spawn name.
+TAPE=$(ls -t tests/tape_T_*.txt | head -1)   # the newest recording in tests/
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
       --source embedded --map basic --port 5032 \
-      --review tests/tape_T_240_0_20261022_032831.txt --review-at 3308 --maximized
+      --review "$TAPE" --review-at 3308 --maximized
+#   `--map` names the ground the tape was recorded on (its `map=` header) - a
+#   review window refuses to paint cars on a ground it cannot verify. The
+#   substep of `--review-at` belongs to THAT tape; omit it to open at frame 0.
 ```
 
 Every flag the client parses is listed in

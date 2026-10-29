@@ -32,9 +32,16 @@ appears (`OS.GetCmdlineUserArgs()` in `MapRenderer.cs`).
       --source embedded --map basic --port 5001 --zoom 14
 # the Simulationsreviewer — a second window on a tape. The path is OPTIONAL:
 # without one it opens the newest tape in tests/.
+TAPE=$(ls -t tests/tape_T_*.txt | head -1)   # the newest recording in tests/
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
       --source embedded --map basic --port 5032 \
-      --review tests/tape_T_240_0_20261022_032831.txt --review-at 3308 --maximized
+      --review "$TAPE" --review-at 3308 --maximized
+#   `--map` names the ground the tape was recorded on (its `map=` header) — a
+#   review window refuses to paint cars on a ground it cannot verify; the
+#   substep of `--review-at` belongs to THAT tape, omit it to open at frame 0.
+#   Recordings are evidence of ONE run, not fixtures: the sweep of 2026-10-29
+#   deleted every tape then on disk (24 files, 33 MB, the two committed ones
+#   included), so the tape to review is the one the next run writes.
 ```
 
 Use a **free `--port`** for the second window — the embedded API will not bind

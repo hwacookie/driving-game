@@ -103,8 +103,13 @@ moves the cursor). Spec:
       delivery, neither path built or decided. It was not written by this
       session — that is why it went in alone rather than inside an unrelated
       commit.
-- [ ] `tests/tape_T_250_19_20261024_220134.txt` — untracked single-scenario
-      tape, judged not evidence worth keeping; delete or commit.
+- [x] ~~`tests/tape_T_250_19_20261024_220134.txt` — untracked single-scenario
+      tape, judged not evidence worth keeping; delete or commit.~~ **Deleted**
+      with every other tape on 2026-10-29 (operator's instruction): the whole
+      `tests/tape_T_*.txt` set went — 24 files, 33 MB, the committed `T_303`
+      and `T_308` included — so no unverifiable pre-wide-stamp recording is
+      left to inherit, and the reviewer's evidence is the tape of the run
+      under test.
 - [ ] e2e baseline: **3 red** — #20 `slow_pass_priority` (times out crawling),
       #26 `fig8_xing` (unexplained R33 centreline crossing at 9.1 s), #27
       `fig8_xing_plain` (contact 100/95 at ~10 s), plus the `❌ WRONG-SIDE`

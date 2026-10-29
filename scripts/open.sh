@@ -7,7 +7,10 @@
 #   scripts/open.sh                    # live session, embedded sim, API :5001
 #   scripts/open.sh --zoom 20          # closer in
 #   scripts/open.sh --map hills        # another map (see DrivingGame.Sim/TestMaps.cs)
-#   scripts/open.sh --review tests/tape_T_280_2_20261025_190654.txt   # the reviewer instead
+#   scripts/open.sh --review "$(ls -t tests/tape_T_*.txt | head -1)"  # the reviewer instead
+#     NOTE (issue #2): a review window still gets its GROUND from a host, so a
+#     live session has to answer :5001 - without one the tape's cars drive on a
+#     bare background while "GET /map failed" retries in the log.
 #   scripts/open.sh --external         # attach to a host you started yourself (HTTP mode)
 #   scripts/open.sh --close            # close the window this script opened (clean, no signal)
 #
