@@ -307,6 +307,34 @@ public static class GameApi
             if (data.TryGetProperty("name", out var nmv) &&
                 nmv.ValueKind == JsonValueKind.String)
                 name = nmv.GetString();
+            // The two per-car VIEW options (issue #9): a detail window for this
+            // car, and its own tyre lines. Absent = undeclared, so an unauthored
+            // cast keeps exactly today's picture instead of the client guessing.
+            bool? detailWindow = null, tyreLines = null;
+            if (data.TryGetProperty("detail_window", out var dwv) &&
+                dwv.ValueKind != JsonValueKind.Null)
+                detailWindow = dwv.GetBoolean();
+            if (data.TryGetProperty("tyre_lines", out var tlw) &&
+                tlw.ValueKind != JsonValueKind.Null)
+                tyreLines = tlw.GetBoolean();
+            // The car's PAINT (issue #10): a livery name, `#rrggbb` or `hue:N`.
+            // Unresolvable is a 400, never a silent fallback - the same rule the
+            // segment name follows, because a test that asked for "crimsn" and
+            // got a grey car would report a colour it never staged.
+            string? livery = null;
+            if (data.TryGetProperty("livery", out var lvw) &&
+                lvw.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrEmpty(lvw.GetString()))
+            {
+                livery = Config.ResolveLivery(lvw.GetString());
+                if (livery is null)
+                    return Json(new Dictionary<string, object?>
+                    {
+                        ["error"] = $"unknown livery '{lvw.GetString()}': expected one of " +
+                                    string.Join(", ", Config.LIVERIES.Keys) +
+                                    ", or #rrggbb, or hue:<0..360>",
+                    }, 400);
+            }
 
             if (color is not null && !Config.CAR_COLORS.Contains(color))
                 return Json(new Dictionary<string, object?>
@@ -317,7 +345,8 @@ public static class GameApi
 
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, color,
-                                    reverse, cruiseKmh, name));
+                                    reverse, cruiseKmh, name, detailWindow, tyreLines,
+                                    livery));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,

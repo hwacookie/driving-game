@@ -115,6 +115,13 @@ public partial class MapRenderer : Node2D
     private long _reviewUid = 0L;
     private string _tapeName = "", _tapeMap = "", _tapeHash = "";
 
+    /// <summary>What the test declared per car, read off the tape header's
+    /// `caropts=` token (issues #9 and #10): a detail window, its own tyre
+    /// lines, its paint. A uid absent from here was never declared — which is
+    /// NOT the same fact as a declared "off": the first keeps the standing
+    /// behaviour, the second turns it off.</summary>
+    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _tapeOpts = new();
+
     private bool _review;
     private string _reviewPath = "";
     private int _cursor;
@@ -1067,7 +1074,15 @@ public partial class MapRenderer : Node2D
     private bool LoadTape(string path)
     {
         _tape.Clear();
+        // A new tape is a new cast, a new set of per-car decisions and a fresh
+        // slate for which windows the test already opened. None of these was
+        // cleared here before, so an old cast could haunt a new tape's slot
+        // labels, and old track/livery declarations could haunt its paints.
         _tapeKinds.Clear();
+        _tapeNames.Clear();
+        _tapeOpts.Clear();
+        _detailDeclaredShown.Clear();
+        _detailDismissed.Clear();
         _legendSeen = _legendHasLevel = false;
         string text;
         try { text = File.ReadAllText(path); }
@@ -1114,6 +1129,34 @@ public partial class MapRenderer : Node2D
                     {
                         var kv = pair.Split(":");
                         if (kv.Length == 2) _tapeNames[(long)ParseNum(kv[0], -1.0)] = kv[1];
+                    }
+                }
+                if (line.Contains("caropts="))
+                {
+                    // uid:detail=on+tracks=off+livery=c62828,… - what the scenario
+                    // asked per car, so a review opens with the paints (and, when
+                    // those slices land, the windows and tracks) the operator saw
+                    // during the run, not with the photographed defaults.
+                    foreach (var pair in line.Split("caropts=")[1].Split(" ")[0].Split(","))
+                    {
+                        int sep = pair.IndexOf(':');
+                        if (sep <= 0) continue;
+                        long optUid = (long)ParseNum(pair.Substring(0, sep), -1.0);
+                        if (optUid < 0) continue;
+                        bool? det = null, trk = null;
+                        string? liv = null;
+                        foreach (var bit in pair.Substring(sep + 1).Split('+'))
+                        {
+                            int eq = bit.IndexOf('=');
+                            if (eq <= 0) continue;
+                            string v = bit.Substring(eq + 1);
+                            if (bit.Substring(0, eq) == "detail") det = v == "on";
+                            else if (bit.Substring(0, eq) == "tracks") trk = v == "on";
+                            else if (bit.Substring(0, eq) == "livery" && v.Length == 6)
+                                liv = "#" + v;
+                        }
+                        if (det is not null || trk is not null || liv is not null)
+                            _tapeOpts[optUid] = (det, trk, liv);
                     }
                 }
                 if (line.Contains("kinds="))
@@ -1298,6 +1341,11 @@ public partial class MapRenderer : Node2D
             if (!_carMeta.TryGetValue(cf.Uid, out var meta))
                 _carMeta[cf.Uid] = meta = new CarMeta();
             meta.Color = cf.Color;
+            // The PAINT the test declared (issue #10). Absent means "photographed
+            // colour", so a run staged before liveries existed - or one that says
+            // nothing - reviews exactly as it did yesterday.
+            _tapeOpts.TryGetValue(cf.Uid, out var carOpts);
+            meta.Livery = carOpts.Livery ?? "";
             meta.BlinkL = (cf.Blinkers & 1) > 0;
             meta.BlinkR = (cf.Blinkers & 2) > 0;
             meta.Hazard = false;
@@ -2082,6 +2130,10 @@ public partial class MapRenderer : Node2D
         w.CloseRequested += () => CloseDetailWindow(w);
         w.FollowAsked = ToggleDetailFollow;
         w.CenterAsked = CenterDetail;
+        // The per-car track toggle (issue #9): the box shows the EFFECTIVE state
+        // and a press overrides the test for this window.
+        w.TracksAsked = (win, on) => SetTyreLinesOverride(win.Uid, on);
+        w.TracksChecked = WantsTyreLines(uid);
         w.SwitchAsked = (win, other) =>
         {
             // "click an id, read about THAT car" — the window changes subject,
@@ -2146,6 +2198,9 @@ public partial class MapRenderer : Node2D
         bool wasFollow = w.Following;
         if (_detailHighlight != 0 && w.HighlightUid == _detailHighlight) _detailHighlight = 0L;
         _details.Remove(w);
+        // An operator who closes a test-declared window means it: the ask does
+        // not come back until a new tape (#9).
+        if (_details.All(x => x.Uid != w.Uid)) _detailDismissed.Add(w.Uid);
         w.QueueFree();
         SyncSelectedFromDetails();
         GD.Print($"DETAIL-CLOSE #{w.Uid} · {_details.Count} window(s) left" +
@@ -2282,6 +2337,23 @@ public partial class MapRenderer : Node2D
                          $"({(w.ListHeightForProbe() - listPre > 150 ? "took the growth" : "DID NOT take the growth — wrong")}) " +
                          $"· rows={w.RowCountForProbe()}");
                 GD.Print($"DETAIL-PROBE layout after the resize: {w.LayoutForProbe()}");
+                // The "tyre lines" checkbox (issue #9), pressed the way an
+                // operator presses it: the chain under test is signal → operator
+                // override → the nodes on the map, so it is read at BOTH ends.
+                var tracksBox = w.TracksButtonForProbe();
+                bool wantBefore = WantsTyreLines(w.Uid);
+                int nodesBefore = TyreLineNodeCount();
+                ClickInWindow(w, tracksBox, "DETAIL-PROBE tyre lines");
+                GetTree().CreateTimer(0.45).Timeout += () =>
+                {
+                    bool now = WantsTyreLines(w.Uid);
+                    int nodesNow = TyreLineNodeCount();
+                    bool chain = now != wantBefore && (now ? nodesNow > 0 : nodesNow == 0);
+                    GD.Print($"DETAIL-PROBE tyre lines: wanted {wantBefore} → {now} " +
+                             $"· box={w.TracksChecked} · track nodes {nodesBefore} → {nodesNow} " +
+                             $"· verdict={(chain ? "the press flipped the state and the map followed"
+                                                 : "MISMATCH — state and map disagree")}");
+                };
                 var cam0 = _cam.GlobalPosition;
                 ClickInWindow(w, w.FollowButton, "DETAIL-PROBE follow");
                 GetTree().CreateTimer(0.8).Timeout += () =>
@@ -2486,13 +2558,21 @@ public partial class MapRenderer : Node2D
     /// step; an empty list is honest where a stale one would lie.</summary>
     private void UpdateDetailsLive()
     {
-        if (_details.Count == 0 || _tape.Count > 0) return;
+        if (_tape.Count > 0) return;     // a review refreshes through UpdateDetails
+        // The OPENING ask runs above the "is a window open" gate: with the gate
+        // first, a test's detail_window could never open the FIRST window -
+        // measured as no DETAIL-AUTO line at all in a live run where /state
+        // declared detail_window=true for two cars.
+        foreach (var kv in _carMeta)
+            ApplyDeclaredDetails(kv.Key, kv.Value.OptDetail);
+        if (_details.Count == 0) return;
         var holderOf = new Dictionary<long, long>();
         foreach (var kv in _carMeta)
             if (kv.Value.HeldBy != 0) holderOf[kv.Key] = kv.Value.HeldBy;
         foreach (var w in _details)
         {
             if (!w.Showing) continue;
+            w.TracksChecked = WantsTyreLines(w.Uid);   // the box follows the picture
             if (!_carBuf.TryGetValue(w.Uid, out var buf) || buf.Count == 0) continue;
             var fr = buf[^1];
             var d = new CarDetailData
@@ -2529,8 +2609,15 @@ public partial class MapRenderer : Node2D
 
     private void UpdateDetails()
     {
-        if (_details.Count == 0 || _tape.Count == 0) return;
+        if (_tape.Count == 0) return;
         var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+        // The windows the TEST asked for (issue #9): a review opens them from the
+        // tape header, exactly as the live window opens them from /state - and,
+        // as there, BEFORE the "is a window open" gate below.
+        foreach (var cf in fr.Cars)
+            ApplyDeclaredDetails(cf.Uid,
+                _tapeOpts.TryGetValue(cf.Uid, out var detOpt) ? detOpt.Detail : null);
+        if (_details.Count == 0) return;
         // One pass over the cast for the holder relation — the chain's other
         // direction is a walk over THIS map, not a scan per car per frame.
         var holderOf = new Dictionary<long, long>();
@@ -2538,6 +2625,7 @@ public partial class MapRenderer : Node2D
         foreach (var w in _details)
         {
             if (!w.Showing) continue;
+            w.TracksChecked = WantsTyreLines(w.Uid);   // the box follows the picture
             w.CarTexture = CarTexture(ColorOf(w.Uid));
             w.Update(BuildDetailData(w.Uid, fr, holderOf));
         }
