@@ -136,7 +136,7 @@ and [docs/RECORD_PLAYBACK.md → *"Recording policy and the growing tape"*](docs
       from the SAME lookup `/state` uses (`Network.Segments[c.SegIdx].Level`),
       written before `capKey` (generation 5: `…,heldBy,level,capKey`) and read
       by both readers, so `ReviewFeed` paints the recorded deck instead of
-      `Level = 0`. Verified end to end: `tests/tape_probe_v2.txt` carries level
+      `Level = 0`. Verified end to end: `docs/tapes/deck-car-level-T_probe.txt` carries level
       1 on all 259 substeps of a car placed on the figure-8 bridge, and
       `tests/tape_state_agreement.py` holds `/state` and the tape frame at ONE
       frozen substep against each other (level exact, pose 0.0 m). Two C# unit
@@ -177,7 +177,7 @@ and [docs/RECORD_PLAYBACK.md → *"Recording policy and the growing tape"*](docs
       readout `MAP MISMATCH — refused`, `--ignore-map-hash` overrides), and a
       stamp without the `v2:` prefix loads with `map check: pre-wide stamp,
       unverifiable` because "unknown" is not "wrong". Measured all three ways on
-      `tests/tape_probe_v2.txt` (match: the deck car ON the bridge; foreign
+      `docs/tapes/deck-car-level-T_probe.txt` (match: the deck car ON the bridge; foreign
       ground: an empty field; hand-corrupted hash: refused). Geometry still
       comes from the map side, which is what the reference says. The decision
       of 2026-10-25 is **reference, not embedding** — the tape names its ground

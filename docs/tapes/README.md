@@ -44,6 +44,17 @@ opens it for the one case that is wanted.
 
 ## What is here now
 
-Nothing — every tape was deleted on 2026-10-29 (24 files, 33 MB, including the
-two that had been committed). The folder exists so the next recording worth
-keeping has an agreed home instead of `tests/`.
+* **`deck-car-level-T_probe.txt`** — 259 substeps of one car driven onto the
+  figure-8's deck (`fig8_n12→fig8_n13`), the evidence behind the `level` column
+  and the map-reference checks in
+  [RECORD_PLAYBACK.md](RECORD_PLAYBACK.md) and [../TODO.md](../TODO.md): on its
+  own ground the car paints **on** the bridge with the deck's white edge lines
+  over the road beneath it; on a foreign ground the window paints **no cars**
+  (`MAP MISMATCH — refused`). It was `tests/tape_probe_v2.txt` until
+  2026-10-29, when this folder's rule was written, and its five citations were
+  moved with it.
+
+Everything else is gone: the sweep of 2026-10-29 deleted all 24 run recordings
+(33 MB, the two committed ones included) and `tests/tape_decisive.txt` (193
+substeps of a `deck_probe`, cited by nothing) went with them as dead evidence.
+A tape nobody points at is not documentation — that is the test for this shelf.

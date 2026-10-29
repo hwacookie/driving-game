@@ -153,7 +153,7 @@ The fix was proven in four places, not one:
   records level 1, survives `Save`→`Load`, and lands in the 13th column before
   `capKey`; a car on the figure-8's **ground** branch — which shares the same
   crossing point — records 0, so the lookup cannot borrow the deck above it.
-- `tests/tape_probe_v2.txt` (a scripted REST drive onto `fig8_n12→fig8_n13`):
+- `docs/tapes/deck-car-level-T_probe.txt` (a scripted REST drive onto `fig8_n12→fig8_n13`):
   **level 1 on all 259 substeps.**
 - `tests/tape_state_agreement.py` — `/state` and the tape frame at the SAME
   frozen substep: **level exact, pose 0.0 m.**
@@ -171,7 +171,7 @@ The fix was proven in four places, not one:
 `map_hash` is a **reference**, not a copy: a tape carries no road polygons, and
 the ground comes from the map side (embedded: the client's own engine, http:
 the host). It is only honest because it is **checked** — measured, both ways,
-on `tests/tape_probe_v2.txt`:
+on `docs/tapes/deck-car-level-T_probe.txt`:
 
 | probe | verdict | what the window shows |
 |---|---|---|
@@ -193,7 +193,7 @@ first run read a 9.5 cm gap that way).
 Three witnesses for the two new tape fields, all of them reproducible:
 
 1. **the deck drives the picture.** The SAME tape rendered twice, at the same
-   cursor, camera and zoom: `tests/tape_probe_v2.txt` (level column = 1 on all
+   cursor, camera and zoom: `docs/tapes/deck-car-level-T_probe.txt` (level column = 1 on all
    259 substeps) paints the car **on** the bridge, with the deck's white edge
    lines crossing over the road beneath it. Its copy `/tmp/tape_flat.txt`, with
    the level column zeroed by hand, paints **no car at all** — the car is at
