@@ -49,7 +49,7 @@ public class TapeCarOptionsTests : IDisposable
         };
 
         RunTape.Start("unittest", 1.0 / 60.0, "hash42");
-        RunTape.SetCarOptions(on.Uid, detail: true, tracks: true);
+        RunTape.SetCarOptions(on.Uid, detail: true, tracks: true, livery: "#c62828");
         RunTape.SetCarOptions(off.Uid, detail: false, tracks: true);
         // `quiet` is deliberately never declared: that is the third state.
         RunTape.Record(601, new List<Car> { on, off, quiet }, wrong, names, 4.0, 1.0, null);
@@ -57,17 +57,51 @@ public class TapeCarOptionsTests : IDisposable
         Assert.NotNull(path);
 
         // The line on disk is what a reviewer of an OLD file reads, so the shape
-        // is part of the contract: uid:detail=on+tracks=on, comma between cars.
+        // is part of the contract: uid:detail=on+tracks=on+livery=rrggbb, comma
+        // between cars, no '#' (the token is space- and comma-separated).
         var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP1"));
-        Assert.Contains($"caropts={on.Uid}:detail=on+tracks=on,{off.Uid}:detail=off+tracks=on",
-                        header);
+        Assert.Contains(
+            $"caropts={on.Uid}:detail=on+tracks=on+livery=c62828,{off.Uid}:detail=off+tracks=on",
+            header);
 
         RunTape.Stop(); RunTape.Clear();
         Assert.True(RunTape.Load(path!));
         var back = RunTape.CarOptions;
-        Assert.Equal((true, true), back[on.Uid]);
-        Assert.Equal((false, true), back[off.Uid]);
+        Assert.True(back[on.Uid].Detail);
+        Assert.True(back[on.Uid].Tracks);
+        Assert.Equal("#c62828", back[on.Uid].Livery);
+        Assert.False(back[off.Uid].Detail);
+        Assert.True(back[off.Uid].Tracks);
+        Assert.Null(back[off.Uid].Livery);
         Assert.False(back.ContainsKey(quiet.Uid));    // absent ≠ off
+    }
+
+    [Fact]
+    public void LiveryOnlyDeclaration_RoundTripsWithoutTouchingTheOthers()
+    {
+        var c = ProbeCar("pickup");
+        var wrong = new Dictionary<int, bool>();
+        var names = new Dictionary<int, string> { [c.Uid] = "teal_truck" };
+
+        RunTape.Start("unittest", 1.0 / 60.0, "hash42");
+        RunTape.SetCarOptions(c.Uid, detail: null, tracks: null, livery: "#4eb7cc");
+        RunTape.Record(801, new List<Car> { c }, wrong, names, 3.0, 1.0, null);
+        var path = RunTape.Save(Path.Combine(_dir, "livery.txt"));
+        Assert.NotNull(path);
+
+        // A paint is a decision on its own: it must not invent detail/tracks
+        // facts the test never stated.
+        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP1"));
+        Assert.Contains($"caropts={c.Uid}:livery=4eb7cc", header);
+        Assert.DoesNotContain("detail=", header);
+        Assert.DoesNotContain("tracks=", header);
+
+        RunTape.Stop(); RunTape.Clear();
+        Assert.True(RunTape.Load(path!));
+        var one = RunTape.CarOptions[c.Uid];
+        Assert.Equal("#4eb7cc", one.Livery);
+        Assert.Null(one.Detail);
+        Assert.Null(one.Tracks);
     }
 
     [Fact]

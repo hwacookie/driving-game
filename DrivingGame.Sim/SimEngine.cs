@@ -546,7 +546,7 @@ public sealed class SimEngine
                 newCar.OptDetailWindow = tp.DetailWindow;
                 newCar.OptTyreLines = tp.TyreLines;
                 newCar.Livery = tp.Livery;
-                RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines);
+                RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Livery);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
                     $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +

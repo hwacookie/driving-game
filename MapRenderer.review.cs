@@ -115,6 +115,13 @@ public partial class MapRenderer : Node2D
     private long _reviewUid = 0L;
     private string _tapeName = "", _tapeMap = "", _tapeHash = "";
 
+    /// <summary>What the test declared per car, read off the tape header's
+    /// `caropts=` token (issues #9 and #10): a detail window, its own tyre
+    /// lines, its paint. A uid absent from here was never declared — which is
+    /// NOT the same fact as a declared "off": the first keeps the standing
+    /// behaviour, the second turns it off.</summary>
+    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _tapeOpts = new();
+
     private bool _review;
     private string _reviewPath = "";
     private int _cursor;
@@ -1068,6 +1075,10 @@ public partial class MapRenderer : Node2D
     {
         _tape.Clear();
         _tapeKinds.Clear();
+        _tapeNames.Clear();     // a new tape is a new cast AND a new set of
+        _tapeOpts.Clear();      // per-car decisions (they were never cleared
+                                // here before, so an old cast could haunt a new
+                                // tape's slot labels)
         _legendSeen = _legendHasLevel = false;
         string text;
         try { text = File.ReadAllText(path); }
@@ -1114,6 +1125,34 @@ public partial class MapRenderer : Node2D
                     {
                         var kv = pair.Split(":");
                         if (kv.Length == 2) _tapeNames[(long)ParseNum(kv[0], -1.0)] = kv[1];
+                    }
+                }
+                if (line.Contains("caropts="))
+                {
+                    // uid:detail=on+tracks=off+livery=c62828,… - what the scenario
+                    // asked per car, so a review opens with the paints (and, when
+                    // those slices land, the windows and tracks) the operator saw
+                    // during the run, not with the photographed defaults.
+                    foreach (var pair in line.Split("caropts=")[1].Split(" ")[0].Split(","))
+                    {
+                        int sep = pair.IndexOf(':');
+                        if (sep <= 0) continue;
+                        long optUid = (long)ParseNum(pair.Substring(0, sep), -1.0);
+                        if (optUid < 0) continue;
+                        bool? det = null, trk = null;
+                        string? liv = null;
+                        foreach (var bit in pair.Substring(sep + 1).Split('+'))
+                        {
+                            int eq = bit.IndexOf('=');
+                            if (eq <= 0) continue;
+                            string v = bit.Substring(eq + 1);
+                            if (bit.Substring(0, eq) == "detail") det = v == "on";
+                            else if (bit.Substring(0, eq) == "tracks") trk = v == "on";
+                            else if (bit.Substring(0, eq) == "livery" && v.Length == 6)
+                                liv = "#" + v;
+                        }
+                        if (det is not null || trk is not null || liv is not null)
+                            _tapeOpts[optUid] = (det, trk, liv);
                     }
                 }
                 if (line.Contains("kinds="))
@@ -1298,6 +1337,11 @@ public partial class MapRenderer : Node2D
             if (!_carMeta.TryGetValue(cf.Uid, out var meta))
                 _carMeta[cf.Uid] = meta = new CarMeta();
             meta.Color = cf.Color;
+            // The PAINT the test declared (issue #10). Absent means "photographed
+            // colour", so a run staged before liveries existed - or one that says
+            // nothing - reviews exactly as it did yesterday.
+            _tapeOpts.TryGetValue(cf.Uid, out var carOpts);
+            meta.Livery = carOpts.Livery ?? "";
             meta.BlinkL = (cf.Blinkers & 1) > 0;
             meta.BlinkR = (cf.Blinkers & 2) > 0;
             meta.Hazard = false;

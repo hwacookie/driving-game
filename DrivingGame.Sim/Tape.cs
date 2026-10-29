@@ -185,8 +185,8 @@ public static class RunTape
     /// DECLARED cars are in here — absent means "as before" (the followed car
     /// draws its lines, no window opens), which is what keeps an unauthored cast
     /// looking exactly like yesterday. Header token per car:
-    /// `caropts=2:detail=on+tracks=on,7:tracks=off`.</summary>
-    private static readonly Dictionary<long, (bool? Detail, bool? Tracks)> _carOpts = new();
+    /// `caropts=2:detail=on+tracks=on+livery=c62828,7:tracks=off`.</summary>
+    private static readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _carOpts = new();
     private static readonly List<FocusNote> _focus = new();
     private static readonly List<TestResultNote> _results = new();
 
@@ -236,22 +236,25 @@ public static class RunTape
 
     /// <summary>The declared per-car view options, copied out so a caller cannot
     /// mutate the tape's own map (same rule as <see cref="Kinds"/>).</summary>
-    public static Dictionary<long, (bool? Detail, bool? Tracks)> CarOptions
+    public static Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> CarOptions
     {
-        get { lock (Lock) return new Dictionary<long, (bool?, bool?)>(_carOpts); }
+        get { lock (Lock) return new Dictionary<long, (bool?, bool?, string?)>(_carOpts); }
     }
 
-    /// <summary>Record what the scenario asked of THIS car (issue #9). A null
-    /// side means "not said" and is not stored, so the header carries real
+    /// <summary>Record what the scenario asked of THIS car (issues #9 and #10).
+    /// A null side means "not said" and is not stored, so the header carries real
     /// decisions only; a later call replaces an earlier one for the same uid —
     /// a re-staged cast IS a new decision, unlike a role, where first-wins keeps
-    /// the names of a run stable.</summary>
-    public static void SetCarOptions(long uid, bool? detail, bool? tracks)
+    /// the names of a run stable. `livery` is the `#rrggbb` the API resolved; the
+    /// `#` is not written (the token is space- and comma-separated, and a bare
+    /// hex reads unambiguously).</summary>
+    public static void SetCarOptions(long uid, bool? detail, bool? tracks,
+                                     string? livery = null)
     {
         lock (Lock)
         {
-            if (detail is null && tracks is null) return;
-            _carOpts[uid] = (detail, tracks);
+            if (detail is null && tracks is null && string.IsNullOrEmpty(livery)) return;
+            _carOpts[uid] = (detail, tracks, string.IsNullOrEmpty(livery) ? null : livery);
         }
     }
 
@@ -348,7 +351,7 @@ public static class RunTape
         double dt = DtFixedS;
         var namesLoaded = new Dictionary<long, string>();
         var kindsLoaded = new Dictionary<long, string>();
-        var carOptsLoaded = new Dictionary<long, (bool? Detail, bool? Tracks)>();
+        var carOptsLoaded = new Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)>();
         bool headerDeclaresLevel = false, hasLegend = false;
         try
         {
@@ -393,8 +396,8 @@ public static class RunTape
                     }
                     if (line.Contains("caropts="))
                     {
-                        // uid:detail=on+tracks=off,uid2:tracks=on - the two
-                        // per-car view options the test declared (issue #9). An
+                        // uid:detail=on+tracks=off+livery=c62828 - the per-car
+                        // view options the test declared (issues #9 and #10). An
                         // absent uid is UNdeclared, which is not the same fact
                         // as "off": the first keeps the standing behaviour.
                         foreach (var pair in line.Split("caropts=")[1].Split(" ")[0].Split(","))
@@ -402,15 +405,24 @@ public static class RunTape
                             int col = pair.IndexOf(':');
                             if (col <= 0 || !long.TryParse(pair.Substring(0, col), out var optUid)) continue;
                             bool? det = null, trk = null;
+                            string? liv = null;
                             foreach (var bit in pair.Substring(col + 1).Split('+'))
                             {
                                 int eq = bit.IndexOf('=');
                                 if (eq <= 0) continue;
-                                bool on = bit.Substring(eq + 1) == "on";
-                                if (bit.Substring(0, eq) == "detail") det = on;
-                                else if (bit.Substring(0, eq) == "tracks") trk = on;
+                                string valS = bit.Substring(eq + 1);
+                                if (bit.Substring(0, eq) == "detail") det = valS == "on";
+                                else if (bit.Substring(0, eq) == "tracks") trk = valS == "on";
+                                else if (bit.Substring(0, eq) == "livery" && valS.Length == 6)
+                                {
+                                    bool hexOk = true;
+                                    foreach (var chx in valS)
+                                        if (!Uri.IsHexDigit(chx)) hexOk = false;
+                                    if (hexOk) liv = "#" + valS.ToLowerInvariant();
+                                }
                             }
-                            if (det is not null || trk is not null) carOptsLoaded[optUid] = (det, trk);
+                            if (det is not null || trk is not null || liv is not null)
+                                carOptsLoaded[optUid] = (det, trk, liv);
                         }
                     }
                     if (line.Contains("kinds="))
@@ -815,6 +827,8 @@ public static class RunTape
                         bits.Add($"detail={(kv.Value.Detail == true ? "on" : "off")}");
                     if (kv.Value.Tracks is not null)
                         bits.Add($"tracks={(kv.Value.Tracks == true ? "on" : "off")}");
+                    if (!string.IsNullOrEmpty(kv.Value.Livery))
+                        bits.Add($"livery={kv.Value.Livery!.Replace("#", "").ToLowerInvariant()}");
                     if (bits.Count > 0) carOptParts.Add($"{kv.Key}:{string.Join("+", bits)}");
                 }
                 lines.Add($"# DGTAP1 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
