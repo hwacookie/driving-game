@@ -31,32 +31,38 @@ appears (`OS.GetCmdlineUserArgs()` in `MapRenderer.cs`).
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
       --source embedded --map basic --port 5001 --zoom 14
 # the Simulationsreviewer — a second window on a tape. The path is OPTIONAL:
-# without one it opens the newest tape in tests/.
-TAPE=$(ls -t tests/tape_T_*.txt | head -1)   # the newest recording in tests/
+# without one it opens the newest tape in tests/ (docs/tapes/<name>.txt works
+# too, and needs no host: the ground is built in-process from the tape header).
+TAPE=$(ls -t tests/tape_T_*.txt | head -1)
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
-      --source embedded --map basic --port 5032 \
       --review "$TAPE" --review-at 3308 --maximized
+#   attach to a host instead (a ground on another machine, or the live game
+#   beside you): add `--source http`, which then asks that host for /map.
 #   `--map` names the ground the tape was recorded on (its `map=` header) — a
-#   review window refuses to paint cars on a ground it cannot verify; the
-#   substep of `--review-at` belongs to THAT tape, omit it to open at frame 0.
+#   review window refuses to paint cars on a ground it cannot verify, and says
+#   `NO GROUND` when it cannot build the one it names; the substep of
+#   `--review-at` belongs to THAT tape, omit it to open at frame 0.
 #   Recordings are evidence of ONE run, not fixtures: the sweep of 2026-10-29
 #   deleted every tape then on disk (24 files, 33 MB, the two committed ones
-#   included), so the tape to review is the one the next run writes.
+#   included), so the tape to review is the one the next run writes - or a
+#   kept one under docs/tapes/, which `--review` also takes.
 ```
 
 Use a **free `--port`** for the second window — the embedded API will not bind
 a busy one (`embedded REST API FAILED … Address already in use`), and the
-reviewer then sits on "no connection".
+reviewer then sits on "no connection". A **reviewer binds nothing**: `--review`
+implies `--source embedded --port 0` (issue #2), so two review windows and a
+live game can all be open at once without a port argument anywhere.
 
 Every flag the client parses (all after `--`):
 
 | flag | meaning |
 |---|---|
-| `--source <http\|embedded>` | state source (default `http` against :5001) |
-| `--map <name>` / `--port <p>` | test map + embedded API port |
+| `--source <http\|embedded>` | state source (default `http` against :5001) — **a review window defaults to `embedded` with `--port 0`**: the ground is built in-process, no host, no API, no sim thread (issue #2) |
+| `--map <name>` / `--port <p>` | test map + embedded API port (`--port 0` = map source only: no API, no thread). In review mode the map comes from the tape's `map=` header unless `--map` is given |
 | `--zoom <px/m>` / `--center <x> <y>` | initial scale; pin the camera (metres, x east y north — auto-follow off) |
 | `--focus <name\|role>` | bind the camera to a car by `"name"` from `/teleport`, or by role (`parked`, `slow`) |
-| `--review [path]` | open the **reviewer** instead of the viewer (`NewestTape` in `tests/` when no path) |
+| `--review [path]` | open the **reviewer** instead of the viewer (`NewestTape` in `tests/` when no path); implies `--source embedded --port 0` — the tape's own `map=` names the ground |
 | `--review-at <step>` | start the cursor at that substep |
 | `--review-name <name>` | the camera aims at the car with that spawn name (from the tape header `names=`). It opens **no detail window** — that is a known gap, [TODO.md §5](../TODO.md) |
 | `--screenshot <path>` / `--delay <s>` | one-shot viewport PNG `--delay` seconds after the map is ready, then quit (never with `--headless`: the dummy renderer has no viewport texture) |
@@ -111,11 +117,14 @@ Two consequences for the unification *(measured, see TODO §7)* — the second
 is a live defect the width of one field, and both are closed by 2026-10-25:
 
 - **The world has no tape — by decision, and the decision is checked.** Geometry
-  only ever comes from a host (`GET /map`), so "the reviewer needs no host"
-  (`MapRenderer.review.cs:208`) is true for the cars and false for the map: a
-  review window still needs a ground beside it, and it now **verifies that the
-  ground is the one the tape names** (`REVIEW-MAP … match | MISMATCH | unverifiable
-  (pre-wide stamp)`, `MAP MISMATCH — refused` in the readout, `--ignore-map-hash`
+  comes from the **map side**: from a host (`GET /map`), or — since issue #2 was
+  closed on 2026-10-29 — from the client's **own in-process build** of the map the
+  tape names (`--review` implies `--source embedded --port 0`, the same
+  `MapPayload.Build`, the same fingerprint, no API bound). So "the reviewer needs
+  no host" is now true for the ground as well as the cars; what never changed is
+  that the window must **verify the ground against the tape's stamp** (`REVIEW-MAP
+  … match | MISMATCH | unverifiable (pre-wide stamp)`, `MAP MISMATCH — refused`,
+  `NO GROUND (cannot build this map) — cars not painted`, `--ignore-map-hash`
   to force). Measured: the same tape on its own map paints the deck car ON the
   bridge; the same tape on the client's default OSM ground paints **no cars at
   all** (`REVIEW-REFUSED … no cars painted`) — a tape painted on the wrong

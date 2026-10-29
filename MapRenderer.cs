@@ -33,6 +33,14 @@ public partial class MapRenderer : Node2D
     private int _embeddedPort = 5001;
     private int _apiPort = 5001;         // resolved in _Ready: embedded port or the URL's own
     private SimHost _simHost;          // non-null in embedded mode
+    // --source / --map as GIVEN on the command line. A review window fills in
+    // both for you from the tape's own header, but an explicit flag outranks
+    // the tape (issue #2).
+    private bool _sourceGiven, _mapGiven;
+    // The ground could not be built at all: the window says NO GROUND and
+    // paints no cars - a tape drawn on nothing is a lie about where those cars
+    // drove (docs/SIMULATIONS_REVIEWER.md, issue #2).
+    private bool _noGround;
 
     static Vector2 W(float x, float y) => new(x, -y);
 
@@ -722,9 +730,15 @@ public partial class MapRenderer : Node2D
             else if (args[i] == "--run-test" && i + 1 < args.Length)
                 _autoRunTest = int.Parse(args[i + 1]);
             else if (args[i] == "--source" && i + 1 < args.Length)
+            {
                 _source = args[i + 1];
+                _sourceGiven = true;
+            }
             else if (args[i] == "--map" && i + 1 < args.Length)
+            {
                 _embeddedMapName = args[i + 1];
+                _mapGiven = true;
+            }
             else if (args[i] == "--port" && i + 1 < args.Length)
                 _embeddedPort = int.Parse(args[i + 1]);
             else if (args[i] == "--review-name" && i + 1 < args.Length)
@@ -771,24 +785,72 @@ public partial class MapRenderer : Node2D
         // Phase 7: pick the communication method. Embedded mode creates the
         // SimHost FIRST (its _Ready runs synchronously on AddChild: network,
         // sim thread and embedded REST API are up before we fetch anything).
+        // A review window defaults to an IN-PROCESS ground (issue #2): the
+        // geometry it draws is the SAME MapPayload.Build the /map endpoint
+        // serves, so the tape-vs-ground fingerprint check means the same thing
+        // either way - while a host standing beside a reviewer is a foreign
+        // clock and a foreign car set, and produced two defects already (#1 a
+        // ground arriving after the tape began painting, #4 that host's empty
+        // /state deleting the tape's cars). `--source http` still means
+        // "attach to that host" and stays the way to review a tape whose
+        // ground is not on this machine.
+        if (_review && !_sourceGiven)
+        {
+            _source = "embedded";
+            _embeddedPort = 0;      // a map source: no REST API, no sim thread
+            if (_reviewPath.Length == 0) _reviewPath = NewestTape();
+            if (!_mapGiven)
+            {
+                // `map=` EMPTY is the console host's label for the OSM ground
+                // (GameApi.cs:494 stamps `mapName ?? ""`), and an empty
+                // _embeddedMapName means the same thing on this side.
+                string tapeMap = TapeMapNameOf(_reviewPath);
+                _embeddedMapName = tapeMap.Length == 0 || tapeMap == "osm"
+                    ? null : tapeMap;
+            }
+            GD.Print($"REVIEW-SOURCE: in-process ground " +
+                     $"'{_embeddedMapName ?? "osm (cache)"}' from the tape header " +
+                     $"(--map overrides, --source http attaches to a host)");
+        }
+
         bool embedded = string.Equals(_source, "embedded",
                                       StringComparison.OrdinalIgnoreCase);
         if (embedded)
         {
             _simHost = new SimHost(_embeddedMapName, _embeddedPort);
             AddChild(_simHost);
-            GD.Print($"Source: EMBEDDED (in-process sim, REST API on :{_embeddedPort})");
+            if (_simHost.LoadError != null)
+            {
+                string name = _embeddedMapName ?? "osm (cache)";
+                string err = _simHost.LoadError;
+                _simHost.QueueFree();
+                _simHost = null;
+                _noGround = true;
+                GD.PrintErr($"NO GROUND: cannot build '{name}' here ({err}) — " +
+                            "NO cars will be painted. Put the map's data where this " +
+                            "client finds it, or review against the host that has it: " +
+                            "--source http http://<host>:<port>");
+                // No `Map ready` will ever come to arm the one-shot - do it here.
+                ArmShotIfAsked();
+            }
+            else
+                GD.Print($"Source: EMBEDDED ({(_embeddedPort > 0
+                    ? $"in-process sim, REST API on :{_embeddedPort}"
+                    : "map source only - no REST API, no sim thread")})");
         }
         else
             GD.Print("Source: HTTP (external server on :5001)");
 
         // Review mode: load the tape BEFORE anything is fetched, and build its
         // HUD (the two-line readout + the scrub bar with the fluidity curve).
-        // A review client that gets NO map (no host, `--source http`) still
-        // draws the tape's cars: the ground is missing, the readout says the
-        // map is unverifiable (`--drawnMapHash` empty). That is the honest
-        // half of "the reviewer survives the host dying" — the cars survive,
-        // the ground does not, and nothing may pretend otherwise.
+        // Two no-ground cases, deliberately told apart: an ATTACHED reviewer
+        // (`--source http`) whose host is down right now still draws the tape's
+        // cars, because the host may answer the next second and the readout
+        // says the map is unverifiable - that is the honest half of "the
+        // reviewer survives the host dying". A reviewer whose OWN machine
+        // cannot build the named map (`_noGround`) paints nothing at all: no
+        // retry will ever help, and cars without streets are a lie about where
+        // they drove (issue #2).
         if (_review || _tapeLive)
         {
             // The reviewer and the live window are ONE instrument; what differs
@@ -874,7 +936,7 @@ public partial class MapRenderer : Node2D
         _markLayer = new Node2D { Name = "Markings" };
         _world.AddChild(_markLayer);
         _http.RequestCompleted += OnMapResponse;
-        if (embedded)
+        if (embedded && _simHost != null)
         {
             // Map in-process: the SAME payload the /map endpoint serves
             // (shared MapPayload builder), no HTTP round-trip.
@@ -883,8 +945,11 @@ public partial class MapRenderer : Node2D
                 JsonSerializer.SerializeToUtf8Bytes(payload));
             BuildMap(doc.RootElement);
         }
-        else
+        else if (!embedded)
             FetchMap();
+        // embedded with NO ground built (LoadError): nothing to draw and no
+        // host to ask. Asking anyway is what today does silently - a review
+        // window retrying GET /map forever while its cars drive on nothing.
 
         // /state polling (pipelined, see below):
         // UseThreads: without it, Godot's HTTPRequest does ONE socket read
@@ -2182,8 +2247,7 @@ public partial class MapRenderer : Node2D
 
         GD.Print($"Map ready: bounds {_bounds}, zoom {zoom:F3}");
 
-        if (_screenshotPath != null && !_testPan)
-            GetTree().CreateTimer(_shotDelay).Timeout += () => SaveShot(_screenshotPath);
+        ArmShotIfAsked();
         if (_resizeTo.X > 0 && _resizeTo.Y > 0)
         {
             // 1.5 s BEFORE the shot (and never at t=0 - the point of the hook
@@ -4467,6 +4531,19 @@ public partial class MapRenderer : Node2D
     /// decision 2026-10-22). A handful of windows, few passes, and the
     /// assignment only happens when something actually moved - a window the
     /// hand left alone never jitters.</summary>
+    /// <summary>The `--screenshot` one-shot: shoot after `--delay`, then quit
+    /// itself. Armed by `Map ready` - AND by a ground that will never come: a
+    /// NO-GROUND window is exactly the picture someone wants (its readout says
+    /// why), and the contract of the one-shot is that it always ends the
+    /// process. Measured without this: with an unbuildable map the shot never
+    /// fired and the window sat open until the generation file was bumped.
+    /// </summary>
+    void ArmShotIfAsked()
+    {
+        if (_screenshotPath != null && !_testPan)
+            GetTree().CreateTimer(_shotDelay).Timeout += () => SaveShot(_screenshotPath);
+    }
+
     private void EnforceWindows()
     {
         var settled = false;

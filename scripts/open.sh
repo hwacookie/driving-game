@@ -8,9 +8,9 @@
 #   scripts/open.sh --zoom 20          # closer in
 #   scripts/open.sh --map hills        # another map (see DrivingGame.Sim/TestMaps.cs)
 #   scripts/open.sh --review "$(ls -t tests/tape_T_*.txt | head -1)"  # the reviewer instead
-#     NOTE (issue #2): a review window still gets its GROUND from a host, so a
-#     live session has to answer :5001 - without one the tape's cars drive on a
-#     bare background while "GET /map failed" retries in the log.
+#     A review window needs NO host: --review builds its ground in-process from
+#     the tape's own map= header and binds no API port (issue #2). To review
+#     against a host instead (a ground on another machine), add --source http.
 #   scripts/open.sh --external         # attach to a host you started yourself (HTTP mode)
 #   scripts/open.sh --close            # close the window this script opened (clean, no signal)
 #

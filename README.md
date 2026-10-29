@@ -50,13 +50,18 @@ dotnet run  --project DrivingGame.Server -- --map basic --warp 4   # REST API on
 # THE REVIEWER — a second window on a tape (path optional: without one it
 # opens the newest tape in tests/). --review-at parks the cursor on a step,
 # --review-name aims the camera at the car with that spawn name.
-TAPE=$(ls -t tests/tape_T_*.txt | head -1)   # the newest recording in tests/
+TAPE=$(ls -t tests/tape_T_*.txt | head -1)   # or docs/tapes/<what-it-shows>.txt
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
-      --source embedded --map basic --port 5032 \
       --review "$TAPE" --review-at 3308 --maximized
-#   `--map` names the ground the tape was recorded on (its `map=` header) - a
-#   review window refuses to paint cars on a ground it cannot verify. The
-#   substep of `--review-at` belongs to THAT tape; omit it to open at frame 0.
+#   A reviewer needs NO host: `--review` implies `--source embedded --port 0`,
+#   so the ground is built IN-PROCESS from the map named in the tape's `map=`
+#   header (the same MapPayload.Build the /map endpoint serves, so the
+#   fingerprint check means the same thing) and no API port is bound at all.
+#   `--map <name>` outranks the header; `--source http` attaches to a host
+#   instead - the way to review a tape whose ground lives on another machine;
+#   a map this client cannot build says `NO GROUND … cars not painted` rather
+#   than drawing cars on nothing. The substep of `--review-at` belongs to THAT
+#   tape; omit it to open at frame 0.
 ```
 
 Every flag the client parses is listed in

@@ -24,15 +24,16 @@ run log (`tests/run_test_T_*.log`, itself not in git).
 ## How to look at one
 
 ```bash
-TAPE=docs/tapes/bridge-occlusion-T_303.txt
+TAPE=docs/tapes/deck-car-level-T_probe.txt
 "/Applications/Godot_mono.app/Contents/MacOS/Godot" --path . -- \
-      --source embedded --map basic --port 5032 \
-      --review "$TAPE" --review-at 3308 --maximized
+      --review "$TAPE" --review-at 200 --maximized
 ```
 
-`--map` names the ground from the tape's own `map=` header — a review window
-refuses to paint cars on a ground it cannot verify
-(`docs/SIMULATIONS_REVIEWER.md` → *Launching the two windows*).
+`--review` builds the ground **in-process** from the tape's own `map=` header
+and binds no API port, so a kept recording replays with no host running at all;
+it refuses to paint cars if it cannot verify that ground
+(`docs/SIMULATIONS_REVIEWER.md` → *Launching the two windows*). Pass `--source
+http` to draw against a host instead.
 
 ## Adding one
 

@@ -35,6 +35,18 @@ public partial class SimHost : Node
     private Thread _simThread;
     private volatile bool _running;
 
+    /// <summary>Set when the ground could not be built at all (no OSM cache,
+    /// unknown map name). The client must then say NO GROUND and refuse to
+    /// paint a tape on nothing - issue #2.</summary>
+    public string LoadError { get; private set; }
+
+    /// <summary>port &lt;= 0 means MAP SOURCE ONLY: no REST API, no sim thread,
+    /// no spawn. A review window needs the RoadNetwork and nothing else of a
+    /// simulation - its cars and its clock come from the tape. Leaving them off
+    /// is not an optimisation: a thread ticking a car nobody asked for is a
+    /// second world standing next to the one under review (issue #2).</summary>
+    public bool MapSourceOnly => _port <= 0;
+
     public SimHost(string mapName, int port)
     {
         _mapName = mapName;
@@ -44,24 +56,37 @@ public partial class SimHost : Node
     public override void _Ready()
     {
         // --- Load road data (mirror of Program.cs) -------------------------
+        // A ground this machine cannot build becomes STATE, not an exception:
+        // Godot's C# bridge turns a throw out of _Ready into a logged error,
+        // so nothing upstream would ever see it - and "the reviewer has no
+        // ground" is exactly the thing the window has to say out loud.
         RoadNetwork network;
-        if (_mapName is not null)
+        try
         {
-            GD.Print($"Loading synthetic test map: '{_mapName}'");
-            network = TestMaps.BuildTestMap(_mapName);
-            GD.Print($"  {network.Nodes.Count} nodes, {network.Segments.Count} segments");
+            if (_mapName is not null)
+            {
+                GD.Print($"Loading synthetic test map: '{_mapName}'");
+                network = TestMaps.BuildTestMap(_mapName);
+                GD.Print($"  {network.Nodes.Count} nodes, {network.Segments.Count} segments");
+            }
+            else
+            {
+                GD.Print("Loading OSM data…");
+                var osmData = OsmLoader.LoadFromCache(
+                    Config.BOUNDING_BOX_NORTH, Config.BOUNDING_BOX_SOUTH,
+                    Config.BOUNDING_BOX_WEST, Config.BOUNDING_BOX_EAST)
+                    ?? throw new InvalidOperationException(
+                        "no cached OSM data - run the Python fetch once to populate data/osm_cache/");
+                network = RoadNetwork.FromOsmData(osmData,
+                    Config.BOUNDING_BOX_NORTH, Config.BOUNDING_BOX_SOUTH,
+                    Config.BOUNDING_BOX_WEST, Config.BOUNDING_BOX_EAST);
+            }
         }
-        else
+        catch (Exception e)
         {
-            GD.Print("Loading OSM data…");
-            var osmData = OsmLoader.LoadFromCache(
-                Config.BOUNDING_BOX_NORTH, Config.BOUNDING_BOX_SOUTH,
-                Config.BOUNDING_BOX_WEST, Config.BOUNDING_BOX_EAST)
-                ?? throw new InvalidOperationException(
-                    "no cached OSM data - run the Python fetch once to populate data/osm_cache/");
-            network = RoadNetwork.FromOsmData(osmData,
-                Config.BOUNDING_BOX_NORTH, Config.BOUNDING_BOX_SOUTH,
-                Config.BOUNDING_BOX_WEST, Config.BOUNDING_BOX_EAST);
+            LoadError = e.GetBaseException().Message;
+            GD.PrintErr($"MAP LOAD FAILED (map '{_mapName ?? "osm"}'): {LoadError}");
+            return;
         }
 
         // Obstacle layouts save per map name (same label as the console host).
@@ -70,12 +95,18 @@ public partial class SimHost : Node
 
         // --- Spawn (the view is the client's own Camera2D) -----------------
         // Test maps do NOT auto-spawn a car: the e2e suite teleports its
-        // own car in (same as the console host).
-        if (_mapName == null)
+        // own car in (same as the console host). A map-source-only host spawns
+        // nothing at all - there is no viewer of its simulation.
+        if (_mapName == null && !MapSourceOnly)
             Engine.SpawnInitialCar(null);
         GD.Print("Navigation model: BICYCLE (kinematic, free particle)");
 
         // --- Embedded REST API (external test injection) --------------------
+        if (MapSourceOnly)
+        {
+            GD.Print("REST API: none (--port 0 - this host is a map source only)");
+            return;
+        }
         try
         {
             var builder = WebApplication.CreateBuilder();
