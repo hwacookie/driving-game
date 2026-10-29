@@ -383,6 +383,32 @@ The review camera's precedence is **per scenario, not per session**:
 3. **what the scenario declared** (`# focus …` on the tape),
 4. the cast centroid (a tape with no declarations).
 
+### Zoom has its own order (#12)
+
+The list above says **what the camera follows**; the SCALE is a separate axis,
+and it had a bug: the reviewer's default car-fit (`FitViewOnCar`) wrote
+`_cam.Zoom` unconditionally, so an operator who asked for a scale lost it
+without a word. The order, as the code now holds it:
+
+1. a declared focus that carries its **own** `zoom=` — framing written into the
+   recording, so it outranks the command line,
+2. `--zoom`, or the crash scale `--focus <car>` implies (34 px/m),
+3. the default car-fit (`viewport / CarFocusViewM`, clamped),
+4. #7's opening whole-map fit — which already stood aside for an asked `--zoom`.
+
+The hand stays above all of them *in time*: the fit is applied once per focus
+label (`ApplyFocusZoom` returns early for one already framed), so a wheel zoom
+or a drag after it is never undone. Measured on `tests/tape_T_315` at frame
+1100, inside a `kind=car` focus that declares no zoom, and at frame 2200 inside
+`kind=loc … zoom=26.00`:
+
+| asked | camera answered | before the fix |
+|---|---|---|
+| `--zoom 6` (car focus, no declared zoom) | `zoom=6.0` | **23.4** — the fit won |
+| nothing | `zoom=23.4` | 23.4 (unchanged) |
+| `--focus 2` (implies crash scale) | `zoom=34.0` | 23.4 — same fault, same line |
+| `--zoom 6` at a focus declaring `zoom=26.00` | `zoom=26.0` | 26.0 (unchanged, correctly) |
+
 Crossing a boundary runs `FocusHandoff()`: the hand's pin, its drag-pan and the
 command-line centre are **released**, the declared zoom is applied once, and the
 follow item becomes the new scenario's subject. It used to latch: one stray map
