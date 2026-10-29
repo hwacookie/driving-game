@@ -1706,6 +1706,14 @@ public partial class MapRenderer : Node2D
         _lastTrailTail = null;
         _flagNodes.Clear();
         _lastFlagFp = "";
+        // … and the courtesy cones of the cars (issue #1): ClearCars() below
+        // frees the cars themselves, but a cone whose car is NOT in _carBuf
+        // yet would survive here as a dead dictionary entry, and the next
+        // DrawCourtesy would set Visible on a freed Polygon2D - an
+        // ObjectDisposedException in _Process on every frame after that.
+        foreach (var c in _courtesy.Values)
+            if (GodotObject.IsInstanceValid(c)) c.QueueFree();
+        _courtesy.Clear();
         ClearCars();
 
         // The stamp of the ground about to be drawn, BEFORE the geometry:
@@ -1951,15 +1959,26 @@ public partial class MapRenderer : Node2D
                 });
             }
 
-        // Camera: fit the whole map into the viewport (or use overrides).
+        // Camera: fit the whole map into the viewport (or use overrides) -
+        // EXCEPT for a tape (issue #1): a review window looks at the cursor's
+        // hotspot at the pace's own zoom, so a ground that arrives late (the
+        // host answered only after the tape was painting) must leave the view
+        // where the tape put it, not snap back to a fit of the whole map.
+        // Before the tape has a frame under the cursor it owns nothing, and the
+        // fit still runs - that is the live-tip window's opening view.
         Vector2 vp = GetViewport().GetVisibleRect().Size;
-        float zoom = Mathf.Min(vp.X / _bounds.Size.X, vp.Y / _bounds.Size.Y) * 0.95f;
-        var center = W(_bounds.Position.X + _bounds.Size.X / 2f,
-                       _bounds.Position.Y + _bounds.Size.Y / 2f);
+        bool tapeOwnsView = (_review || _tapeLive) && _cursor >= 0;
+        float zoom = tapeOwnsView
+            ? _cam.Zoom.X
+            : Mathf.Min(vp.X / _bounds.Size.X, vp.Y / _bounds.Size.Y) * 0.95f;
+        var center = tapeOwnsView
+            ? _cam.GlobalPosition
+            : W(_bounds.Position.X + _bounds.Size.X / 2f,
+                _bounds.Position.Y + _bounds.Size.Y / 2f);
         if (_overrideZoom.HasValue) zoom = _overrideZoom.Value;
         if (_overrideCenter.HasValue) center = _overrideCenter.Value;
         _cam.Zoom = new Vector2(zoom, zoom);
-        _cam.GlobalPosition = center;
+        if (!tapeOwnsView) _cam.GlobalPosition = center;
         RebuildMarkings();
 
         // Screen-space overlays: minimap (top right) + zoom readout.
@@ -3900,6 +3919,10 @@ public partial class MapRenderer : Node2D
         _carMeta.Remove(uid);
         if (_carLabels.TryGetValue(uid, out var lab))
         { lab.QueueFree(); _carLabels.Remove(uid); }
+        // The courtesy cone is a _world child of THIS car: free it with the
+        // car, or a despawned car leaves its warm cone painted forever.
+        if (_courtesy.TryGetValue(uid, out var cone))
+        { cone.QueueFree(); _courtesy.Remove(uid); }
         _blinkL.Remove(uid);
         _blinkR.Remove(uid);
         _brakeLights.Remove(uid);
