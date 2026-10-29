@@ -3110,6 +3110,41 @@ public partial class MapRenderer : Node2D
         _cam.Zoom = new Vector2((float)z, (float)z);
     }
 
+    private bool _openingFitDone;
+
+    /// <summary>The review camera's OPENING framing (#7). A tape that declares
+    /// no focus, an operator who passed no --zoom and a hand that has not
+    /// touched the map leave the camera at Godot's default 1.0 px/m: a 1588 px
+    /// tall window then shows 1588 m of a 1950 m map (19 % cropped) and the car
+    /// under the cursor is a 4 px mark. Before #1 the map build's fit covered
+    /// for this - but a BuildMap must not move a camera the tape owns, because
+    /// a ground that arrives late used to yank a declared 24.6 px/m down to a
+    /// whole-map view. So the fit belongs HERE: the bottom of the camera
+    /// precedence (declared focus > --zoom > hand > this), applied once, as soon
+    /// as the bounds are actually known (a review window that defaults to an
+    /// in-process ground has them on frame one; an attached one may not).
+    /// </summary>
+    void ApplyOpeningFit()
+    {
+        if (_openingFitDone || _overrideZoom.HasValue || _mmAsk != null) return;
+        if (_bounds.Size.X < 2 || _bounds.Size.Y < 2) return;    // no ground yet
+        // A declared focus frames its own zoom when the cursor enters it; if it
+        // already did (or this tape declares one at all), the opening belongs
+        // to the recording, not to the fit.
+        if (_focusAtCursor.HasValue || _focusZoomApplied.Length > 0)
+        {
+            _openingFitDone = true;
+            return;
+        }
+        _openingFitDone = true;
+        var vp = GetViewport().GetVisibleRect().Size;
+        float z = Mathf.Min(vp.X / _bounds.Size.X, vp.Y / _bounds.Size.Y) * 0.95f;
+        _cam.Zoom = new Vector2(z, z);
+        GD.Print($"REVIEW-FIT opening view: whole map {_bounds.Size.X:F0}×{_bounds.Size.Y:F0} m " +
+                 $"into {vp.X:F0}×{vp.Y:F0} px at {z:F3} px/m " +
+                 $"(tape declares no focus, no --zoom given)");
+    }
+
     /// <summary>Is a pointer inside the instrument strip's band (the bar and its
     /// curve)? That rectangle is what separates "zoom the timeline" from "zoom
     /// the map" — and it is the same geometry the strip was built with, so a
@@ -3446,6 +3481,7 @@ public partial class MapRenderer : Node2D
         // and NEVER back, so from that drag on no scenario's focus or followed
         // car was ever applied again (measured in a live review session).
         FocusHandoff();
+        ApplyOpeningFit();
         // A named car pins the view on IT for the whole scrub - the centroid
         // of a cast drifts with every car that drives by, and the question
         // under review is about one of them.
