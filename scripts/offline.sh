@@ -94,9 +94,12 @@ case "${1:-status}" in
       --results-directory TestResults --logger "trx;LogFileName=unit.trx" 2>&1 \
       | grep -E "Passed!|Failed!|error" | head -3 | tee /tmp/offline_test.txt
     grep -q "Failed:     0" /tmp/offline_test.txt || { echo "!! unit tests not green - not landing"; exit 1; }
+    # 'offline' starts at MAIN, never at HEAD: the fix branch is checked out here,
+    # and a branch created from it would already contain the fix - the merge would
+    # then report "Already up to date" and claim a landing that never happened.
     if ! git show-ref --verify --quiet refs/heads/offline; then
-      git branch offline
-      echo "==> created branch 'offline' at $(git rev-parse --short HEAD)"
+      git branch offline refs/heads/main
+      echo "==> created branch 'offline' at main ($(git rev-parse --short refs/heads/main))"
     fi
     BASE=$(git rev-parse --short offline)
     git switch -q offline
@@ -109,8 +112,12 @@ Verdicts:
 ${PR_VERDICTS:-_paste the e2e verdict lines here (docs/WORKFLOW.md)_}
 
 Rebased-onto: $BASE" "$BR"
-    git checkout -q "$BR"
-    echo "==> landed $BR into 'offline' ($(git rev-parse --short offline)); local main untouched"
+    git switch -q "$BR"
+    if [ "$(git rev-parse offline)" = "$BASE" ]; then
+      echo "!! 'offline' did not move - the merge reported nothing to do; NOT landed"
+      exit 1
+    fi
+    echo "==> landed $BR into 'offline' ($(git rev-parse --short offline)); local main untouched at $(git rev-parse --short refs/heads/main)"
     if [ -n "$N" ]; then
       rec=$(ls "$REC/${N#L}-"*.md 2>/dev/null | head -1 || true)
       [ -n "$rec" ] && printf -- '- landed: %s into offline as %s (%s)\n' \
