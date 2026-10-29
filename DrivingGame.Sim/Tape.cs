@@ -179,6 +179,14 @@ public static class RunTape
     /// No producer exists yet — nothing but cars can be staged — so this is
     /// read/write format support, deliberately not a hook that pretters unused.</summary>
     private static readonly Dictionary<long, string> _kinds = new();
+
+    /// <summary>The per-car VIEW options a scenario declared at staging
+    /// (issue #9): a detail window for the car, and its own tyre lines. Only
+    /// DECLARED cars are in here — absent means "as before" (the followed car
+    /// draws its lines, no window opens), which is what keeps an unauthored cast
+    /// looking exactly like yesterday. Header token per car:
+    /// `caropts=2:detail=on+tracks=on,7:tracks=off`.</summary>
+    private static readonly Dictionary<long, (bool? Detail, bool? Tracks)> _carOpts = new();
     private static readonly List<FocusNote> _focus = new();
     private static readonly List<TestResultNote> _results = new();
 
@@ -223,6 +231,27 @@ public static class RunTape
         {
             if (kind == null || kind == "" || kind == "car") return;
             if (!_kinds.ContainsKey(uid)) _kinds[uid] = kind;
+        }
+    }
+
+    /// <summary>The declared per-car view options, copied out so a caller cannot
+    /// mutate the tape's own map (same rule as <see cref="Kinds"/>).</summary>
+    public static Dictionary<long, (bool? Detail, bool? Tracks)> CarOptions
+    {
+        get { lock (Lock) return new Dictionary<long, (bool?, bool?)>(_carOpts); }
+    }
+
+    /// <summary>Record what the scenario asked of THIS car (issue #9). A null
+    /// side means "not said" and is not stored, so the header carries real
+    /// decisions only; a later call replaces an earlier one for the same uid —
+    /// a re-staged cast IS a new decision, unlike a role, where first-wins keeps
+    /// the names of a run stable.</summary>
+    public static void SetCarOptions(long uid, bool? detail, bool? tracks)
+    {
+        lock (Lock)
+        {
+            if (detail is null && tracks is null) return;
+            _carOpts[uid] = (detail, tracks);
         }
     }
 
@@ -319,6 +348,7 @@ public static class RunTape
         double dt = DtFixedS;
         var namesLoaded = new Dictionary<long, string>();
         var kindsLoaded = new Dictionary<long, string>();
+        var carOptsLoaded = new Dictionary<long, (bool? Detail, bool? Tracks)>();
         bool headerDeclaresLevel = false, hasLegend = false;
         try
         {
@@ -359,6 +389,28 @@ public static class RunTape
                             var kv2 = pair.Split(":");
                             if (kv2.Length == 2)
                                 namesLoaded[ParseL(kv2[0], -1L)] = kv2[1];
+                        }
+                    }
+                    if (line.Contains("caropts="))
+                    {
+                        // uid:detail=on+tracks=off,uid2:tracks=on - the two
+                        // per-car view options the test declared (issue #9). An
+                        // absent uid is UNdeclared, which is not the same fact
+                        // as "off": the first keeps the standing behaviour.
+                        foreach (var pair in line.Split("caropts=")[1].Split(" ")[0].Split(","))
+                        {
+                            int col = pair.IndexOf(':');
+                            if (col <= 0 || !long.TryParse(pair.Substring(0, col), out var optUid)) continue;
+                            bool? det = null, trk = null;
+                            foreach (var bit in pair.Substring(col + 1).Split('+'))
+                            {
+                                int eq = bit.IndexOf('=');
+                                if (eq <= 0) continue;
+                                bool on = bit.Substring(eq + 1) == "on";
+                                if (bit.Substring(0, eq) == "detail") det = on;
+                                else if (bit.Substring(0, eq) == "tracks") trk = on;
+                            }
+                            if (det is not null || trk is not null) carOptsLoaded[optUid] = (det, trk);
                         }
                     }
                     if (line.Contains("kinds="))
@@ -519,6 +571,8 @@ public static class RunTape
             foreach (var kv in namesLoaded) _names[kv.Key] = kv.Value;
             _kinds.Clear();
             foreach (var kv in kindsLoaded) _kinds[kv.Key] = kv.Value;
+            _carOpts.Clear();
+            foreach (var kv in carOptsLoaded) _carOpts[kv.Key] = kv.Value;
         }
         return true;
     }
@@ -552,6 +606,7 @@ public static class RunTape
         {
             _recording = true;
             _names.Clear();          // a new run is a new cast
+            _carOpts.Clear();        // ...and a new set of view options
             _focus.Clear();          // ...and a new camera intent per scenario
             _results.Clear();
             _mapName = mapName ?? "";
@@ -752,9 +807,20 @@ public static class RunTape
                 foreach (var kv in _names) nameParts.Add($"{kv.Key}:{kv.Value}");
                 var kindParts = new List<string>();
                 foreach (var kv in _kinds) kindParts.Add($"{kv.Key}:{kv.Value}");
+                var carOptParts = new List<string>();
+                foreach (var kv in _carOpts)
+                {
+                    var bits = new List<string>();
+                    if (kv.Value.Detail is not null)
+                        bits.Add($"detail={(kv.Value.Detail == true ? "on" : "off")}");
+                    if (kv.Value.Tracks is not null)
+                        bits.Add($"tracks={(kv.Value.Tracks == true ? "on" : "off")}");
+                    if (bits.Count > 0) carOptParts.Add($"{kv.Key}:{string.Join("+", bits)}");
+                }
                 lines.Add($"# DGTAP1 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
                           (nameParts.Count > 0 ? $" names={string.Join(",", nameParts)}" : "") +
-                          (kindParts.Count > 0 ? $" kinds={string.Join(",", kindParts)}" : ""));
+                          (kindParts.Count > 0 ? $" kinds={string.Join(",", kindParts)}" : "") +
+                          (carOptParts.Count > 0 ? $" caropts={string.Join(",", carOptParts)}" : ""));
                 lines.Add(FrameLegend);
                 foreach (var fn in _focus) lines.Add(fn.ToHeaderLine());
                 foreach (var rn in _results) lines.Add(rn.ToHeaderLine());

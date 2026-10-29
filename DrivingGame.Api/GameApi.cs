@@ -307,6 +307,16 @@ public static class GameApi
             if (data.TryGetProperty("name", out var nmv) &&
                 nmv.ValueKind == JsonValueKind.String)
                 name = nmv.GetString();
+            // The two per-car VIEW options (issue #9): a detail window for this
+            // car, and its own tyre lines. Absent = undeclared, so an unauthored
+            // cast keeps exactly today's picture instead of the client guessing.
+            bool? detailWindow = null, tyreLines = null;
+            if (data.TryGetProperty("detail_window", out var dwv) &&
+                dwv.ValueKind != JsonValueKind.Null)
+                detailWindow = dwv.GetBoolean();
+            if (data.TryGetProperty("tyre_lines", out var tlw) &&
+                tlw.ValueKind != JsonValueKind.Null)
+                tyreLines = tlw.GetBoolean();
 
             if (color is not null && !Config.CAR_COLORS.Contains(color))
                 return Json(new Dictionary<string, object?>
@@ -317,7 +327,7 @@ public static class GameApi
 
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, color,
-                                    reverse, cruiseKmh, name));
+                                    reverse, cruiseKmh, name, detailWindow, tyreLines));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,

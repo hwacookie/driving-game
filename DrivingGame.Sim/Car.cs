@@ -44,6 +44,16 @@ public class Car
     /// crawler is an obstruction to pass, a queue lead that merely happens to
     /// be at 0 is not.</summary>
     public double CruiseCapMps { get; internal set; } = 0.0;
+
+    /// <summary>The two per-car VIEW options a scenario can declare at staging
+    /// (issue #9): does this car get a detail window, does it draw its own tyre
+    /// lines. NULL means UNdeclared and the standing behaviour applies (the
+    /// followed car draws its lines, no window opens); true/false is an explicit
+    /// ask, so a test can also turn the followed car's lines OFF. The sim never
+    /// reads these — they are authored facts the client draws from and the tape
+    /// carries, which is why they travel with the spawn like the name does.</summary>
+    public bool? OptDetailWindow { get; internal set; }
+    public bool? OptTyreLines { get; internal set; }
     /// <summary>The speed that actually applies: the driver's choice inside the
     /// class ceiling.</summary>
     public double EffectiveTopMps => CruiseCapMps > 0.0

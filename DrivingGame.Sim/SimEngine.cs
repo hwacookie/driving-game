@@ -31,7 +31,18 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      // Set WITH the spawn, not in a second
                                      // request: a staged car must carry its
                                      // identity before its first tick.
-                                     string? Name = null) : SimCommand;
+                                     string? Name = null,
+                                     // The two per-car VIEW options of a staged
+                                     // cast (issue #9): a detail window for this
+                                     // car, and its own tyre lines. null = not
+                                     // declared, so the standing behaviour
+                                     // stands and an old client sees today's
+                                     // picture. Like the name, they travel WITH
+                                     // the spawn: the fact exists before the
+                                     // first tick and can be stamped into the
+                                     // tape's header for the reviewer.
+                                     bool? DetailWindow = null,
+                                     bool? TyreLines = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -521,6 +532,13 @@ public sealed class SimEngine
                         ? f0 : new TestFlags();
                     fl.HudLabel = tp.Name;
                 }
+                // The per-car view options of the cast (issue #9): on the car for
+                // /state (the live window reads them from the frame it already
+                // polls), and into the tape header so a review of the run opens
+                // with the same windows and the same tracks the test asked for.
+                newCar.OptDetailWindow = tp.DetailWindow;
+                newCar.OptTyreLines = tp.TyreLines;
+                RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
                     $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Color}) at segment " +
@@ -1328,6 +1346,11 @@ public sealed class SimEngine
                 ["segment"] = c.SegIdx,
                 // Symbolic anchor (docs §8 "Segment names"): readable traces.
                 ["segment_name"] = Network.Segments[c.SegIdx].Name,
+                // The per-car view options AS DECLARED: null (="not said") is
+                // what an undeclared cast answers, so the client keeps its
+                // standing behaviour instead of guessing (issue #9).
+                ["detail_window"] = c.OptDetailWindow,
+                ["tyre_lines"] = c.OptTyreLines,
                 ["progress"] = c.Progress,
                 ["on_road"] = c.IsOnRoad(Network),
                 ["wrong_side"] = pcs.OnWrongSide,
