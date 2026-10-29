@@ -421,6 +421,10 @@ public partial class MapRenderer : Node2D
         public string Livery = "";
         public string LiveryApplied = " ";    // the material now on the sprite
         public Sprite2D Sprite;               // where the material goes
+        // The declared per-car view options from /state (issue #9). null = the
+        // test said nothing, which keeps the standing behaviour.
+        public bool? OptTracks;
+        public bool? OptDetail;
     }
     private readonly Dictionary<long, CarMeta> _carMeta = new();
     // Small per-car HUD label in world space above the car's nose.
@@ -552,8 +556,6 @@ public partial class MapRenderer : Node2D
     private readonly Dictionary<long, List<(float X, float Y, float Hdg)>> _trails
         = new();
     private readonly Dictionary<long, double> _lastTrailTime = new();
-    private Node2D[] _trailLines = new Node2D[4];
-    private (float X, float Y, float Hdg)? _lastTrailTail;
     private float _lastTrailZoom = -1f;
 
     // Test flags (green start / red end pennants), world metres + heading.
@@ -1809,11 +1811,14 @@ public partial class MapRenderer : Node2D
                 child.QueueFree();
         _markings.Clear();
         _crossingDots.Clear();
-        // The child sweep above also kills trail lines / flag nodes created
-        // before the map arrived (state polls start immediately) - drop the
-        // dangling references and force a rebuild on the next frame.
-        _trailLines = new Node2D[4];
-        _lastTrailTail = null;
+        // The child sweep above also kills the track lines and flag nodes that
+        // were created before the map arrived (state polls start immediately) -
+        // drop the dangling references and force a rebuild on the next frame.
+        // Holding them is exactly the ObjectDisposedException storm of issue #1,
+        // and it now covers the per-car tyre lines of #9 as well.
+        _tyreLineNodes.Clear();
+        _tyreLines.Clear();
+        _lastTrailSig = "";
         _flagNodes.Clear();
         _lastFlagFp = "";
         // … and the courtesy cones of the cars (issue #1): ClearCars() below
@@ -3762,6 +3767,12 @@ public partial class MapRenderer : Node2D
                     m.Livery = c.TryGetProperty("livery", out var liv)
                                && liv.ValueKind == JsonValueKind.String
                            ? liv.GetString() : "";
+                    // The declared view options (issue #9): absent stays absent
+                    // (null), so an unauthored cast keeps today's behaviour.
+                    m.OptTracks = c.TryGetProperty("tyre_lines", out var tl) &&
+                                  tl.ValueKind != JsonValueKind.Null ? tl.GetBoolean() : (bool?)null;
+                    m.OptDetail = c.TryGetProperty("detail_window", out var dw) &&
+                                  dw.ValueKind != JsonValueKind.Null ? dw.GetBoolean() : (bool?)null;
                     m.Driver = c.TryGetProperty("driver", out var drv)
                                 && drv.ValueKind == JsonValueKind.String
                             ? drv.GetString() : "BICYCLE";
@@ -4052,6 +4063,15 @@ public partial class MapRenderer : Node2D
         // car, or a despawned car leaves its warm cone painted forever.
         if (_courtesy.TryGetValue(uid, out var cone))
         { cone.QueueFree(); _courtesy.Remove(uid); }
+        // … and its tyre lines (issue #9): the nodes are _world children, so
+        // leaving them behind paints the tracks of a car that no longer exists.
+        if (_tyreLineNodes.TryGetValue(uid, out var lines))
+        {
+            foreach (var track in lines)
+                if (track != null && GodotObject.IsInstanceValid(track)) track.QueueFree();
+            _tyreLineNodes.Remove(uid);
+            _tyreLines.Remove(uid);
+        }
         _blinkL.Remove(uid);
         _blinkR.Remove(uid);
         _brakeLights.Remove(uid);
@@ -4819,24 +4839,32 @@ public partial class MapRenderer : Node2D
         // Detect new points via the TAIL, not the count: once the trail
         // hits its 500-point cap the count never changes again while the
         // oldest point slides out - a count check would freeze the lines.
-        var trail = ActiveTrail();
-        (float X, float Y, float Hdg)? tail = null;
-        if (trail != null && trail.Count > 0) tail = trail[^1];
         float z = _cam.Zoom.X;
         bool drift = _lastTrailZoom > 0 &&
                      Math.Abs(z - _lastTrailZoom) / _lastTrailZoom > 0.08f;
-        if (tail != _lastTrailTail || drift)
+        // One signature for EVERY car that draws tracks (issue #9): watching the
+        // followed car's tail alone meant a second tracked car never rebuilt and
+        // its lines froze at the frame they appeared in.
+        var sig = new System.Text.StringBuilder();
+        if (_review || _tapeLive)
         {
-            RebuildTrails();
-            _lastTrailTail = tail;
+            // A review rebuilds on every cursor move that a tracked car can see.
+            sig.Append(_cursor);
+            if (_cursor >= 0 && _cursor < _tape.Count)
+                foreach (var cf in _tape[_cursor].Cars)
+                    if (WantsTyreLines(cf.Uid)) sig.Append('#').Append(cf.Uid);
+        }
+        else
+            foreach (var kv in _trails)
+                if (kv.Value.Count > 0 && WantsTyreLines(kv.Key))
+                    sig.Append(kv.Key).Append('#').Append(kv.Value.Count).Append(';');
+        string sigNow = sig.ToString();
+        if (sigNow != _lastTrailSig || drift)
+        {
+            RebuildAllTyreLines();
+            _lastTrailSig = sigNow;
             _lastTrailZoom = z;
         }
-        // Trails follow the owning car's level (hidden under bridges too),
-        // one BELOW the car so the sprite paints above its breadcrumbs.
-        int lvl = 0;
-        foreach (var buf in _carBuf.Values) { lvl = buf[^1].Level; break; }
-        foreach (var l in _trailLines)
-            if (l != null) l.ZIndex = 9 + 20 * lvl;
 
         // Flag change detection: legacy root pair, or every car's own
         // pennants (multi-car).
@@ -4856,73 +4884,225 @@ public partial class MapRenderer : Node2D
         }
     }
 
-    List<(float X, float Y, float Hdg)> ActiveTrail()
-        => _followUid > 0 && _trails.TryGetValue(_followUid.Value, out var l)
-           ? l : null;
+    // --- Tyre lines, per car (issue #9) -----------------------------------
+    //
+    // One entry per car whose wheel tracks are ON, holding the FOUR corner
+    // colours individually: the default paints all four the same (the car's
+    // livery, or a palette hue by uid), while the per-tyre scheme this file used
+    // to hard-code for the single followed car survives as the debug mode it was
+    // asked to keep - a lane-guard investigation wants FL/FR/RL/RR apart, an
+    // operator watching three cars pass a junction wants one colour per car.
+    private readonly Dictionary<long, Color[]> _tyreLines = new();
+    private readonly Dictionary<long, Line2D[]> _tyreLineNodes = new();
+    private string _lastTrailSig = "";
 
-    void RebuildTrails()
+    /// <summary>The four-corner scheme of the old single-car view, kept as the
+    /// debug mode issue #9 asked to preserve.</summary>
+    static readonly Color[] CornerDebugColors = {
+        new Color(1f, 0.314f, 0.314f),    // FL red     (255,80,80)
+        new Color(0.314f, 1f, 0.314f),    // FR green   (80,255,80)
+        new Color(0.314f, 0.549f, 1f),    // RL blue    (80,140,255)
+        new Color(1f, 0.863f, 0f),        // RR yellow  (255,220,0)
+    };
+
+    /// <summary>Twelve well-separated hues, assigned by uid and cycling. A fixed
+    /// list (repeatable from run to run, greppable in a screenshot) beats a hue
+    /// wheel whose colours move when the cast grows.</summary>
+    static readonly Color[] TrackPalette = {
+        new(1f, 0.31f, 0.31f), new(0.35f, 0.85f, 1f), new(1f, 0.84f, 0.25f),
+        new(0.55f, 1f, 0.55f), new(1f, 0.55f, 0.9f),  new(0.7f, 0.6f, 1f),
+        new(1f, 0.62f, 0.3f),  new(0.4f, 0.95f, 0.85f), new(1f, 0.95f, 0.5f),
+        new(0.65f, 1f, 0.75f), new(1f, 0.45f, 0.6f),  new(0.55f, 0.8f, 1f),
+    };
+
+    /// <summary>Does this car draw its tyre lines? A declaration wins - the live
+    /// window reads `tyre_lines` from /state, a review reads `tracks=` off the
+    /// tape header - and an explicit false turns even the followed car off.
+    /// Undeclared keeps the standing behaviour of every run recorded so far: the
+    /// followed car only.</summary>
+    bool WantsTyreLines(long uid)
     {
-        // Wheel tracks from rear-axle points: front tyres one wheelbase
-        // ahead, each pair TIRE_OUTBOARD_M outboard (pygame draw_trail).
-        var trail = ActiveTrail();
-        Vector2[][] tracks = null;
-        if (trail != null && trail.Count > 1)
+        if (_review || _tapeLive)
         {
-            // The car renders at latest_time - RenderDelaySec (100 ms), but
-            // the trail's newest point is "now" - without dropping it the
-            // trail tip pokes out AHEAD of the delayed sprite. One point is
-            // exactly one 0.1 s recording interval, matching the delay.
-            int nPts = trail.Count - 1;
-            var lists = new List<Vector2>[4];
-            for (int i = 0; i < 4; i++) lists[i] = new List<Vector2>(nPts);
-            for (int pi = 0; pi < nPts; pi++)
-            {
-                var (x, y, h) = trail[pi];
-                float rad = Mathf.DegToRad(h);
-                float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward
-                float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
-                lists[0].Add(W(x + SpriteWheelbaseM * fx - TireOutboardM * rx,
-                               y + SpriteWheelbaseM * fy - TireOutboardM * ry));
-                lists[1].Add(W(x + SpriteWheelbaseM * fx + TireOutboardM * rx,
-                               y + SpriteWheelbaseM * fy + TireOutboardM * ry));
-                lists[2].Add(W(x - TireOutboardM * rx, y - TireOutboardM * ry));
-                lists[3].Add(W(x + TireOutboardM * rx, y + TireOutboardM * ry));
-            }
-            tracks = new Vector2[4][];
-            for (int i = 0; i < 4; i++) tracks[i] = lists[i].ToArray();
+            // In a review the TAPE decides, and /state never does: the window
+            // still polls the live host (its readout and flags come from there),
+            // but those cars belong to a different run and must not override what
+            // this recording says (issue #9).
+            if (_tapeOpts.TryGetValue(uid, out var o) && o.Tracks is not null)
+                return o.Tracks == true;
+            // Standing rule: the PRIMARY car of the frame under the cursor - the
+            // same car the reviewer's default focus names ("focus: the primary
+            // car"), and the counterpart of the followed car in the live window.
+            // (_followUid is the live camera's field; asking it here drew no
+            // tracks at all - measured on a reviewed turn.)
+            if (_cursor >= 0 && _cursor < _tape.Count && _tape[_cursor].Cars.Count > 0)
+                return uid == _tape[_cursor].Cars[0].Uid;
+            return false;
         }
+        if (_carMeta.TryGetValue(uid, out var m) && m.OptTracks is not null)
+            return m.OptTracks == true;
+        return _followUid > 0 && _followUid.Value == uid;
+    }
 
-        var colors = new[]
+    /// <summary>The track colour of one car: its livery's hue, pushed to a
+    /// lightness that reads on BOTH asphalt (mid grey) and grass (mid green) - a
+    /// track is only useful if it survives the surface it lies on - else a
+    /// palette hue by uid. `cornerDebug` returns the four-corner scheme.</summary>
+    static Color[] TyreLineColors(long uid, CarMeta meta, bool cornerDebug = false)
+    {
+        if (cornerDebug) return CornerDebugColors;
+        Color c;
+        if (meta != null && !string.IsNullOrEmpty(meta.Livery) &&
+            meta.Livery.Length == 7 && meta.Livery[0] == '#')
         {
-            new Color(1f, 0.314f, 0.314f),    // FL red     (255,80,80)
-            new Color(0.314f, 1f, 0.314f),    // FR green   (80,255,80)
-            new Color(0.314f, 0.549f, 1f),    // RL blue    (80,140,255)
-            new Color(1f, 0.863f, 0f),        // RR yellow  (255,220,0)
-        };
-        for (int i = 0; i < 4; i++)
-        {
-            var line = _trailLines[i] as Line2D;
-            if (tracks == null)
-            {
-                if (line != null && GodotObject.IsInstanceValid(line)) line.QueueFree();
-                _trailLines[i] = null;
-                continue;
-            }
-            if (line == null || !GodotObject.IsInstanceValid(line))
-            {
-                line = new Line2D
-                {
-                    DefaultColor = colors[i],
-                    Closed = false,
-                };
-                _world.AddChild(line);
-                _trailLines[i] = line;
-            }
-            // Update in place (the trail grows ~10x/s; recreating the node
-            // every time double-frees it - QueueFree is deferred).
-            line.Points = tracks[i];
-            line.Width = TrailWidthM;   // a tyre track is paint, not a screen px
+            c = new Color(meta.Livery);
+            // Keep the hue, leave the mid greys: the paint itself can be exactly
+            // the colour of the road.
+            float v = Math.Max(c.R, Math.Max(c.G, c.B));
+            float mn = Math.Min(c.R, Math.Min(c.G, c.B));
+            if (v > 0.34f && v < 0.72f && v - mn < 0.3f)
+                c = v < 0.53f ? c.Lightened(0.45f) : c.Darkened(0.45f);
         }
+        else
+            c = TrackPalette[((uid - 1) % TrackPalette.Length + TrackPalette.Length)
+                             % TrackPalette.Length];
+        return new[] { c, c, c, c };
+    }
+
+    /// <summary>The four wheel tracks of one recorded path: rear-axle points
+    /// become front tyres one wheelbase ahead and each pair `TireOutboardM`
+    /// outboard (the geometry the single-car view already had).</summary>
+    static Vector2[][] CarWheelTracks(List<(float X, float Y, float Hdg)> trail)
+    {
+        // The car renders at latest_time - RenderDelaySec (100 ms), but the
+        // trail's newest point is "now" - without dropping it the trail tip
+        // pokes out AHEAD of the delayed sprite. One point is exactly one 0.1 s
+        // recording interval, matching the delay.
+        int nPts = trail.Count - 1;
+        if (nPts < 1) return null;
+        var lists = new List<Vector2>[4];
+        for (int i = 0; i < 4; i++) lists[i] = new List<Vector2>(nPts);
+        for (int pi = 0; pi < nPts; pi++)
+        {
+            var (x, y, h) = trail[pi];
+            float rad = Mathf.DegToRad(h);
+            float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward
+            float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
+            lists[0].Add(W(x + SpriteWheelbaseM * fx - TireOutboardM * rx,
+                           y + SpriteWheelbaseM * fy - TireOutboardM * ry));
+            lists[1].Add(W(x + SpriteWheelbaseM * fx + TireOutboardM * rx,
+                           y + SpriteWheelbaseM * fy + TireOutboardM * ry));
+            lists[2].Add(W(x - TireOutboardM * rx, y - TireOutboardM * ry));
+            lists[3].Add(W(x + TireOutboardM * rx, y + TireOutboardM * ry));
+        }
+        var tracks = new Vector2[4][];
+        for (int i = 0; i < 4; i++) tracks[i] = lists[i].ToArray();
+        return tracks;
+    }
+
+    /// <summary>A review track is the path UP TO the cursor and no further: a
+    /// line reaching into frames after the one under the cursor would draw a
+    /// manoeuvre that has not happened yet. Stepping forward appends (the cheap
+    /// common case, ▶ play), anything else — a scrub, a seek, the jump into the
+    /// next test — rebuilds from the tape, bounded to <see cref="TrailMaxPoints"/>
+    /// samples so a 20-minute run cannot cost a rebuild of its whole history.
+    /// The live window never comes here: its history arrives with /state.
+    /// </summary>
+    List<(float X, float Y, float Hdg)> ReviewTrackOf(long uid)
+    {
+        const int EVERY = 6;    // 0.1 s of tape at 60 Hz == TrailIntervalSec
+        if (_reviewTrailCursor != _cursor || !_reviewTrails.TryGetValue(uid, out var keep))
+            keep = null;
+        if (keep != null && _cursor > 0 && _reviewTrailCursor == _cursor - 1)
+        {
+            foreach (var cf in _tape[_cursor].Cars)
+                if (cf.Uid == uid)
+                {
+                    keep.Add(((float)cf.X, (float)cf.Y, (float)cf.HeadingDeg));
+                    if (keep.Count > TrailMaxPoints) keep.RemoveAt(0);
+                    break;
+                }
+            return keep;
+        }
+        var list = new List<(float X, float Y, float Hdg)>();
+        for (int i = _cursor; i >= 0 && list.Count < TrailMaxPoints; i -= EVERY)
+        {
+            foreach (var cf in _tape[i].Cars)
+                if (cf.Uid == uid)
+                {
+                    list.Add(((float)cf.X, (float)cf.Y, (float)cf.HeadingDeg));
+                    break;
+                }
+        }
+        list.Reverse();
+        _reviewTrails[uid] = list;
+        return list;
+    }
+
+    private readonly Dictionary<long, List<(float X, float Y, float Hdg)>> _reviewTrails = new();
+    private int _reviewTrailCursor = -1;
+
+    /// <summary>Every car that wants them gets its own four track lines, in its
+    /// own colour - which is the whole of issue #9's drawing half.</summary>
+    void RebuildAllTyreLines()
+    {
+        // Which cars are on screen for THIS picture: the live buffers, or the
+        // frame under the cursor in a review.
+        var uids = new List<long>();
+        if (_review || _tapeLive)
+        {
+            if (_cursor >= 0 && _cursor < _tape.Count)
+                foreach (var cf in _tape[_cursor].Cars) uids.Add(cf.Uid);
+        }
+        else
+            foreach (var uid in _trails.Keys) uids.Add(uid);
+
+        foreach (var uid in _tyreLineNodes.Keys.ToArray())
+        {
+            if (uids.Contains(uid) && WantsTyreLines(uid)) continue;
+            foreach (var n in _tyreLineNodes[uid])
+                if (n != null && GodotObject.IsInstanceValid(n)) n.QueueFree();
+            _tyreLineNodes.Remove(uid);
+            _tyreLines.Remove(uid);
+        }
+        foreach (var uid in uids)
+        {
+            if (!WantsTyreLines(uid)) continue;
+            var trail = (_review || _tapeLive) ? ReviewTrackOf(uid)
+                          : (_trails.TryGetValue(uid, out var t) ? t : null);
+            if (trail == null) continue;
+            var tracks = CarWheelTracks(trail);
+            if (tracks == null) continue;
+            _carMeta.TryGetValue(uid, out var meta);
+            var colors = TyreLineColors(uid, meta);
+            if (!_tyreLineNodes.TryGetValue(uid, out var nodes))
+            {
+                nodes = new Line2D[4];
+                _tyreLineNodes[uid] = nodes;
+            }
+            _tyreLines[uid] = colors;
+            for (int i = 0; i < 4; i++)
+            {
+                var line = nodes[i];
+                if (line == null || !GodotObject.IsInstanceValid(line))
+                {
+                    // ZIndex below the car sprite (10) and above the road paint
+                    // (0-2): a track is on the road, under the car.
+                    line = new Line2D { DefaultColor = colors[i], Closed = false, ZIndex = 5 };
+                    _world.AddChild(line);
+                    nodes[i] = line;
+                }
+                // Update in place (a track grows ~10x/s; recreating the node
+                // every frame double-frees it - QueueFree is deferred).
+                line.Call("set_z_index", 5);
+                line.DefaultColor = colors[i];
+                line.Points = tracks[i];
+                line.Width = TrailWidthM;   // a tyre track is paint, not a screen px
+            }
+        }
+        // The review caches belong to THIS cursor: remember it so the next frame
+        // can tell "one step on" (append) from "moved elsewhere" (rebuild).
+        if (_review || _tapeLive) _reviewTrailCursor = _cursor;
     }
 
     void RebuildFlags()
