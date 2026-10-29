@@ -266,7 +266,9 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
 `scripts/merge.sh`. One issue, one branch, one PR.
 
 - **A behaviour change never lands on `main` directly.** Docs/comments/log
-  wording may. When in doubt, take the loop.
+  wording may. When in doubt, take the loop. History up to `f09890b`
+  (2026-10-29) is **grandfathered** - it predates this rule, see
+  `docs/WORKFLOW.md`. The rule is absolute from there on.
 - **`scripts/pr.sh` is not done until the PR body carries the verdict lines**
   (the `✅`/`❌` text and the measured numbers). Pass them in with
   `PR_VERDICTS="..."` — a PR that only says "tested" is not a PR.

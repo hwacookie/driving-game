@@ -76,6 +76,20 @@ the measured e2e verdict lines** (`PR_VERDICTS=... scripts/pr.sh`), and
 `scripts/merge.sh` refuses to land a PR whose checks are not green
 (`--force` exists and says so loudly).
 
+## Grandfathered history (before 2026-10-29)
+
+The loop was written down on 2026-10-26 and the CI gate on 2026-10-29, both
+**after** their own commits had landed on `main` — including the road-surface
+work (`f10e5b7`), which is a behaviour change with no issue, no branch and no PR
+behind it. Nine further commits (`9db2d3a`…`f09890b`) are workflow, CI and tool
+scripts, which the exemption for "docs and log wording" does not literally cover
+and which no gate could have judged anyway: the commit that creates the CI gate
+cannot pass that gate.
+
+This is declared, not hidden: **history up to and including `f09890b` predates
+the rule and stays as it is.** From the next change onward the loop applies
+without exception, `main` is protected, and CI is the merge gate.
+
 ## When the full loop is NOT required
 
 Cosmetic-only changes that no test can express and no player can misbehave:
