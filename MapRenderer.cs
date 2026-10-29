@@ -415,6 +415,12 @@ public partial class MapRenderer : Node2D
         // same chain the reviewer reads off the tape.
         public long HeldBy;
         public string CapKey = "";
+        // The car's PAINT as `#rrggbb` ("" = the photographed colour of its
+        // vehicle). Visual only, and only ever from /state or the tape: the
+        // vehicle id decides dynamics and size, this decides colour (issue #10).
+        public string Livery = "";
+        public string LiveryApplied = " ";    // the material now on the sprite
+        public Sprite2D Sprite;               // where the material goes
     }
     private readonly Dictionary<long, CarMeta> _carMeta = new();
     // Small per-car HUD label in world space above the car's nose.
@@ -449,6 +455,45 @@ public partial class MapRenderer : Node2D
         }
         return color != null && _carTextures.TryGetValue(color, out var t)
             ? t : _carTextures["blue"];
+    }
+
+    // --- Livery (issue #10): paint the bodywork, leave the glass alone ------
+    static readonly Dictionary<string, Texture2D> _maskTextures = new();
+    static readonly Dictionary<string, ShaderMaterial> _liveryMats = new();
+    static Shader _liveryShader;
+
+    /// <summary>The material that paints one vehicle's bodywork in one livery, or
+    /// null when the car wears none (then the photographed sprite shows, exactly
+    /// as before). Cached per (vehicle, livery): a 51-car run in three liveries
+    /// is THREE materials, not fifty-one, so a livery change is an assignment.
+    /// A missing mask returns null on purpose — with no mask the shader would
+    /// paint the whole silhouette, which is the very failure the mask exists to
+    /// prevent (assets/car_&lt;vehicle&gt;_mask.png, authored in
+    /// tools/make_car_sprites.py).</summary>
+    static ShaderMaterial LiveryMaterial(string vehicle, string livery)
+    {
+        if (string.IsNullOrEmpty(livery) || string.IsNullOrEmpty(vehicle)) return null;
+        string key = vehicle + "|" + livery;
+        if (_liveryMats.TryGetValue(key, out var cached)) return cached;
+        _liveryShader ??= GD.Load<Shader>("res://assets/livery.gdshader");
+        if (_liveryShader == null)
+        {
+            GD.PrintErr("livery: res://assets/livery.gdshader missing - cars keep their photographed colour");
+            return null;
+        }
+        if (!_maskTextures.TryGetValue(vehicle, out var mask))
+            _maskTextures[vehicle] = mask =
+                GD.Load<Texture2D>($"res://assets/car_{vehicle}_mask.png");
+        if (mask == null)
+        {
+            GD.PrintErr($"livery: no body mask for vehicle '{vehicle}' - not painting it");
+            return null;
+        }
+        var mat = new ShaderMaterial { Shader = _liveryShader };
+        mat.SetShaderParameter("mask_tex", mask);
+        mat.SetShaderParameter("livery", new Color(livery));
+        _liveryMats[key] = mat;
+        return mat;
     }
 
     // Sign artwork: the SVGs provided in assets/signs/ (Godot imports them
@@ -3711,6 +3756,12 @@ public partial class MapRenderer : Node2D
                     m.Color = c.TryGetProperty("color", out var cc)
                                && cc.ValueKind == JsonValueKind.String
                            ? cc.GetString() : "blue";
+                    // The livery (issue #10): null/absent means the photographed
+                    // colour, so a cast that declares nothing looks exactly as it
+                    // did before this field existed.
+                    m.Livery = c.TryGetProperty("livery", out var liv)
+                               && liv.ValueKind == JsonValueKind.String
+                           ? liv.GetString() : "";
                     m.Driver = c.TryGetProperty("driver", out var drv)
                                 && drv.ValueKind == JsonValueKind.String
                             ? drv.GetString() : "BICYCLE";
@@ -4045,6 +4096,14 @@ public partial class MapRenderer : Node2D
             Scale = new Vector2(size.W / tex.GetSize().X, size.L / tex.GetSize().Y),
             Position = new Vector2(0, -RearAxleOffsetM),
         });
+        // The livery material is set on the sprite, so keep the handle (and
+        // re-take it whenever the node is built - a car that despawned and
+        // respawned gets a fresh sprite).
+        if (_carMeta.TryGetValue(uid, out var metaForSprite))
+        {
+            metaForSprite.Sprite = root.GetChild<Sprite2D>(0);
+            metaForSprite.LiveryApplied = " ";    // force the material to be re-applied
+        }
         // Blinker corner lights: one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
         // centre; orange, 0.5 s blink period.
@@ -4246,6 +4305,19 @@ public partial class MapRenderer : Node2D
             // dynamic call is the binding that works in this build (same
             // pattern as Polygon2D's set_uv).
             node.Call("set_z_index", 10 + 20 * level);
+            // The paint (issue #10): re-material only when the livery actually
+            // changed, which is the common case of doing nothing at all.
+            if (_carMeta.TryGetValue(kv.Key, out var metaLivery))
+            {
+                if (metaLivery.LiveryApplied != metaLivery.Livery ||
+                    (metaLivery.Sprite != null && !GodotObject.IsInstanceValid(metaLivery.Sprite)))
+                {
+                    if (metaLivery.Sprite == null || !GodotObject.IsInstanceValid(metaLivery.Sprite))
+                        metaLivery.Sprite = node.GetChild<Sprite2D>(0);
+                    metaLivery.LiveryApplied = metaLivery.Livery;
+                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Color, metaLivery.Livery);
+                }
+            }
 
             // bitteschön: the conceder signals TOWARD the car it lets through.
             if (_carMeta.TryGetValue(kv.Key, out var metaC))

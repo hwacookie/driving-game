@@ -54,6 +54,12 @@ public class Car
     /// carries, which is why they travel with the spawn like the name does.</summary>
     public bool? OptDetailWindow { get; internal set; }
     public bool? OptTyreLines { get; internal set; }
+
+    /// <summary>The car's PAINT as `#rrggbb`, or null for "the photographed
+    /// colour of this vehicle" (issue #10). Purely visual: dynamics and
+    /// footprint come from the vehicle, never from here - that separation is
+    /// the reason this field exists.</summary>
+    public string? Livery { get; internal set; }
     /// <summary>The speed that actually applies: the driver's choice inside the
     /// class ceiling.</summary>
     public double EffectiveTopMps => CruiseCapMps > 0.0

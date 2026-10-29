@@ -42,7 +42,14 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      // first tick and can be stamped into the
                                      // tape's header for the reviewer.
                                      bool? DetailWindow = null,
-                                     bool? TyreLines = null) : SimCommand;
+                                     bool? TyreLines = null,
+                                     // The car's PAINT, already resolved to
+                                     // `#rrggbb` by the API (issue #10). null =
+                                     // no livery, i.e. the photographed colour
+                                     // of the vehicle. Visual only: the vehicle
+                                     // id (still spelled `color` on the wire for
+                                     // compatibility) decides dynamics and size.
+                                     string? Livery = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -538,6 +545,7 @@ public sealed class SimEngine
                 // with the same windows and the same tracks the test asked for.
                 newCar.OptDetailWindow = tp.DetailWindow;
                 newCar.OptTyreLines = tp.TyreLines;
+                newCar.Livery = tp.Livery;
                 RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
@@ -1351,6 +1359,9 @@ public sealed class SimEngine
                 // standing behaviour instead of guessing (issue #9).
                 ["detail_window"] = c.OptDetailWindow,
                 ["tyre_lines"] = c.OptTyreLines,
+                // `#rrggbb` when the car carries a livery, null when it shows the
+                // photographed colour of its vehicle (issue #10).
+                ["livery"] = c.Livery,
                 ["progress"] = c.Progress,
                 ["on_road"] = c.IsOnRoad(Network),
                 ["wrong_side"] = pcs.OnWrongSide,

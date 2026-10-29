@@ -163,6 +163,65 @@ public static class Config
     public static (double WidthM, double LengthM) SizeForColor(string? color) =>
         VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH_M, CAR_LENGTH_M));
 
+    // --- Liveries (issue #10: the paint, not the vehicle) -----------------
+    /// <summary>Named paints, so a scenario and a tape read as intentions
+    /// ("crimson") instead of as a hex code. A livery changes what a car LOOKS
+    /// like and NOTHING else - never its dynamics class, never its footprint,
+    /// which is exactly the entanglement `color` created (asking for another
+    /// colour today means replacing a sedan with an 8.4 m truck).</summary>
+    public static readonly Dictionary<string, string> LIVERIES = new()
+    {
+        ["crimson"]  = "#c62828", ["amber"]    = "#ef6c00",
+        ["ochre"]    = "#a8842c", ["moss"]     = "#4b7f3f",
+        ["teal"]     = "#0f7c7c", ["cobalt"]   = "#2451b3",
+        ["plum"]     = "#6a2c91", ["graphite"] = "#3b4046",
+        ["sand"]     = "#c9b48a", ["chalk"]    = "#e8e6df",
+        ["rose"]     = "#e05b8c", ["slate"]    = "#5b6b7c",
+    };
+
+    /// <summary>A livery request to `#rrggbb`, or null for "no livery" (the car
+    /// keeps its photographed colour). Accepted: a name from <see cref="LIVERIES"/>
+    /// (case-insensitive), `#rgb`/`#rrggbb`, or `hue:&lt;0..360&gt;` at a fixed
+    /// saturation and lightness for experiments. Unresolvable input is null
+    /// rather than a guess - the API answers 400 so a typo is heard about, not
+    /// driven around in a random colour.</summary>
+    public static string? ResolveLivery(string? want)
+    {
+        if (string.IsNullOrWhiteSpace(want)) return null;
+        var w = want.Trim();
+        if (LIVERIES.TryGetValue(w.ToLowerInvariant(), out var named)) return named;
+        if (w.StartsWith("#"))
+        {
+            var h = w.Substring(1);
+            if (h.Length == 3) h = string.Concat(h[0], h[0], h[1], h[1], h[2], h[2]);
+            if (h.Length != 6) return null;
+            foreach (var ch in h)
+                if (!Uri.IsHexDigit(ch)) return null;
+            return $"#{h.ToLowerInvariant()}";
+        }
+        if (w.StartsWith("hue:") &&
+            double.TryParse(w.Substring(4), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var deg))
+        {
+            if (double.IsNaN(deg)) return null;
+            deg = ((deg % 360.0) + 360.0) % 360.0;
+            // Fixed saturation and lightness: a hue alone must stay readable on
+            // asphalt AND on grass, which the extremes (near-black, near-white)
+            // are not.
+            const double s = 0.62, v = 0.80;
+            double c = v * s, x = c * (1 - Math.Abs((deg / 60.0) % 2 - 1)), m = v - c;
+            (double r, double g, double b) = deg switch
+            {
+                < 60 => (c, x, 0.0), < 120 => (x, c, 0.0), < 180 => (0.0, c, x),
+                < 240 => (0.0, x, c), < 300 => (x, 0.0, c), _ => (c, 0.0, x),
+            };
+            string Hex(double d) =>
+                ((int)Math.Round(Math.Clamp(d + m, 0.0, 1.0) * 255.0)).ToString("x2");
+            return $"#{Hex(r)}{Hex(g)}{Hex(b)}";
+        }
+        return null;
+    }
+
     // --- Axle geometry ---
     // The kinematic bicycle model integrates the REAR AXLE: Car.x / Car.y ARE
     // the rear-axle midpoint, NOT the body centre. Everything visual must be
