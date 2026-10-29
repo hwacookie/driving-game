@@ -1074,11 +1074,15 @@ public partial class MapRenderer : Node2D
     private bool LoadTape(string path)
     {
         _tape.Clear();
+        // A new tape is a new cast, a new set of per-car decisions and a fresh
+        // slate for which windows the test already opened. None of these was
+        // cleared here before, so an old cast could haunt a new tape's slot
+        // labels, and old track/livery declarations could haunt its paints.
         _tapeKinds.Clear();
-        _tapeNames.Clear();     // a new tape is a new cast AND a new set of
-        _tapeOpts.Clear();      // per-car decisions (they were never cleared
-                                // here before, so an old cast could haunt a new
-                                // tape's slot labels)
+        _tapeNames.Clear();
+        _tapeOpts.Clear();
+        _detailDeclaredShown.Clear();
+        _detailDismissed.Clear();
         _legendSeen = _legendHasLevel = false;
         string text;
         try { text = File.ReadAllText(path); }
@@ -2194,6 +2198,9 @@ public partial class MapRenderer : Node2D
         bool wasFollow = w.Following;
         if (_detailHighlight != 0 && w.HighlightUid == _detailHighlight) _detailHighlight = 0L;
         _details.Remove(w);
+        // An operator who closes a test-declared window means it: the ask does
+        // not come back until a new tape (#9).
+        if (_details.All(x => x.Uid != w.Uid)) _detailDismissed.Add(w.Uid);
         w.QueueFree();
         SyncSelectedFromDetails();
         GD.Print($"DETAIL-CLOSE #{w.Uid} · {_details.Count} window(s) left" +
@@ -2551,7 +2558,14 @@ public partial class MapRenderer : Node2D
     /// step; an empty list is honest where a stale one would lie.</summary>
     private void UpdateDetailsLive()
     {
-        if (_details.Count == 0 || _tape.Count > 0) return;
+        if (_tape.Count > 0) return;     // a review refreshes through UpdateDetails
+        // The OPENING ask runs above the "is a window open" gate: with the gate
+        // first, a test's detail_window could never open the FIRST window -
+        // measured as no DETAIL-AUTO line at all in a live run where /state
+        // declared detail_window=true for two cars.
+        foreach (var kv in _carMeta)
+            ApplyDeclaredDetails(kv.Key, kv.Value.OptDetail);
+        if (_details.Count == 0) return;
         var holderOf = new Dictionary<long, long>();
         foreach (var kv in _carMeta)
             if (kv.Value.HeldBy != 0) holderOf[kv.Key] = kv.Value.HeldBy;
@@ -2595,8 +2609,15 @@ public partial class MapRenderer : Node2D
 
     private void UpdateDetails()
     {
-        if (_details.Count == 0 || _tape.Count == 0) return;
+        if (_tape.Count == 0) return;
         var fr = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)];
+        // The windows the TEST asked for (issue #9): a review opens them from the
+        // tape header, exactly as the live window opens them from /state - and,
+        // as there, BEFORE the "is a window open" gate below.
+        foreach (var cf in fr.Cars)
+            ApplyDeclaredDetails(cf.Uid,
+                _tapeOpts.TryGetValue(cf.Uid, out var detOpt) ? detOpt.Detail : null);
+        if (_details.Count == 0) return;
         // One pass over the cast for the holder relation — the chain's other
         // direction is a walk over THIS map, not a scan per car per frame.
         var holderOf = new Dictionary<long, long>();

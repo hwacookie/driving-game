@@ -4084,6 +4084,10 @@ public partial class MapRenderer : Node2D
 
     void ClearCars()
     {
+        // NOTE: _detailDeclaredShown / _detailDismissed are deliberately NOT
+        // cleared here — this runs on a map rebuild too, and forgetting the
+        // operator's dismissal (or re-opening what is already open) is exactly
+        // where the duplicate windows came from (#9). They reset with a new tape.
         foreach (var uid in _carBuf.Keys.ToArray()) RemoveCar(uid);
         _lastFlagFp = "";
         _lastMaxTime = double.NegativeInfinity;
@@ -4923,6 +4927,32 @@ public partial class MapRenderer : Node2D
             foreach (var l in arr)
                 if (l != null && GodotObject.IsInstanceValid(l)) n++;
         return n;
+    }
+
+    /// <summary>Cars whose detail window the TEST asked for (issue #9). One open
+    /// per car per cast: if the operator closes it again it stays closed — the
+    /// declaration is an opening ask, not a leash. Cleared with the cast
+    /// (ClearCars on a fresh /teleport) and with the tape (LoadTape).</summary>
+    private readonly HashSet<long> _detailDeclaredShown = new();
+
+    /// <summary>Cars whose auto-opened window the OPERATOR closed: the test's
+    /// declaration is an opening ask, not a leash, so it does not come back
+    /// (#9). Reset with a new tape, never with a map rebuild.</summary>
+    private readonly HashSet<long> _detailDismissed = new();
+
+    void ApplyDeclaredDetails(long uid, bool? declared)
+    {
+        if (declared != true || _detailDismissed.Contains(uid)) return;
+        // Ask the truth, do not remember it: a remembered flag went stale when
+        // BuildMap's ClearCars() ran AFTER the windows had opened (the /map
+        // answer lands a second later than the first /state), and the next frames
+        // opened a SECOND window per car - measured as four windows for two cars,
+        // with DETAIL-AUTO logged twice each.
+        foreach (var w in _details)
+            if (w.Uid == uid && w.Showing) return;
+        _detailDeclaredShown.Add(uid);
+        OpenDetailWindow(uid);
+        GD.Print($"DETAIL-AUTO #{uid} ({NameOf(uid)}) — the test declared detail_window");
     }
 
     /// <summary>The four-corner scheme of the old single-car view, kept as the
