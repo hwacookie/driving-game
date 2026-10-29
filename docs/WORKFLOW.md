@@ -18,11 +18,29 @@ as the repo owner, token scope `repo`), git over ssh.
 | 4 | fix it on that branch | edit, `dotnet build` |
 | 5 | test it | `scripts/run_e2e.sh --tests <n> --warp 4` (reproduce first, then re-run the named scenario), unit suite `dotnet test DrivingGame.Sim.Tests/...` |
 | 6 | open the PR | `scripts/pr.sh` |
-| 7 | merge it back and clean up | `scripts/merge.sh` |
+| 7 | merge it back and clean up | `scripts/merge.sh` (waits for CI, refuses to land a red build) |
 | 8 | close the loop | the merge commit references `#<issue>`, GitHub closes the issue |
 
 One issue → one branch → one PR. A second problem is a second issue, even when
 it is found while fixing the first (note it in the PR, then file it).
+
+## CI: nothing lands that GitHub has not built and unit-tested
+
+`.github/workflows/ci.yml` runs on every PR to `main` (and on pushes to `main`)
+with two jobs whose names are the required status checks:
+
+| check | what it does |
+|-------|--------------|
+| `core build + unit tests` | `dotnet restore/build` of `DrivingGame.Sim`, `DrivingGame.Api`, `DrivingGame.Server` and the test project in Release, then `dotnet test DrivingGame.Sim.Tests` (xUnit) with a `.trx` uploaded as an artifact and the counts written to the job summary |
+| `godot client build` | `dotnet build DrivingGame.csproj` in Release - the Godot C# client must compile. `Godot.NET.Sdk` and `GodotSharp` come from NuGet, so no editor is installed on the runner |
+
+**CI deliberately does not run the e2e suite** (`scripts/run_e2e.sh`): it drives a
+visible Godot window against a live sim at real pacing, which a runner cannot
+show, and its verdicts would be meaningless without the eye. The loop therefore
+has two halves: **CI proves the build and the unit tests**, the **PR body carries
+the measured e2e verdict lines** (`PR_VERDICTS=... scripts/pr.sh`), and
+`scripts/merge.sh` refuses to land a PR whose checks are not green
+(`--force` exists and says so loudly).
 
 ## When the full loop is NOT required
 

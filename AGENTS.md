@@ -274,5 +274,10 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
   command that shows the failure, the PR holds the command that shows the fix.
 - **`main` is never force-pushed** and no branch rewrites a pushed commit.
   Merges are merge-commits (`--merge`), the branch is deleted afterwards.
+- **CI gates the merge**: `.github/workflows/ci.yml` must be green - the checks
+  `core build + unit tests` (build + `dotnet test`) and `godot client build`
+  (the Godot client compiles). `scripts/merge.sh` waits for them and refuses a
+  red run. CI does **not** run the e2e suite (it needs a visible window): those
+  verdicts go in the PR body.
 - The helper scripts refuse a dirty working tree (`--allow-dirty` overrides),
   so a half-saved edit cannot ride into a PR unnoticed.

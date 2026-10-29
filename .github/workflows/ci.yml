@@ -1,0 +1,82 @@
+name: ci
+
+# What GitHub must have green before a PR may land on main (docs/WORKFLOW.md):
+#   core build + unit tests   - the simulation, the REST layer, the console host,
+#                               and the xUnit suite (DrivingGame.Sim.Tests)
+#   godot client build        - the Godot C# client compiles (Godot.NET.Sdk and
+#                               GodotSharp come from NuGet, so no editor needed
+#                               to COMPILE; importing assets / running the
+#                               window is not part of CI)
+# The e2e suite (scripts/run_e2e.sh) is NOT here on purpose: it drives a visible
+# Godot window against a live sim at real pacing, which a runner cannot show.
+# Its verdict lines belong in the PR body (PR_VERDICTS=... scripts/pr.sh).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: core build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: |
+          dotnet restore DrivingGame.Sim/DrivingGame.Sim.csproj
+          dotnet restore DrivingGame.Api/DrivingGame.Api.csproj
+          dotnet restore DrivingGame.Server/DrivingGame.Server.csproj
+          dotnet restore DrivingGame.Sim.Tests/DrivingGame.Sim.Tests.csproj
+
+      - name: Build (sim + API + console host)
+        run: |
+          dotnet build DrivingGame.Server/DrivingGame.Server.csproj -c Release --no-restore -v q --nologo
+          dotnet build DrivingGame.Sim.Tests/DrivingGame.Sim.Tests.csproj -c Release --no-restore -v q --nologo
+
+      - name: Unit tests
+        run: |
+          dotnet test DrivingGame.Sim.Tests/DrivingGame.Sim.Tests.csproj -c Release --no-build \
+            --nologo --results-directory TestResults --logger "trx;LogFileName=unit.trx" \
+            | tee /tmp/unit.log
+          grep -E "Passed!|Failed!|error" /tmp/unit.log || true
+          {
+            echo "## unit tests"
+            echo '```'
+            grep -E "Passed!|Failed!|Skipped|error" /tmp/unit.log | head -20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: '**/TestResults/unit.trx'
+          if-no-files-found: ignore
+
+  client:
+    name: godot client build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build the Godot client assembly
+        run: dotnet build DrivingGame.csproj -c Release --nologo -v q
