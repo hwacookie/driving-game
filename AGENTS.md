@@ -256,3 +256,23 @@ exit path into an abort and pops a macOS crash-report window. The runner
 closes windows cleanly instead: the client watches
 `/tmp/driving_game_godot_gen` and quits itself when `scripts/run_e2e.sh`
 bumps it.)
+
+## Change workflow: issue → branch → fix → test → PR → main
+
+Full spec: `docs/WORKFLOW.md`. The short form is binding:
+
+**When the user reports a problem, the loop is**
+`scripts/issue.sh` → `scripts/fix.sh <n>` → fix → test → `scripts/pr.sh` →
+`scripts/merge.sh`. One issue, one branch, one PR.
+
+- **A behaviour change never lands on `main` directly.** Docs/comments/log
+  wording may. When in doubt, take the loop.
+- **`scripts/pr.sh` is not done until the PR body carries the verdict lines**
+  (the `✅`/`❌` text and the measured numbers). Pass them in with
+  `PR_VERDICTS="..."` — a PR that only says "tested" is not a PR.
+- **Reproduce first** (project rule above) — the issue body holds the exact
+  command that shows the failure, the PR holds the command that shows the fix.
+- **`main` is never force-pushed** and no branch rewrites a pushed commit.
+  Merges are merge-commits (`--merge`), the branch is deleted afterwards.
+- The helper scripts refuse a dirty working tree (`--allow-dirty` overrides),
+  so a half-saved edit cannot ride into a PR unnoticed.
