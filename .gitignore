@@ -20,6 +20,10 @@ tests/turning_results.json
 tests/run_test_*.log
 tests/twoway_repro_*.jsonl
 
+## recordings (run artifacts - never in git; a tape kept to DOCUMENT something
+## goes to docs/tapes/ by name, see docs/tapes/README.md and docs/WORKFLOW.md)
+tests/tape_T_*.txt
+
 ## crash dumps (regenerated on every run)
 logs/
 

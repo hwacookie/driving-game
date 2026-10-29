@@ -164,8 +164,15 @@ the exempt commit is still built and unit-tested immediately after landing.
   `❌ FAILED` / measured numbers), not "tested".
 - Merge style: **merge commit** (`gh pr merge --merge`) so the branch history
   survives; the branch is deleted afterwards.
-- `tests/tape_T_*.txt` for the run that proves the fix is committed with the PR
-  (that is the repo's existing habit — a reviewer can replay the exact frames).
+- **Tapes are run artifacts, never commit material** (user decision,
+  2026-10-29). A recording of a run goes to `tests/tape_T_*.txt` for the
+  reviewer to look at and is **gitignored**; 14 MB of frames is not what a PR
+  is for, and one `pr.sh` already swept a tape into a branch unasked. What a
+  PR carries instead is the verdict lines (above) and the command that replays
+  the frames. **The one exception is deliberate documentation:** a recording
+  worth keeping as evidence goes to [`docs/tapes/`](tapes/), renamed to say
+  what it shows (`docs/tapes/README.md` holds the rules), and is added by name
+  — never by `git add -A`.
 
 ## Helper scripts
 

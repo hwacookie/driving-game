@@ -277,6 +277,10 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
   When in doubt, take the loop. History up to `f09890b`
   (2026-10-29) is **grandfathered** - it predates this rule, see
   `docs/WORKFLOW.md`. The rule is absolute from there on.
+- **Tapes never go into git.** `tests/tape_T_*.txt` is gitignored (a run
+  artifact, often >10 MB); a recording kept **to document something** lives in
+  `docs/tapes/` and is added by name, never by `git add -A` — see
+  `docs/WORKFLOW.md` ("Tapes are run artifacts") and `docs/tapes/README.md`.
 - **`scripts/pr.sh` is not done until the PR body carries the verdict lines**
   (the `✅`/`❌` text and the measured numbers). Pass them in with
   `PR_VERDICTS="..."` — a PR that only says "tested" is not a PR.
