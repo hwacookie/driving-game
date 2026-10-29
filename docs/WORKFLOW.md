@@ -24,6 +24,40 @@ as the repo owner, token scope `repo`), git over ssh.
 One issue → one branch → one PR. A second problem is a second issue, even when
 it is found while fixing the first (note it in the PR, then file it).
 
+## Offline mode: the same loop with no GitHub
+
+`scripts/offline.sh` exists for the train, the plane and the dead Tailnet. The
+loop does not change shape — issue, branch, fix, test, merge — only where the
+records live.
+
+| online | offline | where it goes |
+|--------|---------|---------------|
+| `scripts/issue.sh` | `scripts/offline.sh issue TITLE [BODY]` | `issues/NNN-slug.md`, numbered **#L001** |
+| `scripts/fix.sh 31` | `scripts/fix.sh L1` (or any call while the marker is on) | branch `fix-L1-slug` off **`offline`**, never off a stale `origin/main` |
+| `scripts/pr.sh` + `scripts/merge.sh` | `scripts/offline.sh land L1 "title"` | merge commit into the branch **`offline`** |
+| GitHub Actions | the same commands, run locally, *labelled as local* | merge-commit footer `Local-CI: … on <host> <time>` |
+| the issue + PR | `scripts/offline.sh replay-one <NNN>` when back online | real issue, real branch, real PR, real CI |
+
+Three properties that make this safe rather than convenient:
+
+- **Local `main` is a mirror of `origin/main`.** Offline work never lands there,
+  so coming back online is a pull and a replay, never a rebase, never a
+  force-push, never "what did I do on the train".
+- **The `L` prefix keeps the two numbering systems apart** forever; a record
+  that has been published carries a `gh-issue: #<n>` line, so nothing is filed
+  twice.
+- **The CI gate is not skipped, only relocated.** `land` runs the Release build
+  of `DrivingGame.Server` + `DrivingGame.Sim.Tests` and `dotnet test` (the very
+  commands `ci.yml` runs), refuses to land on a red unit run, and writes what it
+  ran and where into the merge commit. GitHub's CI still judges the change when
+  the PR is replayed — that is the point of replay rather than a push.
+
+`scripts/pr.sh` and `scripts/merge.sh` refuse to run while the marker
+(`.git/offline-mode`) exists and point at `land` instead, so a half-online
+attempt fails loudly instead of pushing to the wrong place. `scripts/offline.sh
+status` shows the mode, whether `origin` answers, how many records exist and how
+many are already published.
+
 ## CI: nothing lands that GitHub has not built and unit-tested
 
 `.github/workflows/ci.yml` runs on every PR to `main` (and on pushes to `main`)

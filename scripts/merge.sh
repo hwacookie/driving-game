@@ -4,6 +4,12 @@
 #   scripts/merge.sh [issue-number]   default: the PR of the current branch
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [ -f .git/offline-mode ]; then
+  echo "!! offline mode is on (.git/offline-mode) - this step needs GitHub."
+  echo "   Land the fix locally instead: scripts/offline.sh land  (docs/WORKFLOW.md)"
+  echo "   Or scripts/offline.sh off if the network is back."
+  exit 1
+fi
 BR=$(git rev-parse --abbrev-ref HEAD)
 N="${1:-$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')}"
 if [ -n "${1:-}" ]; then

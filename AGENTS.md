@@ -279,5 +279,13 @@ Full spec: `docs/WORKFLOW.md`. The short form is binding:
   (the Godot client compiles). `scripts/merge.sh` waits for them and refuses a
   red run. CI does **not** run the e2e suite (it needs a visible window): those
   verdicts go in the PR body.
+- **Offline is the same loop, not a shortcut.** When GitHub is unreachable (or
+  `.git/offline-mode` exists): `scripts/offline.sh issue` → `scripts/fix.sh L<n>`
+  → fix → `scripts/offline.sh land`. Records live in `issues/NNN-slug.md` with
+  `#L` numbers, landings accumulate on the branch **`offline`**, and **local
+  `main` stays a mirror of `origin/main`**. Coming back online is
+  `scripts/offline.sh replay-one <NNN>` - a real issue and a real PR, judged by
+  real CI. `land` runs the CI commands locally and labels them `Local-CI`, it
+  does not claim they passed on GitHub.
 - The helper scripts refuse a dirty working tree (`--allow-dirty` overrides),
   so a half-saved edit cannot ride into a PR unnoticed.
