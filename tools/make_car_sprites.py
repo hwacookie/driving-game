@@ -51,6 +51,15 @@ CELLS = [
 GREEN_LO = 10.0    # greenness below this -> fully opaque
 GREEN_HI = 90.0    # greenness above this -> fully transparent
 
+# --- Body mask (issue #10) ------------------------------------------------
+# Tolerances of `body_mask`. A bad mask shows up in the printed coverage and in
+# the written car_<name>_mask.png, so they are tuned here, once, looking at the
+# output - not inside a shader later.
+BODY_VALUE_FLOOR = 0.30      # × the brightest interior pixel: below = glass/tyre
+BODY_CHROMA_TOL = 0.045      # radius in normalised (r,g) space around the paint
+BODY_CHROMA_BINS = 32        # coarse bins for the modal-paint vote
+BODY_INTERIOR_EROSION = 3    # px: keep the green-screen rim out of the sampling
+
 # Vehicles that point nose-DOWN in assets/source/vehicles_green.png.
 DEFAULT_FLIPS = ["blue"]
 
@@ -78,10 +87,96 @@ def extract(name, y0, y1, x0, x1):
     return crop
 
 
+def _erode(m, px):
+    """Shrink a boolean region by `px` (numpy only): the anti-aliased rim of the
+    silhouette is a blend of car and green screen, and sampling the body colour
+    there would teach the mask the background's chromaticity."""
+    out = m.copy()
+    for _ in range(max(0, int(px))):
+        sh = out.copy()
+        sh[1:, :] &= out[:-1, :]
+        sh[:-1, :] &= out[1:, :]
+        sh[:, 1:] &= out[:, :-1]
+        sh[:, :-1] &= out[:, 1:]
+        out = sh
+    return out
+
+
+def _fill_holes(m):
+    """Close every hole the mask enclosed (numpy-only flood from the border).
+    A badge, a door handle or a wheel-arch shadow sits INSIDE painted metal; an
+    open hole there would show a photo-coloured island in the middle of a
+    recoloured car."""
+    free = ~m
+    reach = np.zeros_like(m)
+    reach[0, :] = free[0, :]
+    reach[-1, :] = free[-1, :]
+    reach[:, 0] = free[:, 0]
+    reach[:, -1] = free[:, -1]
+    while True:
+        prev = reach
+        reach = prev | (free & np.roll(prev, 1, axis=0)) | (free & np.roll(prev, -1, axis=0)) \
+                    | (free & np.roll(prev, 1, axis=1)) | (free & np.roll(prev, -1, axis=1))
+        if reach.sum() == prev.sum():
+            return m | ~reach
+
+
+def body_mask(rgba):
+    """Painted bodywork of a vehicle sprite (issue #10): 0..255 per pixel.
+
+    The source is a flat green-screen photo, so `extract` already gives the
+    silhouette of the WHOLE vehicle — glass, tyres and chrome included, all of
+    which keep their own pixels when a livery is applied. Inside that silhouette
+    the discriminator is CHROMATICITY: divide the brightness out and a door and a
+    roof are the same colour, because a roof is the same paint, only brighter. So
+    brightness may vary freely (that is what preserves the photo's shading) while
+    hue/saturation may not, and a brightness floor drops dark glass and black
+    tyres. The reference colour is the modal coarse bin of the interior, so a grey
+    Fiat and a blue Mercedes each get THEIR paint — a fixed "is it bluish" rule
+    could never serve both.
+
+    Returns (mask, coverage of the silhouette): the tool prints the coverage, so
+    a bad mask is visible at tool time rather than on screen a week later.
+    """
+    r = rgba[..., 0].astype(np.float64)
+    g = rgba[..., 1].astype(np.float64)
+    b = rgba[..., 2].astype(np.float64)
+    alpha = rgba[..., 3] > 127
+    val = np.maximum(np.maximum(r, g), b)
+    denom = (r + g + b).clip(1.0)
+    cr, cg = r / denom, g / denom
+
+    interior = _erode(alpha, BODY_INTERIOR_EROSION)
+    if not interior.any():
+        return np.zeros(alpha.shape, np.uint8), 0.0
+    bright = max(1.0, float(val[interior].max()))
+    cand = interior & (val >= BODY_VALUE_FLOOR * bright)
+    if not cand.any():
+        return np.zeros(alpha.shape, np.uint8), 0.0
+
+    keys = ((cr[cand] * BODY_CHROMA_BINS).astype(np.int64) * 1024
+            + (cg[cand] * BODY_CHROMA_BINS).astype(np.int64) * 32
+            + (val[cand] // 32).clip(0, 31).astype(np.int64))
+    vals, counts = np.unique(keys, return_counts=True)
+    top = vals[counts.argmax()]
+    sel = keys == top
+    body_cr = float(cr[cand][sel].mean())
+    body_cg = float(cg[cand][sel].mean())
+
+    m = alpha & (np.abs(cr - body_cr) <= BODY_CHROMA_TOL) \
+            & (np.abs(cg - body_cg) <= BODY_CHROMA_TOL) \
+            & (val >= BODY_VALUE_FLOOR * bright)
+    m = _fill_holes(m)
+    cover = float(m.sum()) / max(1, int(alpha.sum()))
+    return m.astype(np.uint8) * 255, cover
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--flip", nargs="*", default=DEFAULT_FLIPS,
                     help="sprite names to flip vertically (nose-down in source)")
+    ap.add_argument("--no-mask", action="store_true",
+                    help="skip the body masks (issue #10) - sprites only")
     args = ap.parse_args()
 
     sizes = {}
@@ -94,6 +189,11 @@ def main():
         Image.fromarray(crop, "RGBA").save(out)
         sizes[name] = (w, h)
         print(f"{out.relative_to(ROOT)}  {w}x{h}px")
+        if not args.no_mask:
+            mask, cover = body_mask(crop)
+            mout = OUT_DIR / f"car_{name}_mask.png"
+            Image.fromarray(mask, "L").save(mout)
+            print(f"{mout.relative_to(ROOT)}  body {cover * 100:.1f}% of the silhouette")
 
     # Suggested C# table: physical size per sprite (blue sedan = game box).
     rw, rh = sizes[REF_NAME]
