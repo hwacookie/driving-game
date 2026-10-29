@@ -244,6 +244,17 @@ Measured on the stamps themselves, both directions (the header parse is
 | the wide one | `v2:segs=256:signs=4:starts=48:sum=5C2E143F:fnv=626AA1A6` | whole — ':' keeps it ONE token |
 | the old one | `segs=256 signs=4 sum=56AAB638 fnv=301F63CD` | **`segs=256`** — the spaces ended the value, so an old stamp never even reached the client whole |
 
+The same trap swallowed `map=` a year later, from the other side (#11): the
+engine stamped its own self-description, `"engine boot"`, so an ad-hoc run
+recorded `map=engine boot` and the reader's `Split("map=")[1].Split(" ")[0]`
+handed the review window a map called **`engine`** — which does not exist, so
+since #2 it correctly refused to paint a single car. Two rules came out of it:
+**a host names its map** (`SimEngine.MapName`, handed in by `SimHost` / the
+console host, which both know it from `--map`), and **a name that cannot stand
+in the header is replaced, visibly** (`RunTape.SanitiseMapName`: space, `,` and
+`=` become `_`, with a `TAPE-MAP-NAME` line on the console) — because writing a
+name the reader will shorten is worse than writing an ugly one.
+
 That row is why the wide stamp had to change format rather than just gain
 fields: a spaced fingerprint was already lossy in the file, so a spaced `v2`
 would have compared `v2` against the full drawn hash and answered MISMATCH on

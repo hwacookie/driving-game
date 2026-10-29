@@ -129,6 +129,10 @@ public sealed class SimEngine
     public double TimeWarp { get; set; } = 1.0;
 
     public RoadNetwork Network { get; }
+    /// <summary>The name this engine's map is known by - stamped into every tape
+    /// it starts, so a review can rebuild the ground the cars were recorded on
+    /// (#11). "engine boot" for a network nobody named.</summary>
+    public string MapName { get; }
     public ObstacleManager Obstacles { get; }
     public PhysicsValidator Validator { get; }
     public LaneGuard LaneGuard { get; }
@@ -277,10 +281,15 @@ public sealed class SimEngine
     }
     public IReadOnlyDictionary<int, Car> Cars => _cars;
 
-    public SimEngine(RoadNetwork network, ObstacleManager obstacles)
+    public SimEngine(RoadNetwork network, ObstacleManager obstacles, string mapName = "")
     {
         Network = network;
         Obstacles = obstacles;
+        // The name the tape will carry. A host knows which map it was started
+        // with; a hand-built network in a unit test does not, and for that the
+        // old label stays honest (issue #11: "engine boot" was never a map name,
+        // it was what an unnamed engine said about itself).
+        MapName = string.IsNullOrWhiteSpace(mapName) ? "engine boot" : mapName;
         // A tape belongs to the SIM, not to a client that happens to ask for
         // one (the user's decision of 2026-10-25: every run is recorded, so
         // live viewing is the tip of a tape that is still being written -
@@ -293,7 +302,7 @@ public sealed class SimEngine
         // reference against the ground it drew (docs/SIMULATIONS_REVIEWER.md
         // "map reference must cover the drawn ground").
         if (!RunTape.Recording)
-            RunTape.Start("engine boot", DtFixed, RoadNetwork.MapFingerprint(Network));
+            RunTape.Start(MapName, DtFixed, RoadNetwork.MapFingerprint(Network));
         Validator = new PhysicsValidator(enabled: true);
         LaneGuard = new LaneGuard(enabled: true);
 

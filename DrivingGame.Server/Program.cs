@@ -176,7 +176,7 @@ if (benchMode)
         Console.WriteLine($"--- {n} cars");
         // A fresh engine per phase: no leftovers, and the raceline cache starts
         // cold like a real run does.
-        var eng = new SimEngine(network, obstacleMgr) { CollisionsEnabled = collisionsEnabled };
+        var eng = new SimEngine(network, obstacleMgr, mapLabel) { CollisionsEnabled = collisionsEnabled };
         for (int i = 0; i < n; i++)
         {
             int seg = loop[(int)System.Math.Round(i * (double)loop.Count / n) % loop.Count];
@@ -215,7 +215,7 @@ if (benchMode)
 
 // --- Engine + initial car(s) ------------------------------------------------------
 
-var engine = new SimEngine(network, obstacleMgr) { CollisionsEnabled = collisionsEnabled };
+var engine = new SimEngine(network, obstacleMgr, mapLabel) { CollisionsEnabled = collisionsEnabled };
 
 Car? initialCar = null;
 if (mapName is not null)

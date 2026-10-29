@@ -91,7 +91,9 @@ public partial class SimHost : Node
 
         // Obstacle layouts save per map name (same label as the console host).
         var obstacleMgr = new ObstacleManager(_mapName ?? "kleinmachnow");
-        Engine = new SimEngine(network, obstacleMgr);
+        // Same label for the tape and the obstacle layouts: one run, one map name
+        // (#11). A review window reads this name to build its ground (#2).
+        Engine = new SimEngine(network, obstacleMgr, _mapName ?? "kleinmachnow");
 
         // --- Spawn (the view is the client's own Camera2D) -----------------
         // Test maps do NOT auto-spawn a car: the e2e suite teleports its
