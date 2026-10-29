@@ -3194,7 +3194,15 @@ public partial class MapRenderer : Node2D
     void FitViewOnCar(double xM, double yM)
     {
         var vp = GetTree().Root.GetVisibleRect().Size;
-        double z = Math.Clamp(vp.X / CarFocusViewM, ZoomMin, CrashZoom);
+        // An explicit --zoom is the operator's answer to "how close", and the
+        // precedence says command line outranks this default framing (#12).
+        // What the declared focus keeps is its SUBJECT — the camera still rides
+        // the car. The hand stays free too: this fit runs once per focus label
+        // (ApplyFocusZoom returns early for one already framed), so a wheel
+        // zoom or a drag after it is never undone. A focus that declares its OWN
+        // zoom is a different thing: that framing is written into the recording
+        // and still outranks --zoom (ApplyFocusZoom's first branch).
+        double z = _overrideZoom ?? Math.Clamp(vp.X / CarFocusViewM, ZoomMin, CrashZoom);
         _cam.Zoom = new Vector2((float)z, (float)z);
     }
 
