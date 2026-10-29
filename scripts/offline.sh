@@ -81,6 +81,7 @@ case "${1:-status}" in
   land)
     shift
     N="${1:-}"; TITLE="${2:-offline fix}"
+    N="${N#L}"    # records are 001-*.md; the L is decoration, not part of the number
     BR=$(git rev-parse --abbrev-ref HEAD)
     [ "$BR" != "main" ] || { echo "!! on main - offline work lands from a fix branch into 'offline'"; exit 1; }
     [ -n "$(git status --porcelain)" ] && { echo "!! dirty tree - commit first (offline commits are fine: scripts/pr.sh --offline is not needed)"; exit 1; }
@@ -105,7 +106,7 @@ case "${1:-status}" in
     git switch -q offline
     git merge --no-ff -q -m "$TITLE
 
-Local-issue: ${N:+#$N}${N:-none}
+Local-issue: #L${N#L}
 Branch: $BR
 Local-CI: core build + unit tests run on $(hostname) $(date '+%Y-%m-%d %H:%M') - $(cat /tmp/offline_test.txt | head -1)
 Verdicts:
