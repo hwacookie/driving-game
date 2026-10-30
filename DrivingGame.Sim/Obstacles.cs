@@ -23,13 +23,20 @@ public sealed class PlacementError : Exception
 /// (x, y) is the CENTER of the footprint in world metres; heading in
 /// degrees (0 = north), auto-aligned at placement from the road geometry.
 /// The id is stable for the life of the obstacle - required for removal
-/// via the REST API and unambiguous in saved layouts.</summary>
+/// via the REST API and unambiguous in saved layouts.
+///
+/// `Color` is a PAINT (the palette maps its three words to RGB triples) and keeps
+/// that name; `Model` is the NEW half (#22): which kind of vehicle is parked
+/// here, which decides the metres of road the obstruction occupies. A layout that
+/// predates the field loads as the sedan it always was.
+/// </summary>
 public sealed record Obstacle(int Id, double X, double Y, double Heading,
-                              string Type = "car", string Color = "blue")
+                              string Type = "car", string Color = "blue",
+                              string Model = "mercedes_c220")
 {
     public Dictionary<string, object> ToDict() => new()
     {
-        ["id"] = Id, ["type"] = Type, ["color"] = Color,
+        ["id"] = Id, ["type"] = Type, ["color"] = Color, ["model"] = Model,
         ["x"] = X, ["y"] = Y, ["heading"] = Heading,
     };
 
@@ -45,7 +52,12 @@ public sealed record Obstacle(int Id, double X, double Y, double Heading,
                       ? t.GetString()! : "car";
         string color = d.TryGetProperty("color", out var c) && c.ValueKind == JsonValueKind.String
                        ? c.GetString()! : "blue";
-        return new Obstacle(id, x, y, heading, type, color);
+        // `model` is optional: an entry written before #22 IS a sedan, because
+        // that is the box it was collision-tested with for its whole life.
+        string model = Config.ModelFor(
+            d.TryGetProperty("model", out var mo) && mo.ValueKind == JsonValueKind.String
+                ? mo.GetString() : null).Name;
+        return new Obstacle(id, x, y, heading, type, color, model);
     }
 }
 
@@ -84,9 +96,15 @@ public static class ObstacleGeometry
         };
     }
 
-    /// <summary>The parked car's footprint: same size as the player car.</summary>
-    public static List<(double X, double Y)> ObstacleFootprint(Obstacle ob) =>
-        BoxCorners(ob.X, ob.Y, ob.Heading, Config.CAR_LENGTH_M, Config.CAR_WIDTH_M);
+    /// <summary>The parked car's footprint: the MODEL's metres (#22), not the
+    /// player car's. Before this every obstruction was the sedan box "regardless
+    /// of its color" — so a parked mixer (8.40 m) blocked a sedan's (4.40 m) of
+    /// road, and a car squeezing past it computed a gap that did not exist.</summary>
+    public static List<(double X, double Y)> ObstacleFootprint(Obstacle ob)
+    {
+        var m = Config.ModelFor(ob.Model);
+        return BoxCorners(ob.X, ob.Y, ob.Heading, m.LengthM, m.WidthM);
+    }
 
     /// <summary>The player car's body box - the same four-corner geometry the
     /// on-road check uses (centered on the body centre, not the rear axle).
@@ -418,13 +436,21 @@ public sealed class ObstacleManager
                 $"{y:F1} m) is off the paved road area");
     }
 
-    /// <summary>Place a new obstacle; returns it (id + computed heading).</summary>
+    /// <summary>Place a new obstacle; returns it (id + computed heading).
+    /// `model` says what is parked there (#22) and with it how much road the
+    /// obstruction owns; unknown names are a placement error, never a silent
+    /// sedan — the caller would otherwise see a car it did not place.</summary>
     public Obstacle Place(RoadNetwork network, string type, string color,
-                          double x, double y)
+                          double x, double y, string model = "mercedes_c220")
     {
         if (type != "car")
             throw new PlacementError(
                 $"unknown obstacle type '{type}' (Part 1 offers 'car' only)");
+        if (!Config.IsModel(model))
+            throw new PlacementError(
+                $"unknown model '{model}' " +
+                $"(available: {string.Join(", ", Config.MODEL_NAMES)})");
+        model = Config.ModelFor(model).Name;      // photo aliases → canonical
         if (!ObstacleGeometry.ObstacleColors.ContainsKey(color))
             throw new PlacementError(
                 $"unknown color '{color}' " +
@@ -433,7 +459,7 @@ public sealed class ObstacleManager
         double heading = ObstacleGeometry.LaneHeadingAt(x, y, network);
         lock (_lock)
         {
-            var ob = new Obstacle(_nextId++, x, y, heading, type, color);
+            var ob = new Obstacle(_nextId++, x, y, heading, type, color, model);
             _obstacles.Add(ob);
             return ob;
         }
@@ -536,8 +562,12 @@ public sealed class ObstacleManager
         double offY = Math.Cos(rad) * Config.REAR_AXLE_OFFSET_M;
 
         List<(double X, double Y)> BodyAt(double x, double y) =>
+            // The car's OWN model footprint: a concrete mixer does not clear an
+            // obstruction with a sedan's 1.80 m, and a Fiat 500 should not be
+            // stopped by a gap it could physically drive through (#22's rule read
+            // from the other side — the same mistake, one layer over).
             ObstacleGeometry.BoxCorners(x + offX, y + offY, h,
-                                        Config.CAR_LENGTH_M, Config.CAR_WIDTH_M);
+                                        car.LengthM, car.WidthM);
 
         // 3D contact: the car's box sits at its segment's level, obstacles
         // are ground objects (level 0) - a deck car passes over them.
@@ -554,7 +584,10 @@ public sealed class ObstacleManager
         //    sub-micron rest gap) so the car is truly at rest.
         if (car.Speed > 0.0)
         {
-            car.Speed = Math.Max(0.0, car.Speed - Config.CAR_BRAKING * dt);
+            // The car brakes with ITS OWN capability (Config.ModelFor(model)
+            // .BrakeMps2) — not the global constant. Every model carries today's
+            // 10.0 m/s², so this is a no-op until #21 gives the numbers.
+            car.Speed = Math.Max(0.0, car.Speed - car.BrakeMps2 * dt);
             if (car.Speed < 1e-6) car.Speed = 0.0;
         }
         else if (car.Speed < 0.0)
@@ -623,7 +656,7 @@ public sealed class ObstacleManager
 
     // --- Save / load (obstacle layouts) --------------------------------------
 
-    private sealed record SavedObstacle(int Id, string Type, string Color,
+    private sealed record SavedObstacle(int Id, string Type, string Color, string Model,
                                         double X, double Y, double Heading);
 
     private sealed record SavedLayout(
@@ -666,7 +699,8 @@ public sealed class ObstacleManager
             MapName,
             name,
             DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:sszzz"),
-            Snapshot().Select(o => new SavedObstacle(o.Id, o.Type, o.Color, o.X, o.Y, o.Heading)).ToList());
+            Snapshot().Select(o => new SavedObstacle(o.Id, o.Type, o.Color, o.Model,
+                                                     o.X, o.Y, o.Heading)).ToList());
         File.WriteAllText(path, JsonSerializer.Serialize(payload, _jsonOpts));
         return path;
     }
