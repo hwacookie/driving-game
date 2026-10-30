@@ -931,8 +931,9 @@ class TurnTester:
 
     def segment_geom(self, name: str) -> dict | None:
         """One road segment by NAME ("pkw_n→pkw_s"), in metres, via
-        GET /segment/by/{name}. Cached because the parking scenario asks for the
-        same avenue three times (its length, then where its cars stand)."""
+        GET /segment/by/{name} - index, endpoints, length. Cached, because a
+        scenario that places several cars relative to one another asks for the same
+        avenue repeatedly, and each ask used to be a round trip."""
         cache = self.__dict__.setdefault('_seg_geom_cache', {})
         if name not in cache:
             cache[name] = None
@@ -1024,10 +1025,12 @@ class TurnTester:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        # color pinned to the sedan class: dynamics are per vehicle class
-        # (Config.VEHICLE_CLASS_SPECS) and every baseline in this suite was
-        # calibrated with sedan numbers.
-        requests.post(f"{API_URL}/teleport", json={'random': True, 'color': 'blue'})
+        # model pinned to the sedan: dynamics and size are per model
+        # (Config.MODELS) and every baseline in this suite was calibrated with
+        # sedan numbers. `color` would still work - the host routes a model word
+        # found there and prints DEPRECATED doing so - but it is the paint word
+        # since #18 and this is not about paint.
+        requests.post(f"{API_URL}/teleport", json={'random': True, 'model': 'mercedes_c220'})
         self._wait_for_new_car(old_uid)
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
@@ -1492,11 +1495,12 @@ class TurnTester:
 
             spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
             for seg, prog in self._arc_uniform_spawns(loop, n_cars):
-                # Sedan class for every car: mixed classes would change the
+                # Sedan model for every car: mixed models would change the
                 # calibrated capacity baselines (see create_car_at_start_point).
                 self._api_session.post(f"{API_URL}/teleport", json={
                     'segment': seg, 'progress': prog,
-                    'speed': spawn_speed_mps, 'add': True, 'color': 'blue'}, timeout=5)
+                    'speed': spawn_speed_mps, 'add': True,
+                    'model': 'mercedes_c220'}, timeout=5)
             # Wait until all cars actually exist (queued teleports land
             # one per sim frame - ~17 ms each). Proportional budget: at
             # hundreds of cars a fixed 15 s would time out spuriously if
@@ -1837,10 +1841,15 @@ class TurnTester:
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
         # Cycle through ALL models (Config.MODEL_NAMES) so the run
         # exercises every per-class collision footprint, not just the sedan.
+        # The order IS Config.MODEL_NAMES. It used to be sent under `color`,
+        # which since #18 means PAINT: the host still routes those words to the
+        # model table, but it prints a DEPRECATED line for every single one of
+        # the ~50 cars in this fleet (measured: 101 such lines in one suite run).
         # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
         # "nearest segment midpoint" quantization could put two cars on the
         # same midpoint when n_cars > len(loop).
-        colors = ['blue', 'silver', 'police', 'tan', 'tractor', 'pickup', 'mixer']
+        models = ['mercedes_c220', 'fiat_500', 'bmw_police', 'vw_passat',
+                  'tractor_unit', 'ford_f150', 'mixer_truck']
         offset = self._crossing_safe_offset(loop, n_cars)
         # The spawn discipline (user rule): the fleet must not move AT ALL
         # while it is being placed. A rolling start meant the first cars were
@@ -1857,7 +1866,7 @@ class TurnTester:
             reverse = (k % 2 == 1)
             self._api_session.post(f"{API_URL}/teleport", timeout=5, json={
                 'segment': seg, 'progress': prog, 'speed': 0.0,
-                'add': True, 'color': colors[k % len(colors)],
+                'add': True, 'model': models[k % len(models)],
                 'reverse': reverse})
 
         # Wait until all cars exist (queued teleports land ~1 per frame).
@@ -2590,14 +2599,15 @@ class TurnTester:
                         payload['segment'] = spec['segment']
                     payload['progress'] = spec.get('progress', 0.5)
                     payload['speed'] = spec.get('speed_mps', 0.0)
-                    # WHERE in the road a staged car stands (#31). `lat_m` is the
-                    # lateral offset from the road's CENTRELINE in metres (8.35 is
-                    # the parking-lane centre of the 19.4 m parking avenue, 5.25 is
-                    # where a normal spawn lands); `offset_m` moves the car that many
+                    # WHERE in the road a staged car stands. `lat_m` is the lateral
+                    # offset from the road's CENTRELINE in metres (on the 19.4 m
+                    # parking avenue: driving lanes run 0→7.0 m, the parking lane
+                    # 7.0→9.7 m, and a normal spawn lands at 5.25 m - so 8.35 is
+                    # "in the parking lane"); `offset_m` moves the car that many
                     # metres ALONG the segment from its `progress` point, so a spec
                     # can say "just before the bay" without knowing the segment is
-                    # 300 m long. Both are placement only - a parked car has no route
-                    # and stays where it was put.
+                    # 300 m long. Both are placement only - a parked car has no
+                    # route and stays where it was put.
                     if spec.get('lat_m') is not None:
                         payload['lat_m'] = spec['lat_m']
                     if spec.get('offset_m') is not None:
