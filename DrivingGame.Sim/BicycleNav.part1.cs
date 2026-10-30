@@ -66,6 +66,10 @@ public sealed partial class BicycleNav
     /// <summary>Longitudinal acceleration of THIS car's class (m/s²) - set in
     /// the ctor from Car.Spec (was the shared Config.CAR_ACCELERATION).</summary>
     private readonly double A_CRUISE;
+    /// <summary>The PASSENGER-CAR braking anchor (10.0 m/s²), used where a plan has
+    /// no particular car's capability in mind. A plan that decides how far a
+    /// specific car can actually stop uses `car.BrakeMps2` instead (#21) — a laden
+    /// mixer planned against 10 m/s² would be told it can stop where it cannot.</summary>
     public static readonly double A_BRAKE = Config.CAR_BRAKING;         // m/s^2 (10.0) - same for all classes
     /// <summary>How far ahead the sailing decision looks at the speed profile
     /// when asking "can coasting keep up?" (s).</summary>

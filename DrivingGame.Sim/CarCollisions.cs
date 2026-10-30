@@ -898,9 +898,11 @@ public static class CarCollisions
                 // leader's FINAL rest position, after a reaction interval,
                 // braking at the comfort rate - not the 1 g panic limit from
                 // the leader's CURRENT position. A leader that is BRAKING is
-                // already becoming that wall (its brake lights are on), so
-                // from the moment it brakes its remaining stop distance
-                // vl²/(2·CAR_BRAKING) counts as room and its speed as 0.
+                // already becoming that wall (its brake lights are on), so from
+                // the moment it brakes its remaining stop distance vl²/(2·a) -
+                // with THE LEADER'S OWN capability a (#21: a laden mixer needs more
+                // road than a Golf, and crediting both the follower's 10 m/s²
+                // promises room that is not there) - counts as room, speed as 0.
                 // Measured, fig8_xing: car 30 at 96 km/h behind car 28
                 // braking from 57 km/h, 29.4 m of bumper gap when the old
                 // curve first bound - max braking from there needs 35 m,
@@ -908,7 +910,7 @@ public static class CarCollisions
                 bool leadStopping = o.IsBraking && vl < c.Speed;
                 double roomM = gapM - StandstillGapM;
                 if (leadStopping)
-                    roomM += vl * vl / (2.0 * Config.CAR_BRAKING);
+                    roomM += vl * vl / (2.0 * o.BrakeMps2);
                 double cap = ApproachCapMps(leadStopping ? 0.0 : vl, roomM);
                 if (cap < best) { best = cap; _v1By = o.Uid;
                     _v1Along = along; _v1Lat = lat;
@@ -1371,10 +1373,10 @@ public static class CarCollisions
                 // margin - the GradedCap's recoverable-boundary math assumes
                 // the target keeps moving.
                 double cap = (targetCar.Speed < StationaryCapMps || fbs)
-                    ? Math.Sqrt(2.0 * Config.CAR_BRAKING *
+                    ? Math.Sqrt(2.0 * (yieldUid == c.Uid ? c : o).BrakeMps2 *
                           Math.Max(dMeet - (yieldUid == c.Uid ? c : o).LengthM * 0.5
                                    - StandstillGapM - StopMarginM, 0.0))
-                    : GradedCap(stageS, dMeet);
+                    : GradedCap(stageS, dMeet, (yieldUid == c.Uid ? c : o).BrakeMps2);
 
                 // RBL yield semantics (T_020/T_021, 2026-09-10): the raw
                 // GradedCap let a yielder ROLL INTO the crossing box while
@@ -1528,7 +1530,7 @@ public static class CarCollisions
             c.AlertLastSeenT = simTime;
             int otherUid = pc.Other;
             double ttc = pc.Ttc;
-            double brakingTime = c.Speed > 0.01 ? c.Speed / Config.CAR_BRAKING : double.MaxValue;
+            double brakingTime = c.Speed > 0.01 ? c.Speed / c.BrakeMps2 : double.MaxValue;
 
             if (c.AlertOtherUid == 0)
             {
@@ -1586,7 +1588,7 @@ public static class CarCollisions
                 //      clipped by (a) alone, which stops me 3 m short of the
                 //      point = INSIDE the other car (measured: the fig8_xing
                 //      car 13 vs 37 crash, both stopped nose-on-tail).
-                double cap = GradedCap(Math.Max(ttc, 1.01), pc.DistP);
+                double cap = GradedCap(Math.Max(ttc, 1.01), pc.DistP, c.BrakeMps2);
                 if (carByUid.TryGetValue(otherUid, out var oCar))
                 {
                     double radC = Math.Radians(c.Heading);
@@ -1597,7 +1599,7 @@ public static class CarCollisions
                     double vl = Math.Max(oCar.Speed *
                         (Math.Sin(orad) * fx2 + Math.Cos(orad) * fy2), 0.0);
                     cap = Math.Min(cap, Math.Sqrt(vl * vl +
-                        2.0 * Config.CAR_BRAKING * Math.Max(gapM - StandstillGapM, 0.0)));
+                        2.0 * c.BrakeMps2 * Math.Max(gapM - StandstillGapM, 0.0)));
                 }
                 OfferCap(c.Uid, cap, $"avoid#{otherUid}",
                          $"[R2] self-protection vs car {otherUid} (TTC {ttc:F1} s)", otherUid);
@@ -2474,11 +2476,14 @@ public static class CarCollisions
         return vProj > a.Speed + 0.5;
     }
 
-    static double GradedCap(double stageSeconds, double dM)
+    /// <summary>The staged comfort cap. `brakeMps2` is the braking capability of
+    /// the car being capped (#21) — a 24 t mixer must not be planned against a
+    /// passenger car's 10 m/s², or the curve says it can stop where it cannot.</summary>
+    static double GradedCap(double stageSeconds, double dM, double brakeMps2)
     {
         if (stageSeconds <= 1.0) return 0.0;
         double gap = Math.Max(dM - StandstillGapM, 0.0);
-        double decel = stageSeconds <= 3.0 ? Config.CAR_BRAKING : Config.PARK_BRAKING;
+        double decel = stageSeconds <= 3.0 ? brakeMps2 : Config.PARK_BRAKING;
         return Math.Sqrt(2.0 * decel * gap);
     }
 

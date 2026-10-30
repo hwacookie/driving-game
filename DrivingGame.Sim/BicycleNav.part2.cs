@@ -856,7 +856,7 @@ public sealed partial class BicycleNav
                     {
                         profile[i] = Math.Min(profile[i], Math.Sqrt(
                             JUNCTION_ENTRY_SPEED_M * JUNCTION_ENTRY_SPEED_M +
-                            2 * A_BRAKE * (za - sI)));
+                            2 * _car.BrakeMps2 * (za - sI)));
                         break;
                     }
                 }
@@ -867,7 +867,7 @@ public sealed partial class BicycleNav
         for (int i = n - 2; i >= 0; i--)
         {
             double vNext = profile[i + 1];
-            double vReach = Math.Sqrt(vNext * vNext + 2 * A_BRAKE * d);
+            double vReach = Math.Sqrt(vNext * vNext + 2 * _car.BrakeMps2 * d);
             profile[i] = Math.Min(profile[i], vReach);
         }
         return profile;

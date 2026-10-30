@@ -757,7 +757,7 @@ public sealed partial class BicycleNav
             prof[i] = v;
         }
         for (int i = n - 2; i >= 0; i--)
-            prof[i] = Math.Min(prof[i], Math.Sqrt(prof[i + 1] * prof[i + 1] + 2 * A_BRAKE));
+            prof[i] = Math.Min(prof[i], Math.Sqrt(prof[i + 1] * prof[i + 1] + 2 * _car.BrakeMps2));
         if (reverseZone is not null)
         {
             // Index boundaries: negative EXACTLY between the stop points (int()
@@ -864,7 +864,7 @@ public sealed partial class BicycleNav
             // and d_stop is measured to a point - with A_BRAKE = 10 m/s^2 the bare
             // v^2/2a + 0.3 threshold (0.69 m at 2.8 m/s) would never trigger
             // against that offset.
-            brakingToStop = dStop <= car.Speed * car.Speed / (2.0 * A_BRAKE) + 1.0;
+            brakingToStop = dStop <= car.Speed * car.Speed / (2.0 * car.BrakeMps2) + 1.0;
         }
 
         if (_uturnState == "holding")
