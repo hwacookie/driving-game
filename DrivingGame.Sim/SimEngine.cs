@@ -55,7 +55,19 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      // picture decide a right of way. The role is
                                      // declared from now on; null keeps the old
                                      // inference for a cast that says nothing (#18).
-                                     string? Role = null) : SimCommand;
+                                     string? Role = null,
+                                     // Where to stand it LATERALLY, in metres,
+                                     // signed across the direction of travel (#31):
+                                     // a scenario that needs a car IN the parking
+                                     // lane — to bracket a bay — could ask for a
+                                     // segment and a progress but not for the offset
+                                     // between them, even though a start point can
+                                     // carry one (`park_6lane_parking`, +3.10) and
+                                     // every car already stores `LaneOffsetOverrideM`.
+                                     // null = today: the driving lane of that
+                                     // carriageway. This is placement, not physics:
+                                     // the nav keeps its own lane offset afterwards.
+                                     double? LatOffsetM = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -463,7 +475,8 @@ public sealed class SimEngine
     /// the SAME bend entered two segments earlier kept to 2 m of the centre.
     /// On straight segments the two placements agree exactly. Used by
     /// POST /teleport {"segment": N}.</summary>
-    public Car CreateCarAtSegment(int segIdx, double progress = 0.5, bool reverse = false)
+    public Car CreateCarAtSegment(int segIdx, double progress = 0.5, bool reverse = false,
+                                  double? latOffsetM = null)
     {
         var seg = Network.Segments[segIdx];
         double x = seg.X1 + (seg.X2 - seg.X1) * progress;
@@ -482,7 +495,12 @@ public sealed class SimEngine
         // The lane offset below is applied relative to the ACTUAL heading,
         // so the car still starts in its own right-hand lane.
         if (reverse) h = PosMod(h + 180.0, 360.0);
-        double offsetM = Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
+        // The lateral offset IS the lane this car was placed in: the driving lane
+        // by default, or wherever a spawn named one (#31 — a car staged in the
+        // parking lane to bracket a bay). Stored as the override so the nav agrees
+        // with where the car stands instead of steering it back to the driving
+        // lane on its first tick.
+        double offsetM = latOffsetM ?? Config.LaneBaseOffsetM(seg.Width, seg.Lanes,
                                                 seg.ParkingLaneWidth, seg.Oneway);
         double rad = Math.Radians(h);
         x += Math.Cos(rad) * offsetM;
@@ -556,7 +574,7 @@ public sealed class SimEngine
                 Car newCar;
                 if (tp.Segment is not null)
                     newCar = CreateCarAtSegment(tp.Segment.Value, tp.Progress ?? 0.5,
-                                                tp.Reverse);
+                                                tp.Reverse, tp.LatOffsetM);
                 else
                 {
                     if (!tp.Add)
@@ -1506,6 +1524,13 @@ public sealed class SimEngine
                 // way in is wide, the way out is one meaning per key.
                 ["model"] = c.Model,
                 ["vehicle"] = c.Model,
+                // The model table's size, in METRES (#31), on EVERY car and not just
+                // on the primary: a scenario that sizes a parking bay between two
+                // neighbours has to ask the two that are already standing there, and
+                // a caller that hard-codes a length goes silently wrong the day the
+                // table is retuned.
+                ["length_m"] = Config.ModelFor(c.Model).LengthM,
+                ["width_m"] = Config.ModelFor(c.Model).WidthM,
                 // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
                 // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
                 // the CAR that owns it (0 = nobody). The viewer's car detail
@@ -1656,6 +1681,12 @@ public sealed class SimEngine
                 // Multi-car: display color + the full car list.
                 ["model"] = car.Model,      // the type (#18)
                 ["vehicle"] = car.Model,    // #10's transitional alias
+                // How big that type is, in METRES (#31) — the model table's own
+                // numbers, so a caller that must size something around a car (a
+                // parking bay between two neighbours) reads the truth instead of
+                // hard-coding a length that goes stale the day the table is retuned.
+                ["length_m"] = Config.ModelFor(car.Model).LengthM,
+                ["width_m"] = Config.ModelFor(car.Model).WidthM,
                 ["color"] = car.Color,      // the PAINT — no longer the type
                 // What the PRIMARY is doing (#27). Every other top-level field
                 // already describes the primary car, and the suite reads the

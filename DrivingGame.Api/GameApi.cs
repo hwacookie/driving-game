@@ -282,6 +282,21 @@ public static class GameApi
             }
             if (data.TryGetProperty("progress", out var pr))
                 progress = pr.GetDouble();
+            // Where to stand the car ACROSS the road, in metres, signed (#31):
+            // null/0 is the driving lane it would have spawned in anyway, +3.1 is
+            // the parking lane of the 19.4 m parking avenue. Bounded to ±10.7 m —
+            // the widest carriageway here is 19.4 m, so anything beyond that cannot
+            // be on a road: a car parked in the hedge is worse than a rejected call.
+            double? latOffsetM = null;
+            if (data.TryGetProperty("lat_m", out var lm) && lm.ValueKind != JsonValueKind.Null)
+            {
+                latOffsetM = lm.GetDouble();
+                if (!double.IsFinite(latOffsetM.Value) || Math.Abs(latOffsetM.Value) > 10.7)
+                    return Json(new Dictionary<string, object?>
+                    {
+                        ["error"] = "lat_m must be a finite lateral offset within ±10.7 m",
+                    }, 400);
+            }
             if (data.TryGetProperty("add", out var ad))
                 add = ad.GetBoolean();
             if (data.TryGetProperty("speed", out var sd) && sd.ValueKind != JsonValueKind.Null)
@@ -395,7 +410,7 @@ public static class GameApi
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,
                                     reverse, cruiseKmh, name, detailWindow, tyreLines,
-                                    paint, role));
+                                    paint, role, latOffsetM));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
