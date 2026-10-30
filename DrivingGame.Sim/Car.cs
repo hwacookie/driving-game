@@ -123,6 +123,28 @@ public class Car
 
     // Visual state
     public bool IsBraking { get; internal set; }
+
+    /// <summary>What this car is DOING (#27). Not a flag the caller sets and
+    /// hopes stays true: it is read from the driver, so it cannot drift from what
+    /// the nav is actually doing.
+    ///
+    /// It exists because the sim had to GUESS this. The cap rule that turns on
+    /// brake lights reads "speed sits at a binding cap" as "the driver has their
+    /// foot on the pedal" — true for a car decelerating into a queue, absurd for a
+    /// car that is parked with the engine off. Measured, basic map, one parked Fiat
+    /// 500 at 0.0 km/h: `braking=True` for 5 samples with `cap=avoid#2` while
+    /// another car drove past it. A parked car does not brake; it is parked.</summary>
+    public CarState State
+    {
+        get
+        {
+            var nav = BicycleNav;
+            if (nav is null) return CarState.Driving;    // direct control, no nav
+            if (nav.Parked) return CarState.Parked;      // engine off, no route, stays put
+            if (nav.ParkPhase != "none") return CarState.Parking;   // manoeuvring in
+            return CarState.Driving;
+        }
+    }
     public bool IsAccelerating { get; internal set; }
     /// <summary>Headlights (front, white) on/off - test + REST /toggle only,
     /// no gameplay effect. Independent of TaillightsOn so a QA script can
