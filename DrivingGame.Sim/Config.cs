@@ -92,82 +92,108 @@ public static class Config
     public const double REVERSE_MAX_SPEED_M = 30.0 / 3.6; // ~8.33 m/s
 
     public const double CAR_LENGTH_M = 4.4;    public const double CAR_WIDTH_M = 1.8;
-    /// <summary>Car sprite palette: names the vehicle model each car renders
-    /// (the seven vehicles extracted by tools/make_car_sprites.py; the old
-    /// classic red sprite was dropped - style mismatch, user decision).
-    /// Default assignment for spawned cars: car N gets VEHICLES[(N-1) % 7];
-    /// POST /teleport may override it (validated against this list).
+    // --- Models: one kind of vehicle, plus everything about it that is neither
+    // identity nor paint (issue #18, owner decision 2026-10-30) -------------
+    /// <summary>A MODEL: max speed, acceleration, brake rate and the footprint —
+    /// plus the cornering budget the sim already used and the photo the sprite
+    /// was cut from.
     ///
-    /// This is the VEHICLE, not its paint: the id decides sprite, physics class
-    /// (VEHICLE_CLASS) and footprint (VEHICLE_SIZES). The colour the bodywork is
-    /// drawn in is the separate, visual-only `livery` (#10). The field was called
-    /// `color` while it only picked a picture; on the wire both names are still
-    /// accepted and `/state` answers both, so old clients and tapes stay valid.
+    /// This table replaces three that disagreed about what a vehicle is:
+    /// `VEHICLES` (seven PHOTO names), `VEHICLE_CLASS` (photo → class) and
+    /// `VEHICLE_CLASS_SPECS` / `VEHICLE_SIZES` (class → dynamics, photo → size).
+    /// A model's own numbers sat up to two dictionary hops away, and the
+    /// footprint hung off a picture: `blue` and `silver` were never two kinds of
+    /// vehicle, and `blue`/`tan`/`police` are three different sedans.
+    ///
+    /// Every value is TRANSCRIBED, not retuned: top speed, acceleration and
+    /// lateral budget are the old per-class numbers resolved through the old
+    /// photo → class map; width × length are the old per-photo sizes; the brake
+    /// rate is today's single CAR_BRAKING for all seven, because per-model
+    /// braking is new physics and needs its own change with its own e2e verdicts.
+    /// So this commit must not move a car by one centimetre — if a scenario turns
+    /// differently afterwards, the transcription is wrong, not the world.
     /// </summary>
-    public static readonly string[] VEHICLES =
-        { "blue", "silver", "police", "tan", "tractor", "pickup", "mixer" };
+    public readonly record struct Model(
+        string Name, string Photo,
+        double MaxSpeedMps, double AccelMps2, double BrakeMps2, double LatAccelMps2,
+        double WidthM, double LengthM);
 
-    // --- Per-class dynamics (user decision 2026-09-08: trucks accelerate
-    // slower and are slower than normal cars - top speed, acceleration and
-    // the cornering budget are vehicle-class specific) ---
-    /// <summary>Dynamics of a vehicle class: (top speed m/s, longitudinal
-    /// acceleration m/s², lateral-acceleration budget m/s²). Values grounded
-    /// in real-world figures per class:
-    ///  - car: 200 km/h sim limit (real sedans 220-250), 0-100 ~6.5 s;
-    ///  - compact: 180 km/h, 0-100 ~10 s;
-    ///  - pickup: 180 km/h, 0-100 ~10 s, skidpad ~0.7 g (higher CG than a
-    ///    sedan -> lower cornering budget);
-    ///  - truck (empty tractor unit): legally 80 km/h in DE, 0-80 ~17 s;
-    ///    rollover threshold of heavy vehicles ~0.4-0.5 g (UMTRI) vs >1 g
-    ///    for passenger cars -> clearly lower cornering budget;
-    ///  - heavy_truck (loaded mixer): slowest and lowest cornering budget
-    ///    (high CG, cargo shift).
-    /// The "car" row equals the legacy globals, so sedan behavior (and all
-    /// existing tests) is unchanged.</summary>
-    public readonly record struct VehicleSpec(double TopSpeedMps, double AccelMps2, double LatAccelMax);
-
-    public static readonly Dictionary<string, string> VEHICLE_CLASS = new()
+    public static readonly Dictionary<string, Model> MODELS = new()
     {
-        ["blue"] = "car", ["police"] = "car", ["tan"] = "car",
-        ["silver"] = "compact",
-        ["pickup"] = "pickup",
-        ["tractor"] = "truck", ["mixer"] = "heavy_truck",
+        //                name            photo     max speed  accel  brake  lat   W × L
+        ["mercedes_c220"] = new("mercedes_c220", "blue",
+                                CAR_SPEED, CAR_ACCELERATION, CAR_BRAKING, 4.5, 1.80, 4.40),
+        ["fiat_500"]      = new("fiat_500", "silver",
+                                50.0, 2.5, CAR_BRAKING, 4.5, 1.71, 3.14),
+        ["bmw_police"]    = new("bmw_police", "police",
+                                CAR_SPEED, CAR_ACCELERATION, CAR_BRAKING, 4.5, 1.86, 4.71),
+        ["vw_passat"]     = new("vw_passat", "tan",
+                                CAR_SPEED, CAR_ACCELERATION, CAR_BRAKING, 4.5, 1.86, 4.75),
+        ["tractor_unit"]  = new("tractor_unit", "tractor",
+                                22.2, 1.3, CAR_BRAKING, 3.5, 2.85, 7.00),   // empty unit: 80 km/h legally in DE
+        ["ford_f150"]     = new("ford_f150", "pickup",
+                                50.0, 2.4, CAR_BRAKING, 4.0, 2.09, 5.25),   // higher CG than a sedan
+        ["mixer_truck"]   = new("mixer_truck", "mixer",
+                                22.2, 1.0, CAR_BRAKING, 3.0, 2.80, 8.40),   // loaded: slowest, lowest budget
     };
 
-    //             top speed   accel    lat budget (m/s²)
-    public static readonly Dictionary<string, VehicleSpec> VEHICLE_CLASS_SPECS = new()
+    /// <summary>Model names in the order the round robin hands them out. The
+    /// order is the OLD `VEHICLES` order on purpose: car N has always got the
+    /// N-th entry, so shuffling it would restyle every existing scenario and
+    /// move which car is the heavy one in a cap-key test.</summary>
+    public static readonly string[] MODEL_NAMES =
+        { "mercedes_c220", "fiat_500", "bmw_police", "vw_passat",
+          "tractor_unit", "ford_f150", "mixer_truck" };
+
+    /// <summary>The seven photo names are not model names — but they are what
+    /// every existing client, cockpit script, scenario and recorded tape says.
+    /// They stay valid as aliases, resolved here, in ONE place, so no caller has
+    /// to know which era a string came from. (The wire flip that gives `color`
+    /// back to paint is #18's second slice; until then `color` on the wire still
+    /// names the vehicle and arrives here.)</summary>
+    public static readonly Dictionary<string, string> MODEL_ALIASES = new()
     {
-        ["car"]         = new(CAR_SPEED, CAR_ACCELERATION, 4.5),
-        ["compact"]     = new(50.0,      2.5,              4.5),
-        ["pickup"]      = new(50.0,      2.4,              4.0),
-        ["truck"]       = new(22.2,      1.3,              3.5),
-        ["heavy_truck"] = new(22.2,      1.0,              3.0),
+        ["blue"] = "mercedes_c220", ["silver"] = "fiat_500",
+        ["police"] = "bmw_police", ["tan"] = "vw_passat",
+        ["tractor"] = "tractor_unit", ["pickup"] = "ford_f150",
+        ["mixer"] = "mixer_truck",
     };
 
-    /// <summary>Dynamics for a sprite color (unknown colors fall back to the
-    /// sedan class).</summary>
-    public static VehicleSpec SpecForVehicle(string? color) =>
-        VEHICLE_CLASS_SPECS[VEHICLE_CLASS.GetValueOrDefault(color ?? "", "car")];
-
-    // --- Vehicle footprint (width × length, metres) -------------------------
-    // Single source of truth for each sprite's physical size, shared by the
-    // renderer (MapRenderer stretches textures to these) and the simulation
-    // (CarCollisions gap math + body boxes). Measured from the vehicle photos
-    // (tools/make_car_sprites.py); trucks set to real-world dimensions.
-    public static readonly Dictionary<string, (double WidthM, double LengthM)> VEHICLE_SIZES = new()
+    /// <summary>Resolve anything that names a vehicle — a model name, an old
+    /// photo alias, or nothing at all — to a Model. Unknown and empty answer the
+    /// sedan, exactly as the old class fallback did.</summary>
+    public static Model ModelFor(string? name)
     {
-        ["blue"]    = (1.80, 4.40),   // Mercedes C220d
-        ["silver"]  = (1.71, 3.14),   // Fiat 500
-        ["police"]  = (1.86, 4.71),   // BMW 320i police
-        ["tan"]     = (1.86, 4.75),   // VW Passat B5
-        ["tractor"] = (2.85, 7.00),   // tractor unit: 2.55 m body + ~15 cm mirror each side
-        ["pickup"]  = (2.09, 5.25),   // Ford F-150
-        ["mixer"]   = (2.80, 8.40),   // mixer: 2.50 m body + ~15 cm mirror each side
-    };
+        string key = (name ?? "").Trim();
+        if (MODEL_ALIASES.TryGetValue(key, out var alias)) key = alias;
+        return MODELS.GetValueOrDefault(key, MODELS["mercedes_c220"]);
+    }
 
-    /// <summary>Footprint for a color; unknown colors fall back to the sedan box.</summary>
-    public static (double WidthM, double LengthM) SizeForVehicle(string? color) =>
-        VEHICLE_SIZES.GetValueOrDefault(color ?? "", (CAR_WIDTH_M, CAR_LENGTH_M));
+    /// <summary>Anything the table accepts (model name or alias). The API checks
+    /// this before spawning, so "bogus" is a 400 and never a silent sedan.</summary>
+    public static bool IsModel(string? name)
+    {
+        string key = (name ?? "").Trim();
+        return MODEL_ALIASES.ContainsKey(key) || MODELS.ContainsKey(key);
+    }
+
+    /// <summary>Dynamics in the shape `Car.Spec` has always carried. Kept so the
+    /// driving code does not churn in the same commit as the vocabulary; it
+    /// retires when its last caller does.</summary>
+    public readonly record struct VehicleSpec(double TopSpeedMps, double AccelMps2,
+                                              double LatAccelMax);
+
+    public static VehicleSpec SpecForVehicle(string? name)
+    {
+        var m = ModelFor(name);
+        return new VehicleSpec(m.MaxSpeedMps, m.AccelMps2, m.LatAccelMps2);
+    }
+
+    public static (double WidthM, double LengthM) SizeForVehicle(string? name)
+    {
+        var m = ModelFor(name);
+        return (m.WidthM, m.LengthM);
+    }
 
     // --- Liveries (issue #10: the paint, not the vehicle) -----------------
     /// <summary>Named paints, so a scenario and a tape read as intentions

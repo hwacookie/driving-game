@@ -24,10 +24,10 @@ public class CollisionTests
     /// <summary>Spawns a car at a named start point (Add=true - alongside any
     /// existing cars) and returns the new Car reference, identified by the
     /// uid that appeared after the spawning tick (uids are a process-wide
-    /// monotonic counter, not reset per test). The color is pinned to the
-    /// sedan class on purpose: without it the default uid-based palette
+    /// monotonic counter, not reset per test). The model is pinned to the
+    /// sedan class on purpose: without it the default uid-based model
     /// cycle would hand out truck classes (lower top speed/accel/cornering
-    /// budget - see Config.VEHICLE_CLASS_SPECS) depending on how many cars
+    /// budget - see Config.MODELS) depending on how many cars
     /// earlier tests spawned, and these scenarios compare runs against solo
     /// baselines that must use identical dynamics.</summary>
     static Car SpawnAndGet(SimEngine engine, string startPoint, double progress,

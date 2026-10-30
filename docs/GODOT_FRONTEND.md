@@ -216,7 +216,7 @@ contains no driving logic:
 - **Levels**: bridge decks (`elevated_roads`/`elevated_roadways`/edge lines);
   a car's z-index is `10 + 20*level`, so it passes UNDER a deck and OVER its
   own road.
-- **Cars**: per-uid sprite from `Config.VEHICLES`, stretched to the model's
+- **Cars**: per-uid sprite from the car's `Config.MODEL_NAMES` entry, stretched to the model's
   physical size, corner lights (blinkers orange 0.5 s period, headlights white,
   tail/brake lights red), green/red test pennants, small per-car HUD label
   above the nose, minimap dots, breadcrumb trail accumulated client-side from

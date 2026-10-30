@@ -385,7 +385,7 @@ Content-Type: application/json
 # heading, so the car still starts in its own right-hand lane):
 {"segment": 128, "progress": 0.5, "reverse": true, "add": true}
 
-# Choose the vehicle (validated against Config.VEHICLES; 400 on an unknown
+# Choose the vehicle (validated against Config.MODEL_NAMES + MODEL_ALIASES; 400 on an unknown
 # name). `vehicle` is the name; `color` is the historical spelling and still
 # accepted — and when a request gives both, `vehicle` wins:
 {"start_point": "www_entry", "vehicle": "mixer", "add": true}

@@ -31,11 +31,16 @@ public class Car
 
     /// <summary>Display color (multi-car): assigned deterministically from
     /// the uid by the main loop; "blue" (the sedan) is the default.</summary>
-    public string Vehicle { get; set; } = "blue";
+    public string Model { get; set; } = "mercedes_c220";
 
-    /// <summary>Dynamics of this car's vehicle class (top speed, accel,
-    /// cornering budget) - see Config.VEHICLE_CLASS_SPECS.</summary>
-    public Config.VehicleSpec Spec => Config.SpecForVehicle(Vehicle);
+    /// <summary>Dynamics of this car's MODEL (top speed, accel, cornering
+    /// budget) - one table, one hop: Config.MODELS.</summary>
+    public Config.VehicleSpec Spec => Config.SpecForVehicle(Model);
+    /// <summary>How hard this car stops, m/s². A MODEL property (#18): a Fiat 500
+    /// and a loaded mixer do not share a brake. Today every model carries
+    /// Config.CAR_BRAKING, so this is the plumbing without the physics — the
+    /// numbers are a deliberate later change with its own e2e verdicts.</summary>
+    public double BrakeMps2 => Config.ModelFor(Model).BrakeMps2;
     public double TopSpeedMps => Spec.TopSpeedMps;
     /// <summary>What this car CHOOSES to drive at, m/s (0 = no choice, use the
     /// class limit). The class top speed stays the physical ceiling - a mixer
@@ -69,7 +74,7 @@ public class Car
 
     /// <summary>Physical footprint of this car's sprite class (width × length,
     /// metres) - the same table the renderer draws from (Config.VEHICLE_SIZES).</summary>
-    public (double WidthM, double LengthM) Size => Config.SizeForVehicle(Vehicle);
+    public (double WidthM, double LengthM) Size => Config.SizeForVehicle(Model);
     public double WidthM => Size.WidthM;
     public double LengthM => Size.LengthM;
 
@@ -388,13 +393,13 @@ public class Car
         // Speed control (signed, explicit gear state like a real car)
         if (Speed > 0)                         // moving forward
         {
-            if (brake) Speed -= Config.CAR_BRAKING * dt;
+            if (brake) Speed -= BrakeMps2 * dt;
             else if (accel) Speed += AccelMps2 * dt;
             if (Speed < 0) Speed = 0.0;        // braking ends exactly at zero
         }
         else if (Speed < 0)                    // moving backward
         {
-            if (accel) Speed += Config.CAR_BRAKING * dt;   // W is the brake in reverse
+            if (accel) Speed += BrakeMps2 * dt;   // W is the brake in reverse
             else if (brake) Speed -= AccelMps2 * dt; // S is the throttle in reverse
             if (Speed > 0) Speed = 0.0;        // ...and ends exactly at zero
         }

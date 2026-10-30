@@ -12,13 +12,13 @@ public abstract record SimCommand;
 /// <summary>Teleport: default REPLACES the current car(s) (legacy behavior -
 /// the e2e suite relies on it); Add=true ADDS a fresh car alongside them (parallel
 /// test runs). Segment mode = arbitrary-segment spawn (stress tests, dev).
-/// Vehicle (validated against Config.VEHICLES at the API layer) overrides
+/// Vehicle (validated against Config.MODEL_NAMES at the API layer) overrides
 /// the default uid-based color of the spawned car. Reverse=true spawns the
 /// car facing the OTHER way along the segment (two-way traffic); it starts
 /// in its own right-hand lane and drives the loop backwards.</summary>
 public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      double? Progress, bool Add, double? Speed,
-                                     string? Vehicle = null, bool Reverse = false,
+                                     string? Model = null, bool Reverse = false,
                                      double? CruiseKmh = null,
                                      // The car's NAME (docs/TESTING.md): a
                                      // scenario authors its cast, so it knows
@@ -380,6 +380,14 @@ public sealed class SimEngine
     /// `progress` (0..1) places the car at that fraction along the start
     /// segment from the named node; e2e tests use 0.5 so every scenario starts
     /// mid-segment instead of hugging the junction node.</summary>
+    /// <summary>R35's right-of-way subject. Today it is still INFERRED, but from
+    /// the resolved MODEL ("bmw_police") rather than from the word "police": a
+    /// car that arrived as `tan` cannot become a police car by spelling, and an
+    /// alias still gets the duty it had before. The honest end state is an
+    /// explicit `role` on the request — #18 records that as the next slice, and
+    /// until it lands this is the one place the inference lives.</summary>
+    static bool IsEmergency(string model) => Config.ModelFor(model).Name == "bmw_police";
+
     public Car CreateCar(string? startPoint = null, double? progress = null)
     {
         Car car;
@@ -411,8 +419,8 @@ public sealed class SimEngine
         car.TrailEnabled = true;
         // Multi-car color: deterministic per uid, red first, then the old
         // pygame obstacle palette colors.
-        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
-        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
+        car.Model = Config.MODEL_NAMES[(car.Uid - 1) % Config.MODEL_NAMES.Length];
+        car.EmergencyRole = IsEmergency(car.Model);   // R35: the police car is on duty
         return car;
     }
 
@@ -457,8 +465,8 @@ public sealed class SimEngine
         car.Forward = !reverse;
         car.LaneOffsetOverrideM = offsetM;
         car.TrailEnabled = true;
-        car.Vehicle = Config.VEHICLES[(car.Uid - 1) % Config.VEHICLES.Length];
-        car.EmergencyRole = car.Vehicle == "police";   // R35: the sprite is on duty
+        car.Model = Config.MODEL_NAMES[(car.Uid - 1) % Config.MODEL_NAMES.Length];
+        car.EmergencyRole = IsEmergency(car.Model);   // R35: the police car is on duty
         return car;
     }
 
@@ -533,8 +541,13 @@ public sealed class SimEngine
                 if (tp.Speed is not null) newCar.Speed = tp.Speed.Value;
                 // Explicit color override (validated at the API layer);
                 // otherwise the uid-based palette assignment above stands.
-                if (!string.IsNullOrEmpty(tp.Vehicle)) newCar.Vehicle = tp.Vehicle;
-                newCar.EmergencyRole = newCar.Vehicle == "police";   // R35
+                if (!string.IsNullOrEmpty(tp.Model))
+                    // Store the CANONICAL model, not the word that arrived: a car
+                    // HAS a model (#18), so /state.model answers `vw_passat` even
+                    // when the request said `tan`. The old word stays legal on the
+                    // way in (Config.MODEL_ALIASES) and never escapes as an answer.
+                    newCar.Model = Config.ModelFor(tp.Model).Name;
+                newCar.EmergencyRole = IsEmergency(newCar.Model);   // R35
                 // A SLOW VEHICLE (km/h): the class top speed stays what the
                 // sprite's class says, this car just chooses to drive slower -
                 // a tractor, a delivery van, a car hunting a parking spot. The
@@ -573,7 +586,7 @@ public sealed class SimEngine
                 RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Livery);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
-                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Vehicle}) at segment " +
+                    $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Model}) at segment " +
                     $"{newCar.SegIdx}, heading {newCar.Heading:F1}°" +
                     $"{(tp.Speed is not null ? " (rolling start)" : "")}\n");
                 break;
@@ -1442,8 +1455,9 @@ public sealed class SimEngine
                 // The vehicle id under BOTH names during the transition (#10):
                 // `color` is what every client, script and log reader so far asks
                 // for, `vehicle` is the name that says what the field decides.
-                ["color"] = c.Vehicle,
-                ["vehicle"] = c.Vehicle,
+                ["model"] = c.Model,
+                ["color"] = c.Model,
+                ["vehicle"] = c.Model,
                 // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
                 // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
                 // the CAR that owns it (0 = nobody). The viewer's car detail
@@ -1592,8 +1606,9 @@ public sealed class SimEngine
                 ["blinker_right"] = car.Driver is BicycleDriver br2 ? br2.BlinkerRight : false,
                 ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(car)),
                 // Multi-car: display color + the full car list.
-                ["color"] = car.Vehicle,      // legacy spelling, still answered
-                ["vehicle"] = car.Vehicle,    // (#10) — see the per-car array
+                ["model"] = car.Model,    // the type, by its model name (#18)
+                ["color"] = car.Model,      // legacy spelling, still answered
+                ["vehicle"] = car.Model,    // (#10) — see the per-car array
                 // The same two keys the fleet builder answers — a client must
                 // not get a different contract because the map held one car
                 // instead of fifty.

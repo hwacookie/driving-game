@@ -1714,7 +1714,7 @@ class TurnTester:
                                          aborted=False, game_crashed=False,
                                          crash_info=None)
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
-        # Cycle through ALL vehicle classes (Config.VEHICLES) so the run
+        # Cycle through ALL models (Config.MODEL_NAMES) so the run
         # exercises every per-class collision footprint, not just the sedan.
         # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
         # "nearest segment midpoint" quantization could put two cars on the
