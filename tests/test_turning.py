@@ -367,6 +367,13 @@ def describe_failure(result: dict) -> str | None:
                 "`parked` when it rests)")
     if result.get("reached_expected_segment") and not result.get("stopped_at_end"):
         return "reached the destination but never came to a clean stop"
+    if result.get("bay_clearances_m") is not None and not result.get("bay_ok", True):
+        r, f = result["bay_clearances_m"]
+        side = "the car behind it" if r <= f else "the car in front"
+        return (f"did not fit the bay: clearance to the neighbours "
+                f"rear {r:+.2f} m / front {f:+.2f} m - it is too close to "
+                f"{side} (owner criterion #31: park between two already-parked "
+                f"cars without touching either)")
     if result.get("kerb_check") and result.get("reached_expected_segment") \
             and result.get("stopped_at_end"):
         gaps = result.get("kerb_gaps_m")
@@ -767,7 +774,34 @@ DETERMINISTIC_TESTS = [
     # overtaking lane and from inside the parking lane - are out of the
     # suite; the plain back-in park from the normal lane stays.)
     ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
-     "Back-in park from the right (normal) driving lane", 0.15, True),
+     "Back-in park into a bay between two parked cars", 0.15, True,
+     END_FLAG_PROGRESS, False,
+     # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
+     # cars that are ALREADY parked, and success is "got in without touching either
+     # one". Every number here is derived, not picked:
+     #   pkw_n→pkw_s is 300 m long and the end flag stands at progress 0.5 → s =
+     #   150 m; the sim's own finish rule is "the NOSE touches the mark", so a car
+     #   that parks as intended ends with its CENTRE at 150 − 4.40/2 = 147.8 m
+     #   (4.40 = mercedes_c220.LengthM, the model this scenario pins for itself).
+     #   Neighbours are fiat_500 (3.14 m) at ±4.77 m from that centre, which leaves
+     #   an inner gap of 2·4.77 − 3.14 = 6.40 m for a 4.40 m car: 1.00 m of
+     #   clearance at each end. A German bay is 6.0-6.5 m, so this is a bay and not
+     #   a favour - and a car that misses the bay hits a neighbour, which the sim
+     #   reports as a crash rather than as a measurement.
+     #   lat_m 8.35 stands them in the PARKING lane (measured on this road: 19.4 m
+     #   wide = driving 0→7.0 m + parking 7.0→9.7 m, and a normal spawn lands at
+     #   5.25 m). Both are parked BEFORE the clock starts, so the scenario never has
+     #   to hope they are still there.
+     # The clearances are re-measured at the end from each car's reported length_m,
+     # so if Config's model table is ever retuned the stale numbers in this comment
+     # are visible and the bay check says "too tight" instead of quietly changing
+     # how hard the test is.
+     [{'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': -6.97,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_rear', 'bay_flank': True},
+      {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 2.57,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
     # NEGATIVE TEST (wrong-side detector) - runs LAST on purpose: the old
     # test-14 config. Spawn at 80% of the hairpin approach, i.e. right at the
     # hairpin fillet, already rolling at 50 km/h. The car cannot make the
@@ -894,6 +928,65 @@ class TurnTester:
         except requests.exceptions.RequestException:
             pass
         return None
+
+    def segment_geom(self, name: str) -> dict | None:
+        """One road segment by NAME ("pkw_n→pkw_s"), in metres, via
+        GET /segment/by/{name}. Cached because the parking scenario asks for the
+        same avenue three times (its length, then where its cars stand)."""
+        cache = self.__dict__.setdefault('_seg_geom_cache', {})
+        if name not in cache:
+            cache[name] = None
+            try:
+                r = requests.get(f"{API_URL}/segment/by/{requests.utils.quote(name, safe='')}",
+                                 timeout=3)
+                if r.ok:
+                    body = r.json()
+                    if 'idx' in body:
+                        cache[name] = body
+            except requests.exceptions.RequestException:
+                pass
+        return cache[name]
+
+    def bay_clearances_m(self, state: dict, seg_idx: int, primary_uid: int,
+                         flank_uids: list[int]):
+        """Does the parking car fit BETWEEN its two neighbours, and how much room
+        is left at each end (#31)?
+
+        Returns (clearance_to_rear_neighbour_m, clearance_to_front_neighbour_m) or
+        None when the scene is incomplete. Positions are projected onto the
+        segment chord - pkw is a straight 300 m avenue, so the chord IS the road -
+        and every car's extent comes from its own reported `length_m`: a scenario
+        that believed a fixed car length would quietly narrow or widen the bay the
+        day the model table is retuned, and a bay that changed size is a different
+        test, not a different result.
+
+        Both numbers must be POSITIVE to count as parked in the bay: a negative
+        clearance means the two bodies overlap, which the sim would have called a
+        crash - the pair of numbers is printed either way, because "how close did
+        it get" is the question this scenario exists to answer."""
+        seg = self.get_segment_geometry(seg_idx)
+        if not seg:
+            return None
+        x1, y1 = float(seg['x1']), float(seg['y1'])
+        L = math.hypot(float(seg['x2']) - x1, float(seg['y2']) - y1)
+        if L <= 0:
+            return None
+        ux, uy = (float(seg['x2']) - x1) / L, (float(seg['y2']) - y1) / L
+        by_uid = {c['car_uid']: c for c in state.get('cars', [])}
+
+        def extent(uid):
+            c = by_uid.get(uid)
+            if not c or c.get('length_m') is None:
+                return None
+            s = (c['x'] - x1) * ux + (c['y'] - y1) * uy
+            return (s - c['length_m'] / 2.0, s + c['length_m'] / 2.0)
+
+        prim = extent(primary_uid)
+        flank = [extent(u) for u in flank_uids]
+        if prim is None or len(flank) != 2 or any(f is None for f in flank):
+            return None
+        flank.sort(key=lambda e: e[0])
+        return prim[0] - flank[0][1], flank[1][0] - prim[1]
     
     def send_control(self, **kwargs):
         """Send control inputs."""
@@ -939,7 +1032,7 @@ class TurnTester:
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
                                   speed_mps: float | None = None,
-                                  color: str = "blue", role: str | None = None):
+                                  model: str = "mercedes_c220", role: str | None = None):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -947,11 +1040,13 @@ class TurnTester:
         only the LAST 20% of the start segment (see docs/TESTING.md).
         speed_mps: optional rolling start in m/s (running turn tests spawn
         already moving; parking tests start from rest).
-        color: pinned to the sedan class by default on purpose - dynamics
-        are per vehicle class (Config.VEHICLE_CLASS_SPECS) and every
-        baseline in this suite was calibrated with sedan numbers; without
-        an explicit color the uid-based palette cycle would hand out truck
-        classes (80 km/h top, 1 m/s^2) to later scenarios.
+        model: the vehicle TYPE, pinned to the sedan on purpose - dynamics and size
+        are per model (Config.MODELS, #18) and every baseline in this suite was
+        calibrated with sedan numbers; without an explicit model the uid-based
+        round robin would hand truck models (80 km/h ceiling, 6.8 m/s^2 braking,
+        8.3 m long) to later scenarios. It used to be sent as `color: "blue"`,
+        which since #18 is the PAINT word - the host still routes it to the model
+        table, printing a DEPRECATED line on every single scenario.
         role: the car's ROLE in this scenario ('left_turning_car', …) - sent
         WITH the spawn, so the label exists before the car's first tick (see
         PRIMARY_CAR_ROLE and docs/TESTING.md "Named cars").
@@ -960,7 +1055,7 @@ class TurnTester:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        payload = {'start_point': name, 'progress': progress, 'color': color}
+        payload = {'start_point': name, 'progress': progress, 'model': model}
         if speed_mps is not None:
             payload['speed'] = speed_mps
         if role:
@@ -2477,6 +2572,11 @@ class TurnTester:
             # is how a parked car is staged - the spawn itself is frozen
             # discipline: speed 0, no throttle afterwards.
             extra_uids: list[int] = []
+            # The two cars bracketing the parking bay, when a scenario has them
+            # (#31). Declared with the rest of the cast, NOT inside `if extra_cars:`:
+            # the verdict reads it for every scenario and must not meet a name that
+            # only exists on the branch that staged cars.
+            bay_flank_uids: list[int] = []
             throttle_uids: list[int] = []
             crash_base_extra: dict[int, int] = {}
             primary_uid = self.get_state().get('car_uid')
@@ -2490,6 +2590,24 @@ class TurnTester:
                         payload['segment'] = spec['segment']
                     payload['progress'] = spec.get('progress', 0.5)
                     payload['speed'] = spec.get('speed_mps', 0.0)
+                    # WHERE in the road a staged car stands (#31). `lat_m` is the
+                    # lateral offset from the road's CENTRELINE in metres (8.35 is
+                    # the parking-lane centre of the 19.4 m parking avenue, 5.25 is
+                    # where a normal spawn lands); `offset_m` moves the car that many
+                    # metres ALONG the segment from its `progress` point, so a spec
+                    # can say "just before the bay" without knowing the segment is
+                    # 300 m long. Both are placement only - a parked car has no route
+                    # and stays where it was put.
+                    if spec.get('lat_m') is not None:
+                        payload['lat_m'] = spec['lat_m']
+                    if spec.get('offset_m') is not None:
+                        seg_g = self.segment_geom(spec.get('segment') or '')
+                        if not seg_g:
+                            print(f"   ❌ cannot resolve segment "
+                                  f"'{spec.get('segment')}' for offset_m - aborting")
+                            return self._aborted_result(start_point, direction,
+                                                        target_speed, results)
+                        payload['progress'] += spec['offset_m'] / float(seg_g['length'])
                     if spec.get('cruise_kmh') is not None:
                         # A slow vehicle: the km/h this car chooses to drive at
                         # (its class ceiling still applies) - staging real
@@ -2527,6 +2645,12 @@ class TurnTester:
                         print("   ❌ extra car never spawned - aborting scenario")
                         return self._aborted_result(start_point, direction, target_speed, results)
                     extra_uids.append(got)
+                    if spec.get('bay_flank'):
+                        # One of the two cars that bracket the parking bay (#31):
+                        # remembered by uid so the verdict can say which NEIGHBOUR
+                        # the parking car ended up closest to, instead of only
+                        # "something went wrong at the end flag".
+                        bay_flank_uids.append(got)
                     # Tell the game which car the ROLE went to, as soon as it
                     # exists: the focus announcement at the scenario's start
                     # could not know it (the cast is staged here, after it).
@@ -3319,7 +3443,18 @@ class TurnTester:
                                        for p in cs)
                             perp = min(abs((p[0] - mk[0]) * -tdir[1] + (p[1] - mk[1]) * tdir[0])
                                        for p in cs)
-                            if stopped_ok and (abs(nose) > NOSE_TOUCH_M or
+                            # The nose-vs-mark rule used to judge the PARKING
+                            # scenario against a painted flag. Since #31 the bay is
+                            # the mark: two parked neighbours say where this car had
+                            # to end up, and a car sitting between them with room at
+                            # both ends has parked, however many centimetres its nose
+                            # is off the pennant. Every other scenario keeps the
+                            # finish rule unchanged.
+                            if kerb_check:
+                                print(f"      ↷ nose {nose:+.2f} m off the mark "
+                                      f"(perp {perp:.2f} m) - not judged: the bay "
+                                      f"between the two neighbours decides (#31)")
+                            elif stopped_ok and (abs(nose) > NOSE_TOUCH_M or
                                                perp > FLAG_LANE_HALF_TOL_M):
                                 stopped_ok = False
                                 print(f"      ⚠️  nose {nose:+.2f} m off the mark "
@@ -3428,6 +3563,29 @@ class TurnTester:
             state_trace_ok = ('parking' in state_trace
                               and bool(state_trace) and state_trace[-1] == 'parked')
 
+        # The bay verdict (#31): did it fit BETWEEN the two neighbours, and with how
+        # much room? Printed whenever there is a bay, pass or fail - "1.0 m each
+        # side" and "0.1 m each side" are two different parks that a single ✅ could
+        # never tell apart, and the owner's criterion is exactly this margin.
+        bay = None
+        if bay_flank_uids and reached_expected_segment and len(bay_flank_uids) == 2:
+            try:
+                bay = self.bay_clearances_m(self.get_state(), expected_end_segment,
+                                            primary_uid, bay_flank_uids)
+            except requests.exceptions.RequestException:
+                bay = None
+        bay_ok = True
+        if bay is not None:
+            bay_ok = bay[0] > 0.0 and bay[1] > 0.0
+            print(f"      "
+                  f"{'↔' if bay_ok else '⚠️'}  bay clearance: rear {bay[0]:+.2f} m / "
+                  f"front {bay[1]:+.2f} m "
+                  f"({'fits' if bay_ok else 'does not fit between the two parked cars'})")
+        elif bay_flank_uids and len(bay_flank_uids) != 2:
+            bay_ok = False
+            print(f"      ⚠️  bay needs exactly 2 neighbours, got "
+                  f"{len(bay_flank_uids)}")
+
         # Backstop for wrong-side hits that fell BETWEEN API polls: the
         # lane guard's frame counter is cumulative for the whole game
         # process, so compare it against its value when this scenario
@@ -3526,6 +3684,8 @@ class TurnTester:
             'kerb_gaps_m': kerb_gaps,
             'state_trace': state_trace,
             'state_trace_ok': state_trace_ok,
+            'bay_clearances_m': bay,
+            'bay_ok': bay_ok,
             'max_heading_change_per_frame': max_heading_change_per_frame,
             # Quality metrics (docs §8): centreline crossings of the primary,
             # and the fleet's metres-per-second over the scenario window -
