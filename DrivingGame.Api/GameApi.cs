@@ -289,19 +289,57 @@ public static class GameApi
             bool reverse = false;
             if (data.TryGetProperty("reverse", out var rv))
                 reverse = rv.GetBoolean();
-            // The VEHICLE — the one field that decides sprite, physics class and
-            // footprint. Its historical wire name is `color`, chosen back when the
-            // The MODEL: what kind of vehicle this is (issue #18). `model` is the
-            // name; `vehicle` (#10's word) and the original `color` stay accepted,
-            // in that precedence. A value that arrived under `color` is announced as
-            // DEPRECATED, because #18's second slice gives `color` back to PAINT —
-            // and a request whose meaning silently moves is worse than one that 400s.
+            // ── The MODEL (what kind of vehicle) and the COLOR (how it is painted),
+            // #18. `model` names the type, `vehicle` stays as #10's transitional
+            // name. `color` is the DISPUTED word: it named the type for the whole
+            // history of this code, so every client, cockpit script and scenario
+            // written before today still sends {"color": "pickup"}. A value under
+            // `color` is therefore routed BY LOOKUP: a model word becomes the type
+            // (and prints DEPRECATED), anything else is a paint. That is only safe
+            // because the two value sets are disjoint — the model names and their
+            // seven photo aliases are not colour names, and a paint is `#rrggbb`,
+            // `hue:<0..360>` or a name from Config.COLOR_NAMES.
             string? vehicle = null;
-            bool vehicleFromColorKey = false;
-            foreach (var vkey in new[] { "model", "vehicle", "color" })
-                if (data.TryGetProperty(vkey, out var cd) && cd.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrEmpty(cd.GetString()) && vehicle is null)
-                { vehicle = cd.GetString(); vehicleFromColorKey = vkey == "color"; }
+            foreach (var vkey in new[] { "model", "vehicle" })
+                if (vehicle is null && data.TryGetProperty(vkey, out var vk) &&
+                    vk.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(vk.GetString()))
+                    vehicle = vk.GetString();
+            string? paintWant = null;
+            if (data.TryGetProperty("color", out var cwid) &&
+                cwid.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(cwid.GetString()))
+            {
+                string cval = cwid.GetString()!;
+                if (vehicle is null && Config.IsModel(cval))
+                {
+                    vehicle = cval;
+                    Console.WriteLine($"DEPRECATED color='{cval}' → send model=\""
+                                      + $"{Config.ModelFor(cval).Name}\" "
+                                      + "(`color` is the paint now, issue #18)");
+                }
+                else paintWant = cval;
+            }
+            // `livery` was #10's stand-in word for the paint, coined only because
+            // `color` was occupied. It keeps working; the notice says where to go.
+            if (data.TryGetProperty("livery", out var lvw2) &&
+                lvw2.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(lvw2.GetString()))
+            {
+                if (paintWant is null)
+                    Console.WriteLine($"DEPRECATED livery='{lvw2.GetString()}' → send color=… "
+                                      + "(`livery` was a stand-in, issue #18)");
+                paintWant ??= lvw2.GetString();
+            }
+            // Why the car is on duty: DECLARED, not read off a picture (#18).
+            string? role = null;
+            if (data.TryGetProperty("role", out var rolw) &&
+                rolw.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(rolw.GetString()))
+            {
+                role = rolw.GetString()!.ToLowerInvariant();
+                if (role != "emergency" && role != "civilian")
+                    return Json(new Dictionary<string, object?>
+                    {
+                        ["error"] = $"unknown role '{role}': expected \"emergency\" or \"civilian\"",
+                    }, 400);
+            }
             // A slow vehicle: the km/h this car chooses to drive at (its class
             // ceiling still applies). Staging real slow traffic - R32 passes a
             // crawler, it does not pass a queue lead.
@@ -326,21 +364,20 @@ public static class GameApi
             if (data.TryGetProperty("tyre_lines", out var tlw) &&
                 tlw.ValueKind != JsonValueKind.Null)
                 tyreLines = tlw.GetBoolean();
-            // The car's PAINT (issue #10): a livery name, `#rrggbb` or `hue:N`.
-            // Unresolvable is a 400, never a silent fallback - the same rule the
-            // segment name follows, because a test that asked for "crimsn" and
-            // got a grey car would report a colour it never staged.
-            string? livery = null;
-            if (data.TryGetProperty("livery", out var lvw) &&
-                lvw.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrEmpty(lvw.GetString()))
+            // The car's PAINT (#18: the word is `color`): a colour name from
+            // Config.COLOR_NAMES, `#rrggbb` or `hue:N`. Unresolvable is a 400, never
+            // a silent fallback - the rule #10 set for `livery`, kept verbatim for
+            // the new word, because a test that asked for "crimsn" and got a
+            // photographed sedan would report a colour it never staged.
+            string? paint = null;
+            if (paintWant is not null)
             {
-                livery = Config.ResolveLivery(lvw.GetString());
-                if (livery is null)
+                paint = Config.ResolveColor(paintWant);
+                if (paint is null)
                     return Json(new Dictionary<string, object?>
                     {
-                        ["error"] = $"unknown livery '{lvw.GetString()}': expected one of " +
-                                    string.Join(", ", Config.LIVERIES.Keys) +
+                        ["error"] = $"unknown color '{paintWant}': expected one of " +
+                                    string.Join(", ", Config.COLOR_NAMES.Keys) +
                                     ", or #rrggbb, or hue:<0..360>",
                     }, 400);
             }
@@ -354,14 +391,11 @@ public static class GameApi
                     ["error"] = $"invalid model '{vehicle}': expected one of " +
                                 string.Join(", ", Config.MODEL_NAMES),
                 }, 400);
-            if (vehicle is not null && vehicleFromColorKey)
-                Console.WriteLine($"DEPRECATED color='{vehicle}' → send model=\"{Config.ModelFor(vehicle).Name}\" " +
-                                  "(`color` becomes the paint, issue #18)");
 
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,
                                     reverse, cruiseKmh, name, detailWindow, tyreLines,
-                                    livery));
+                                    paint, role));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
@@ -383,17 +417,20 @@ public static class GameApi
                     { ["error"] = "caropts needs a numeric 'uid' — which car?" }, 400);
             int cuid = (int)uv.GetDouble();
 
-            string? cliv = null;
-            if (data.TryGetProperty("livery", out var clv) &&
-                clv.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrEmpty(clv.GetString()))
+            // The paint: `color` (#18) or `livery` (#10's stand-in, still read).
+            string? cpaint = null, cpaintWant = null;
+            foreach (var pkey in new[] { "color", "livery" })
+                if (cpaintWant is null && data.TryGetProperty(pkey, out var clv) &&
+                    clv.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(clv.GetString()))
+                    cpaintWant = clv.GetString();
+            if (cpaintWant is not null)
             {
-                cliv = Config.ResolveLivery(clv.GetString());
-                if (cliv is null)
+                cpaint = Config.ResolveColor(cpaintWant);
+                if (cpaint is null)
                     return Json(new Dictionary<string, object?>
                     {
-                        ["error"] = $"unknown livery '{clv.GetString()}': expected one of " +
-                                    string.Join(", ", Config.LIVERIES.Keys) +
+                        ["error"] = $"unknown color '{cpaintWant}': expected one of " +
+                                    string.Join(", ", Config.COLOR_NAMES.Keys) +
                                     ", or #rrggbb, or hue:<0..360>",
                     }, 400);
             }
@@ -402,14 +439,14 @@ public static class GameApi
                 ctracks = ctl.GetBoolean();
             if (data.TryGetProperty("detail_window", out var cdt) && cdt.ValueKind != JsonValueKind.Null)
                 cdetail = cdt.GetBoolean();
-            if (cliv is null && ctracks is null && cdetail is null)
+            if (cpaint is null && ctracks is null && cdetail is null)
                 return Json(new Dictionary<string, object?>
                 {
                     ["error"] = "caropts changes nothing: give at least one of " +
-                                "livery, tyre_lines, detail_window",
+                                "color (or livery), tyre_lines, detail_window",
                 }, 400);
 
-            engine.EnqueueCommand(new CarOptsCommand(cuid, cliv, ctracks, cdetail));
+            engine.EnqueueCommand(new CarOptsCommand(cuid, cpaint, ctracks, cdetail));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,

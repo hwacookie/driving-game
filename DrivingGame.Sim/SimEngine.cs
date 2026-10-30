@@ -43,13 +43,19 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      // tape's header for the reviewer.
                                      bool? DetailWindow = null,
                                      bool? TyreLines = null,
-                                     // The car's PAINT, already resolved to
-                                     // `#rrggbb` by the API (issue #10). null =
-                                     // no livery, i.e. the photographed colour
-                                     // of the vehicle. Visual only: the vehicle
-                                     // id (still spelled `color` on the wire for
-                                     // compatibility) decides dynamics and size.
-                                     string? Livery = null) : SimCommand;
+                                     // The car's PAINT, resolved to `#rrggbb` by the
+                                     // API (#18: the word `color` belongs to this,
+                                     // not to the type). null = show the photographed
+                                     // colour of the model. Visual only - never
+                                     // dynamics, never the footprint.
+                                     string? Color = null,
+                                     // WHY a car is on duty: "emergency" | "civilian".
+                                     // R35 used to read it off the sprite name
+                                     // (`car.color == "police"`), which made a
+                                     // picture decide a right of way. The role is
+                                     // declared from now on; null keeps the old
+                                     // inference for a cast that says nothing (#18).
+                                     string? Role = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -66,7 +72,7 @@ public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
 /// completed between the request and the tick that runs it. Every accepted
 /// change is written to the tape as a substep-keyed event, so a review replays
 /// the MOMENT rather than only the result.</summary>
-public sealed record CarOptsCommand(int Uid, string? Livery, bool? TyreLines,
+public sealed record CarOptsCommand(int Uid, string? Color, bool? TyreLines,
                                     bool? DetailWindow) : SimCommand;
 
 /// <summary>"validator" is global; "breadcrumbs"/"mode" are per-car when a
@@ -547,7 +553,13 @@ public sealed class SimEngine
                     // when the request said `tan`. The old word stays legal on the
                     // way in (Config.MODEL_ALIASES) and never escapes as an answer.
                     newCar.Model = Config.ModelFor(tp.Model).Name;
-                newCar.EmergencyRole = IsEmergency(newCar.Model);   // R35
+                newCar.EmergencyRole = tp.Role switch
+                {
+                    "emergency" => true,
+                    "civilian" => false,
+                    // Nothing declared: the legacy inference, and only here.
+                    _ => IsEmergency(newCar.Model),
+                };   // R35
                 // A SLOW VEHICLE (km/h): the class top speed stays what the
                 // sprite's class says, this car just chooses to drive slower -
                 // a tractor, a delivery van, a car hunting a parking spot. The
@@ -582,8 +594,8 @@ public sealed class SimEngine
                 // with the same windows and the same tracks the test asked for.
                 newCar.OptDetailWindow = tp.DetailWindow;
                 newCar.OptTyreLines = tp.TyreLines;
-                newCar.Livery = tp.Livery;
-                RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Livery);
+                newCar.Color = tp.Color;
+                RunTape.SetCarOptions(newCar.Uid, tp.DetailWindow, tp.TyreLines, tp.Color);
                 _followUid = newCar.Uid;
                 Console.WriteLine(
                     $"\n🔄 {(tp.Add ? "Added" : "New")} car #{newCar.Uid} ({newCar.Model}) at segment " +
@@ -683,17 +695,17 @@ public sealed class SimEngine
             {
                 if (!_cars.TryGetValue(co.Uid, out var oc)) break;   // gone by now
                 bool any = false;
-                if (!string.IsNullOrEmpty(co.Livery) && oc.Livery != co.Livery)
-                { oc.Livery = co.Livery; any = true; }
+                if (!string.IsNullOrEmpty(co.Color) && oc.Color != co.Color)
+                { oc.Color = co.Color; any = true; }
                 if (co.TyreLines.HasValue && oc.OptTyreLines != co.TyreLines)
                 { oc.OptTyreLines = co.TyreLines; any = true; }
                 if (co.DetailWindow.HasValue && oc.OptDetailWindow != co.DetailWindow)
                 { oc.OptDetailWindow = co.DetailWindow; any = true; }
                 if (!any) break;      // a change that changes nothing records nothing
                 RunTape.NoteCarOptions(_simStepsTotal, oc.Uid,
-                                       co.DetailWindow, co.TyreLines, co.Livery);
+                                       co.DetailWindow, co.TyreLines, co.Color);
                 Console.WriteLine($"\n🎨 API: car #{oc.Uid} options changed — " +
-                                  (co.Livery != null ? $"livery {co.Livery} " : "") +
+                                  (co.Color != null ? $"color {co.Color} " : "") +
                                   (co.TyreLines.HasValue ? $"tyre_lines {(co.TyreLines == true ? "on" : "off")} " : "") +
                                   (co.DetailWindow.HasValue ? $"detail_window {(co.DetailWindow == true ? "on" : "off")}" : "") +
                                   $"(step {_simStepsTotal})");
@@ -1417,9 +1429,12 @@ public sealed class SimEngine
                 // standing behaviour instead of guessing (issue #9).
                 ["detail_window"] = c.OptDetailWindow,
                 ["tyre_lines"] = c.OptTyreLines,
-                // `#rrggbb` when the car carries a livery, null when it shows the
-                // photographed colour of its vehicle (issue #10).
-                ["livery"] = c.Livery,
+                // The PAINT, under the word the model reserves for it (#18):
+                // `#rrggbb` when the car is repainted, null when it shows the
+                // photographed colour of its model. `livery` stays answered as the
+                // alias #10 introduced, so a client written last week still paints.
+                ["color"] = c.Color,
+                ["livery"] = c.Color,
                 ["progress"] = c.Progress,
                 ["on_road"] = c.IsOnRoad(Network),
                 ["wrong_side"] = pcs.OnWrongSide,
@@ -1452,11 +1467,12 @@ public sealed class SimEngine
                 ["braking"] = c.IsBraking,
                 ["headlights_on"] = c.HeadlightsOn,
                 ["taillights_on"] = c.TaillightsOn,
-                // The vehicle id under BOTH names during the transition (#10):
-                // `color` is what every client, script and log reader so far asks
-                // for, `vehicle` is the name that says what the field decides.
+                // The TYPE is `model` (#18). `vehicle` stays answered as #10's
+                // transitional name; `color` does NOT name the type any more - that
+                // is the flip this slice exists for, and it is why /teleport still
+                // ACCEPTS a model word under `color` (with a DEPRECATED line): the
+                // way in is wide, the way out is one meaning per key.
                 ["model"] = c.Model,
-                ["color"] = c.Model,
                 ["vehicle"] = c.Model,
                 // WHY this car is slow right now, as DATA (docs/CAR_DETAIL_WINDOW.md):
                 // `cap_key` is the rule (`avoid#12`, `r32#passive`), `held_by`
@@ -1606,9 +1622,9 @@ public sealed class SimEngine
                 ["blinker_right"] = car.Driver is BicycleDriver br2 ? br2.BlinkerRight : false,
                 ["lane_guard_stats"] = LgStatsPayload(LaneGuard.Stats(car)),
                 // Multi-car: display color + the full car list.
-                ["model"] = car.Model,    // the type, by its model name (#18)
-                ["color"] = car.Model,      // legacy spelling, still answered
-                ["vehicle"] = car.Model,    // (#10) — see the per-car array
+                ["model"] = car.Model,      // the type (#18)
+                ["vehicle"] = car.Model,    // #10's transitional alias
+                ["color"] = car.Color,      // the PAINT — no longer the type
                 // The same two keys the fleet builder answers — a client must
                 // not get a different contract because the map held one car
                 // instead of fifty.

@@ -53,8 +53,8 @@ hosts):
 | GET | `/car/{uid}/decisions` | that car's rule log (events, newest last) |
 | POST | `/control` | sustained keys + one-shot `hazard` |
 | POST | `/reset` | all control inputs false |
-| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `vehicle`/`color`, `reverse`, `livery`, `detail_window`, `tyre_lines`) |
-| POST | `/caropts` | change one car's `livery` / `tyre_lines` / `detail_window` during the run (uid required) |
+| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `model`, `color`, `role`, `reverse`, `detail_window`, `tyre_lines`) |
+| POST | `/caropts` | change one car's `color` / `tyre_lines` / `detail_window` during the run (uid required) |
 | POST | `/park` | park an existing car where it stands — the R32 obstruction primitive |
 | POST | `/follow` | re-point the PRIMARY (followed) car at another uid |
 | POST | `/cars` | `clear` / `remove` by uid |
@@ -280,8 +280,8 @@ exported in a `cars` array:
   {"car_uid": 1, "x": ..., "y": ..., "heading": ..., "speed_kmh": ...,
    "level": 0, "segment": 42, "progress": 0.65, "on_road": true,
    "wrong_side": false, "blinker_left": false, "blinker_right": true,
-   "hazard": false, "color": "blue", "vehicle": "blue",
-   "detail_window": true, "tyre_lines": false, "livery": "#c62828",
+   "hazard": false, "model": "mercedes_c220", "vehicle": "mercedes_c220",
+   "detail_window": true, "tyre_lines": false, "color": "#c62828",
    "in_contact": false, "crash_episodes": 0, "contact_with": 0,
    "body_corners": [[x, y], [x, y], [x, y], [x, y]],
    "driver": "BICYCLE",
@@ -294,20 +294,34 @@ from it: `blue`, `silver`, `police`, `tan`, `tractor` (Sattelschlepper engine
 unit), `pickup`, `mixer` - assigned deterministically as
 `VEHICLES[(uid-1) % 7]`.
 
-> **`vehicle` and `color` are the same field** (#10). The historical name is
-> `color` — coined when the field only picked a picture, before it also picked
-> class and size — and it is what every existing client, cockpit script and
-> recorded tape asks for. So `/state` answers **both** keys with one value and
-> `/teleport` **accepts both**, `vehicle` winning when a request gives both.
-> What did NOT move is the tape's file format: its record line keeps the field in
-> place and the legend keeps saying `color`, because renaming a column would
-> silently re-read every old tape.
+> **Four words, four different jobs** (#18 settled them; an id is not one of
+> them — `car_uid` names ONE car and describes nothing):
+>
+> | word | what it names | example |
+> |---|---|---|
+> | `model` | the TYPE of vehicle — sprite, dynamics and footprint come from it | `mercedes_c220`, `mixer_truck` |
+> | `color` | the PAINT, visual only | `#c62828`, `crimson`, `hue:190` |
+> | `role` | why the car is on duty (R35's right of way) | `emergency`, `civilian` |
+> | `car_uid` | this one car on the map | `103` |
+>
+> `color` named the TYPE for the whole history of this code — that is the tangle
+> #18 unties, and the transition is deliberately one-directional. `/teleport`
+> still **accepts** a model word under `color` (routed by lookup, and it prints
+> `DEPRECATED color='pickup' → send model="ford_f150"`), but `/state` no longer
+> **answers** the type there: the type is `model` (+ `vehicle`, #10's transitional
+> alias), the paint is `color` (+ `livery`, #10's stand-in word). A value may mean
+> two things on the way in for a while; on the way out it means exactly one.
+>
+> The tape moved one token and no columns: the record line keeps the type in the
+> same field and the legend now says `model` (readers still accept `color` for
+> tapes written before this), and the header's paint token is `color=` while
+> `livery=` stays readable.
 
 The last three fields are the **per-car view options** a scenario declared at
 staging (issues #9, #10) and answer `null` when nothing was said — which is a
 different fact from `false`, because "not said" leaves the standing behaviour
-in force while "off" overrides it. `livery` is the car's PAINT (`#rrggbb`) or
-`null` for the photographed colour of the vehicle; it is visual only and never
+in force while "off" overrides it. `color` is the car's PAINT (`#rrggbb`) or
+`null` for the photographed colour of its model; it is visual only and never
 changes dynamics, size or sprite.
 
 Other per-car fields worth knowing:
@@ -391,11 +405,11 @@ Content-Type: application/json
 {"start_point": "www_entry", "vehicle": "mixer", "add": true}
 
 # Say what the CLIENT should show for this car (issue #9) and paint it
-# (issue #10). Absent = undeclared = the standing behaviour; `livery` is
+# (issue #18). Absent = undeclared = the standing behaviour; `color` is
 # a name from Config.LIVERIES, a `#rrggbb`, or `hue:<0..360>`, and 400s
 # on anything else rather than silently spawning a grey car:
 {"start_point": "www_entry", "color": "blue", "add": true,
- "detail_window": true, "tyre_lines": true, "livery": "crimson"}
+ "detail_window": true, "tyre_lines": true, "color": "crimson"}
 ```
 Default behavior is REPLACE: all current cars are removed and one fresh
 car appears (the e2e suite and cockpit rely on this). With
@@ -416,7 +430,7 @@ teleports is never applied before them).
 POST /caropts
 Content-Type: application/json
 
-{"uid": 2, "livery": "amber"}                        # repaint it
+{"uid": 2, "color": "amber"}                        # repaint it
 {"uid": 2, "tyre_lines": true}                       # draw its tracks
 {"uid": 2, "detail_window": false}                   # un-ask its window
 ```
@@ -433,8 +447,8 @@ substep-keyed line, beside the staged declaration — and a review therefore
 shows the value the car wore AT THE CURSOR, not the one it finished with:
 
 ```
-# DGTAP1 map=basic … caropts=1:tracks=on+livery=c62828     ← how the cast was born
-# caropts step=82 uid=1 livery=ef6c00                      ← what it became
+# DGTAP1 map=basic … caropts=1:tracks=on+color=c62828     ← how the cast was born
+# caropts step=82 uid=1 color=ef6c00                      ← what it became
 ```
 
 A field that was not part of the change writes **no** token: an absent token

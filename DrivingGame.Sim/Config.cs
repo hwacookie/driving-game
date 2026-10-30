@@ -201,7 +201,7 @@ public static class Config
     /// like and NOTHING else - never its dynamics class, never its footprint,
     /// which is exactly the entanglement `color` created (asking for another
     /// colour today means replacing a sedan with an 8.4 m truck).</summary>
-    public static readonly Dictionary<string, string> LIVERIES = new()
+    public static readonly Dictionary<string, string> COLOR_NAMES = new()
     {
         ["crimson"]  = "#c62828", ["amber"]    = "#ef6c00",
         ["ochre"]    = "#a8842c", ["moss"]     = "#4b7f3f",
@@ -212,16 +212,16 @@ public static class Config
     };
 
     /// <summary>A livery request to `#rrggbb`, or null for "no livery" (the car
-    /// keeps its photographed colour). Accepted: a name from <see cref="LIVERIES"/>
+    /// keeps its photographed colour). Accepted: a name from <see cref="COLOR_NAMES"/>
     /// (case-insensitive), `#rgb`/`#rrggbb`, or `hue:&lt;0..360&gt;` at a fixed
     /// saturation and lightness for experiments. Unresolvable input is null
     /// rather than a guess - the API answers 400 so a typo is heard about, not
     /// driven around in a random colour.</summary>
-    public static string? ResolveLivery(string? want)
+    public static string? ResolveColor(string? want)
     {
         if (string.IsNullOrWhiteSpace(want)) return null;
         var w = want.Trim();
-        if (LIVERIES.TryGetValue(w.ToLowerInvariant(), out var named)) return named;
+        if (COLOR_NAMES.TryGetValue(w.ToLowerInvariant(), out var named)) return named;
         if (w.StartsWith("#"))
         {
             var h = w.Substring(1);

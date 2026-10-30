@@ -120,14 +120,14 @@ public partial class MapRenderer : Node2D
     /// lines, its paint. A uid absent from here was never declared — which is
     /// NOT the same fact as a declared "off": the first keeps the standing
     /// behaviour, the second turns it off.</summary>
-    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)> _tapeOpts = new();
+    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Color)> _tapeOpts = new();
 
     // Option CHANGES during the run (issue #10): the tape's `# caropts step=…`
     // lines, and the fold of them over the staged header at the cursor.
-    private readonly List<(long Step, long Uid, bool? Detail, bool? Tracks, string? Livery)>
+    private readonly List<(long Step, long Uid, bool? Detail, bool? Tracks, string? Color)>
         _tapeOptEvents = new();
     private long _optFoldStep = -1L;
-    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Livery)>
+    private readonly Dictionary<long, (bool? Detail, bool? Tracks, string? Color)>
         _tapeOptsAtCursor = new();
 
     /// <summary>The per-car options IN FORCE at the cursor: what the cast was
@@ -136,7 +136,7 @@ public partial class MapRenderer : Node2D
     /// cached otherwise, so scrubbing does not walk the event list per car per
     /// frame. This is what lets one recording show the paint a car wore at 12 s
     /// and the one it wore at 40 s as two facts of the same run (#10).</summary>
-    (bool? Detail, bool? Tracks, string? Livery) TapeOptionAt(long uid)
+    (bool? Detail, bool? Tracks, string? Color) TapeOptionAt(long uid)
     {
         long step = _tape.Count == 0 ? -1L : _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)].Step;
         if (step != _optFoldStep)
@@ -150,7 +150,7 @@ public partial class MapRenderer : Node2D
                 _tapeOptsAtCursor.TryGetValue(ev.Uid, out var cur);
                 _tapeOptsAtCursor[ev.Uid] = (ev.Detail ?? cur.Detail,
                                              ev.Tracks ?? cur.Tracks,
-                                             string.IsNullOrEmpty(ev.Livery) ? cur.Livery : ev.Livery);
+                                             string.IsNullOrEmpty(ev.Color) ? cur.Color : ev.Color);
             }
         }
         return _tapeOptsAtCursor.TryGetValue(uid, out var v) ? v : (null, null, null);
@@ -1188,8 +1188,9 @@ public partial class MapRenderer : Node2D
                             string v = bit.Substring(eq + 1);
                             if (bit.Substring(0, eq) == "detail") det = v == "on";
                             else if (bit.Substring(0, eq) == "tracks") trk = v == "on";
-                            else if (bit.Substring(0, eq) == "livery" && v.Length == 6)
-                                liv = "#" + v;
+                            else if ((bit.Substring(0, eq) == "color" ||
+                                      bit.Substring(0, eq) == "livery") && v.Length == 6)
+                                liv = "#" + v;   // `livery=`: a tape written before #18
                         }
                         if (det is not null || trk is not null || liv is not null)
                             _tapeOpts[optUid] = (det, trk, liv);
@@ -1211,7 +1212,8 @@ public partial class MapRenderer : Node2D
                         string ck = tok.Substring(0, ceq), cv = tok.Substring(ceq + 1);
                         if (ck == "step") long.TryParse(cv, out ceStep);
                         else if (ck == "uid") long.TryParse(cv, out ceUid);
-                        else if (ck == "livery" && cv.Length == 6) ceLiv = "#" + cv;
+                        else if ((ck == "color" || ck == "livery") && cv.Length == 6)
+                            ceLiv = "#" + cv;    // `livery=`: the pre-#18 token
                         else if (ck == "detail") ceDet = cv == "on";
                         else if (ck == "tracks") ceTrk = cv == "on";
                     }
@@ -1404,7 +1406,7 @@ public partial class MapRenderer : Node2D
             // colour", so a run staged before liveries existed - or one that says
             // nothing - reviews exactly as it did yesterday.
             var carOpts = TapeOptionAt(cf.Uid);   // staged + changes up to here
-            meta.Livery = carOpts.Livery ?? "";
+            meta.Color = carOpts.Color ?? "";
             meta.BlinkL = (cf.Blinkers & 1) > 0;
             meta.BlinkR = (cf.Blinkers & 2) > 0;
             meta.Hazard = false;

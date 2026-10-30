@@ -64,7 +64,7 @@ public class Car
     /// colour of this vehicle" (issue #10). Purely visual: dynamics and
     /// footprint come from the vehicle, never from here - that separation is
     /// the reason this field exists.</summary>
-    public string? Livery { get; internal set; }
+    public string? Color { get; internal set; }
     /// <summary>The speed that actually applies: the driver's choice inside the
     /// class ceiling.</summary>
     public double EffectiveTopMps => CruiseCapMps > 0.0

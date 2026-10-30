@@ -71,7 +71,8 @@ public static class CrashDumper
         new()
         {
             ["uid"] = c.Uid,
-            ["color"] = c.Model,
+            ["model"] = c.Model,
+            ["color"] = c.Color,      // the paint, per #18 (null = photographed colour)
             ["driver"] = c.Driver?.GetName() ?? "FREE",
             ["pose"] = "pre-step (post-rollback)",
             ["x"] = Math.Round(c.X, 3),

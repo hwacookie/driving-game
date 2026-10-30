@@ -53,19 +53,19 @@ public class TapeCarOptionEventsTests : IDisposable
     {
         var car = ProbeCar("blue");
         RunTape.Start("basic", 1.0 / 60.0, "hash42");
-        RunTape.SetCarOptions(car.Uid, detail: true, tracks: true, livery: "#2e7d32");
+        RunTape.SetCarOptions(car.Uid, detail: true, tracks: true, color: "#2e7d32");
         RunTape.Record(60, new List<Car> { car }, new Dictionary<int, bool>(),
                        new Dictionary<int, string> { [car.Uid] = "repainted" }, 4.0, 1.0, null);
-        RunTape.NoteCarOptions(601, car.Uid, detail: null, tracks: null, livery: "#123456");
+        RunTape.NoteCarOptions(601, car.Uid, detail: null, tracks: null, color: "#123456");
         var path = RunTape.Save(Path.Combine(_dir, "paint.txt"));
         Assert.NotNull(path);
 
         var lines = File.ReadAllLines(path!);
         var ev = lines.Single(l => l.StartsWith("# caropts "));
-        Assert.Equal($"# caropts step=601 uid={car.Uid} livery=123456", ev);
+        Assert.Equal($"# caropts step=601 uid={car.Uid} color=123456", ev);
         // The staged header is NOT rewritten by a change: it stays the birth
         // state, so the fold (header → events) is the only place the two meet.
-        Assert.Contains($"caropts={car.Uid}:detail=on+tracks=on+livery=2e7d32",
+        Assert.Contains($"caropts={car.Uid}:detail=on+tracks=on+color=2e7d32",
                         lines.First(l => l.StartsWith("# DGTAP1")));
     }
 
@@ -78,9 +78,9 @@ public class TapeCarOptionEventsTests : IDisposable
         RunTape.Record(1, new List<Car> { a, b }, new Dictionary<int, bool>(),
                        new Dictionary<int, string> { [a.Uid] = "a", [b.Uid] = "b" },
                        4.0, 1.0, null);
-        RunTape.NoteCarOptions(120, a.Uid, detail: null, tracks: false, livery: null);
-        RunTape.NoteCarOptions(300, a.Uid, detail: null, tracks: null, livery: "#00aa11");
-        RunTape.NoteCarOptions(480, b.Uid, detail: true, tracks: true, livery: null);
+        RunTape.NoteCarOptions(120, a.Uid, detail: null, tracks: false, color: null);
+        RunTape.NoteCarOptions(300, a.Uid, detail: null, tracks: null, color: "#00aa11");
+        RunTape.NoteCarOptions(480, b.Uid, detail: true, tracks: true, color: null);
         var path = RunTape.Save(Path.Combine(_dir, "three.txt"));
 
         RunTape.Stop(); RunTape.Clear();
@@ -90,9 +90,9 @@ public class TapeCarOptionEventsTests : IDisposable
         Assert.Equal(120, back[0].Step);          // tape order survives
         Assert.Equal(a.Uid, back[0].Uid);
         Assert.False(back[0].Tracks);             // DECLARED off…
-        Assert.Null(back[0].Livery);              // …and untouched paint
+        Assert.Null(back[0].Color);              // …and untouched paint
         Assert.Null(back[0].Detail);              // …and nothing said about a window
-        Assert.Equal("#00aa11", back[1].Livery);
+        Assert.Equal("#00aa11", back[1].Color);
         Assert.True(back[2].Detail);
         Assert.True(back[2].Tracks);
         Assert.Equal(b.Uid, back[2].Uid);
@@ -102,15 +102,15 @@ public class TapeCarOptionEventsTests : IDisposable
     public void AChangeIsNotAHeaderToken_TheTwoParsesStayApart()
     {
         // The header branch reads `caropts=`; an event line is `# caropts step=…`.
-        // If the event's own tokens (uid=, livery=) ever reached the header parse,
+        // If the event's own tokens (uid=, color=) ever reached the header parse,
         // a review would take a CHANGE for a BIRTH fact and the fold would double
         // it — so the header line is matched by name, not by substring.
         var car = ProbeCar("blue");
         RunTape.Start("basic", 1.0 / 60.0, "hash42");
-        RunTape.SetCarOptions(car.Uid, detail: null, tracks: true, livery: null);
+        RunTape.SetCarOptions(car.Uid, detail: null, tracks: true, color: null);
         RunTape.Record(1, new List<Car> { car }, new Dictionary<int, bool>(),
                        new Dictionary<int, string> { [car.Uid] = "a" }, 4.0, 1.0, null);
-        RunTape.NoteCarOptions(90, car.Uid, detail: false, tracks: null, livery: "#ff0000");
+        RunTape.NoteCarOptions(90, car.Uid, detail: false, tracks: null, color: "#ff0000");
         var path = RunTape.Save(Path.Combine(_dir, "apart.txt"));
 
         RunTape.Stop(); RunTape.Clear();
