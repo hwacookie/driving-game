@@ -418,8 +418,8 @@ public partial class MapRenderer : Node2D
         // The car's PAINT as `#rrggbb` ("" = the photographed colour of its
         // vehicle). Visual only, and only ever from /state or the tape: the
         // vehicle id decides dynamics and size, this decides colour (issue #10).
-        public string Livery = "";
-        public string LiveryApplied = " ";    // the material now on the sprite
+        public string Color = "";
+        public string ColorApplied = " ";    // the material now on the sprite
         public Sprite2D Sprite;               // where the material goes
         // The declared per-car view options from /state (issue #9). null = the
         // test said nothing, which keeps the standing behaviour.
@@ -478,7 +478,7 @@ public partial class MapRenderer : Node2D
     /// paint the whole silhouette, which is the very failure the mask exists to
     /// prevent (assets/car_&lt;vehicle&gt;_mask.png, authored in
     /// tools/make_car_sprites.py).</summary>
-    static ShaderMaterial LiveryMaterial(string vehicle, string livery)
+    static ShaderMaterial PaintMaterial(string vehicle, string livery)
     {
         if (string.IsNullOrEmpty(livery) || string.IsNullOrEmpty(vehicle)) return null;
         // The MASK belongs to the photo (the picture whose bodywork is being
@@ -491,7 +491,7 @@ public partial class MapRenderer : Node2D
         _liveryShader ??= GD.Load<Shader>("res://assets/livery.gdshader");
         if (_liveryShader == null)
         {
-            GD.PrintErr("livery: res://assets/livery.gdshader missing - cars keep their photographed colour");
+            GD.PrintErr("color: res://assets/livery.gdshader missing - cars keep their photographed colour");
             return null;
         }
         if (!_maskTextures.TryGetValue(photo, out var mask))
@@ -499,7 +499,7 @@ public partial class MapRenderer : Node2D
                 GD.Load<Texture2D>($"res://assets/car_{photo}_mask.png");
         if (mask == null)
         {
-            GD.PrintErr($"livery: no body mask for photo '{photo}' (model '{vehicle}') - not painting it");
+            GD.PrintErr($"color: no body mask for photo '{photo}' (model '{vehicle}') - not painting it");
             return null;
         }
         var mat = new ShaderMaterial { Shader = _liveryShader };
@@ -3775,19 +3775,23 @@ public partial class MapRenderer : Node2D
                     // Per-car display state: color, lights, OWN flags/label.
                     if (!_carMeta.TryGetValue(uid, out var m))
                         _carMeta[uid] = m = new CarMeta();
-                    // Prefer the new name, fall back to the historical one (#10):
-                    // a client of either vintage keeps painting the right sprite.
-                    m.Model = (c.TryGetProperty("vehicle", out var cv)
+                    // The TYPE is `model`; `vehicle` is #10's transitional alias.
+                    // `color` is NOT read here any more (#18): it carries the PAINT,
+                    // so a client that still asked for the type under that word
+                    // would turn a crimson car into a vehicle called "crimson".
+                    m.Model = (c.TryGetProperty("model", out var cm)
+                                 && cm.ValueKind == JsonValueKind.String ? cm
+                                 : c.TryGetProperty("vehicle", out var cv)
                                  && cv.ValueKind == JsonValueKind.String ? cv
-                                 : c.TryGetProperty("color", out var cc)
-                                 && cc.ValueKind == JsonValueKind.String ? cc
-                                 : default).GetString() ?? "blue";
-                    // The livery (issue #10): null/absent means the photographed
-                    // colour, so a cast that declares nothing looks exactly as it
-                    // did before this field existed.
-                    m.Livery = c.TryGetProperty("livery", out var liv)
-                               && liv.ValueKind == JsonValueKind.String
-                           ? liv.GetString() : "";
+                                 : default).GetString() ?? "mercedes_c220";
+                    // The PAINT (#18's word, with `livery` — #10's stand-in — still
+                    // read): null/absent means the photographed colour, so a cast
+                    // that declares nothing looks exactly as it always did.
+                    m.Color = (c.TryGetProperty("color", out var cp)
+                                 && cp.ValueKind == JsonValueKind.String ? cp
+                                 : c.TryGetProperty("livery", out var liv)
+                                 && liv.ValueKind == JsonValueKind.String ? liv
+                                 : default).GetString() ?? "";
                     // The declared view options (issue #9): absent stays absent
                     // (null), so an unauthored cast keeps today's behaviour.
                     m.OptTracks = c.TryGetProperty("tyre_lines", out var tl) &&
@@ -4147,7 +4151,7 @@ public partial class MapRenderer : Node2D
         if (_carMeta.TryGetValue(uid, out var metaForSprite))
         {
             metaForSprite.Sprite = root.GetChild<Sprite2D>(0);
-            metaForSprite.LiveryApplied = " ";    // force the material to be re-applied
+            metaForSprite.ColorApplied = " ";    // force the material to be re-applied
         }
         // Blinker corner lights: one at each body corner,
         // +/-0.85*L/2 fore-aft and +/-0.75*W/2 lateral around the body
@@ -4354,13 +4358,13 @@ public partial class MapRenderer : Node2D
             // changed, which is the common case of doing nothing at all.
             if (_carMeta.TryGetValue(kv.Key, out var metaLivery))
             {
-                if (metaLivery.LiveryApplied != metaLivery.Livery ||
+                if (metaLivery.ColorApplied != metaLivery.Color ||
                     (metaLivery.Sprite != null && !GodotObject.IsInstanceValid(metaLivery.Sprite)))
                 {
                     if (metaLivery.Sprite == null || !GodotObject.IsInstanceValid(metaLivery.Sprite))
                         metaLivery.Sprite = node.GetChild<Sprite2D>(0);
-                    metaLivery.LiveryApplied = metaLivery.Livery;
-                    metaLivery.Sprite.Material = LiveryMaterial(metaLivery.Model, metaLivery.Livery);
+                    metaLivery.ColorApplied = metaLivery.Color;
+                    metaLivery.Sprite.Material = PaintMaterial(metaLivery.Model, metaLivery.Color);
                 }
             }
 
@@ -5037,10 +5041,10 @@ public partial class MapRenderer : Node2D
     {
         if (cornerDebug) return CornerDebugColors;
         Color c;
-        if (meta != null && !string.IsNullOrEmpty(meta.Livery) &&
-            meta.Livery.Length == 7 && meta.Livery[0] == '#')
+        if (meta != null && !string.IsNullOrEmpty(meta.Color) &&
+            meta.Color.Length == 7 && meta.Color[0] == '#')
         {
-            c = new Color(meta.Livery);
+            c = new Color(meta.Color);
             // Keep the hue, leave the mid greys: the paint itself can be exactly
             // the colour of the road.
             float v = Math.Max(c.R, Math.Max(c.G, c.B));

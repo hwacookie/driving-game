@@ -8,7 +8,7 @@ watching the Godot window can confirm each one looks right.
 Usage:
     # Server + Godot already running (e.g. via scripts/run_e2e.sh or manual):
     python3 tests/light_check.py
-    python3 tests/light_check.py --color blue
+    python3 tests/light_check.py --model mercedes_c220
 
     # Godot should be launched with a close, fixed zoom to inspect corner
     # lights clearly, e.g.:
@@ -27,7 +27,11 @@ import json
 
 API_URL = os.environ.get("CAR_API_URL", "http://127.0.0.1:5001")
 # Must mirror Config.MODELS (DrivingGame.Sim/Config.cs).
-Config_COLORS = ["blue", "silver", "police", "tan", "tractor", "pickup", "mixer"]
+# The seven models (Config.MODEL_NAMES). The server also accepts the old
+# photo words — blue, silver, police, tan, tractor, pickup, mixer — as
+# aliases, but a tool should stage the vocabulary that is current.
+MODELS = ["mercedes_c220", "fiat_500", "bmw_police", "vw_passat",
+          "tractor_unit", "ford_f150", "mixer_truck"]
 START_POINT = "crossroads_from_north"
 PROGRESS = 0.6
 PHASE_S = 3.0
@@ -67,12 +71,12 @@ def get_state():
     return _req("GET", "/state")
 
 
-def spawn_stationary_car(color=""):
+def spawn_stationary_car(model=""):
     """Spawn one stationary car at START_POINT.
 
-    If `color` is given, it is passed to /teleport and the spawned car gets
-    that color (validated server-side against Config.MODELS + MODEL_ALIASES: blue,
-    yellow, white) instead of the default uid-based assignment."""
+    If `model` is given it is sent to /teleport as the MODEL (#18: the type of
+    vehicle, not its paint), validated server-side against Config.MODELS plus the
+    seven photo aliases; without it the car gets the default uid-based cycle."""
     _req("POST", "/cars", {"action": "clear"})
     t0 = time.time()
     while time.time() - t0 < 5.0:              # poll until the clear landed
@@ -82,7 +86,7 @@ def spawn_stationary_car(color=""):
     before = {c["car_uid"] for c in get_state().get("cars", [])}
     body = {"start_point": START_POINT, "progress": PROGRESS, "add": True, "speed": None}
     if color:
-        body["color"] = color
+        body["model"] = model
     _req("POST", "/teleport", body)
     t0 = time.time()
     while time.time() - t0 < 3.0:
@@ -124,17 +128,17 @@ def run_phase(uid, name, duration, on, off=None):
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--color", default="",
-                    choices=["", *Config_COLORS],
-                    help="vehicle sprite of the spawned car via /teleport "
-                         "(default: uid-based cycle, red on a fresh server)")
+    ap.add_argument("--model", "--color", default="",
+                    choices=["", *MODELS],
+                    help="which MODEL to spawn via /teleport "
+                         "(default: the uid-based cycle)")
     args = ap.parse_args()
 
     print(cyan(f"Waiting for API at {API_URL} ..."))
     if not wait_for_health():
         print("!! API never came up"); sys.exit(1)
 
-    uid = spawn_stationary_car(args.color)
+    uid = spawn_stationary_car(args.model)
     print(green(f"Spawned stationary car #{uid} at {START_POINT} (progress={PROGRESS}) - never accelerates."))
     print(yellow("Watch the Godot window now. Zoom in / press F to steady the camera if needed."))
     time.sleep(1.0)

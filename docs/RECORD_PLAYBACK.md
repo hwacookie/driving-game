@@ -116,7 +116,7 @@ loader does exactly that), and `dt_fixed`, `map_hash`, `names=`, `# focus` and
 per-car line gained `level` as the 13th field, before `capKey`:
 
 ```
-uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,heldBy,LEVEL,capKey
+uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,model,lamps,heldBy,LEVEL,capKey
 ```
 
 **`capKey` stays LAST** — a cap key can carry the comma (an added reason is
@@ -380,7 +380,7 @@ The file format is line-based on purpose - the CURRENT generation, one line
 per substep:
 
 ```
-step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,heldBy,level,capKey|uid,x,y,…;~uid=decision text~uid=…
+step;fluidity_mps_per_car;moving_share;uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,model,lamps,heldBy,level,capKey|uid,x,y,…;~uid=decision text~uid=…
 ```
 
 The reader accepts three generations - `step;cars`, then `+fluidity;moving`,
@@ -547,7 +547,7 @@ The tape carries the lamp state per car per substep as one bit field
 (`lamps`: bit0 headlights, bit1 taillights), between `color` and `capKey`:
 
 ```
-uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,color,lamps,capKey
+uid,x,y,heading_deg,speed_mps,blinkers,brake,wrong,crashes,model,lamps,capKey
 ```
 
 The reviewer feeds `_carMeta` from the recorded frame, so the renderer's

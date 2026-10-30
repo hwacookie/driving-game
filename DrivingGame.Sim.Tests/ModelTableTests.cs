@@ -147,4 +147,28 @@ public class ModelSpawnTests
         Assert.Equal("vw_passat", passat.Model);
         Assert.False(passat.EmergencyRole);
     }
+
+    /// <summary>A role is DECLARED, not read off a picture (#18): R35's right of
+    /// way used to follow from `color == "police"`. Null keeps the legacy inference
+    /// so an existing cast is unaffected; either word overrides it.</summary>
+    static Car SpawnWithRole(SimEngine eng, string model, string? role, bool add)
+    {
+        var before = new HashSet<int>(eng.Cars.Keys);
+        eng.EnqueueCommand(new TeleportCommand("straight", null, 0.2, add, 0.0, model,
+            Role: role));
+        eng.Tick(SimEngine.DtFixed);
+        return eng.Cars.Values.First(c => !before.Contains(c.Uid));
+    }
+
+    [Fact]
+    public void Role_OverridesWhatTheModelWouldHaveInferred()
+    {
+        var eng = NewEngine();
+        // Nothing declared: the legacy inference still puts a police car on duty.
+        Assert.True(SpawnWithRole(eng, "bmw_police", null, false).EmergencyRole);
+        // Declared off — an unmarked car in the same livery-less shape.
+        Assert.False(SpawnWithRole(eng, "bmw_police", "civilian", true).EmergencyRole);
+        // Declared on — a sedan with a blue light.
+        Assert.True(SpawnWithRole(eng, "vw_passat", "emergency", true).EmergencyRole);
+    }
 }

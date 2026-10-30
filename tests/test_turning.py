@@ -694,19 +694,19 @@ DETERMINISTIC_TESTS = [
     # compared. The parked one sits BEHIND the primary (progress 0.10, and the
     # primary drives 0.15 → 0.85) so it cannot change the manoeuvre: this
     # scenario must fail on a broken declaration or not at all.
-    # `livery` is the RESOLVED hex on purpose: /state answers #rrggbb, so
-    # comparing a livery NAME against a resolved answer would be a false failure.
+    # `color` is the RESOLVED hex on purpose: /state answers #rrggbb, so a
+    # scenario naming 'amber' could never compare against the answer.
     ('slow_pass_overtake', 'straight', 50, 'straight_n→straight_m', 60.0,
      "Liveried cast: paint + tyre lines + detail window declared per car "
      "(#9, #10)",
      0.15, False, 0.85, False,
      [{'segment': 'straight_n→straight_m', 'progress': 0.35,
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
-       'name': 'slow_car', 'color': 'pickup', 'livery': '#ef6c00',
+       'name': 'slow_car', 'model': 'ford_f150', 'color': '#ef6c00',
        'tyre_lines': True},
       {'segment': 'straight_n→straight_m', 'progress': 0.10,
        'speed_mps': 0.0, 'throttle': False, 'park': True,
-       'name': 'kerb_car', 'color': 'tan', 'livery': '#00897b',
+       'name': 'kerb_car', 'model': 'vw_passat', 'color': '#00897b',
        'tyre_lines': False, 'detail_window': True}]),
     # The SAME crawler with traffic coming from the OTHER end. The shared lane
     # is a single-file resource, so the overtaking car may NOT enter it while
@@ -2481,7 +2481,11 @@ class TurnTester:
                     # the client should show for each car. Absent = undeclared,
                     # which the client reads as "standing behaviour" - so these
                     # keys are forwarded only when the spec carries them.
-                    for k in ('color', 'livery', 'tyre_lines', 'detail_window'):
+                    # `model` is the TYPE, `color` the PAINT (#18). `color` stays
+                    # here because it still NAMES a type when the value is a model
+                    # word — a scenario written before #18 stages the same cast it
+                    # always did, and the host prints DEPRECATED saying so.
+                    for k in ('model', 'color', 'livery', 'tyre_lines', 'detail_window'):
                         if spec.get(k) is not None:
                             payload[k] = spec[k]
                     requests.post(f"{API_URL}/teleport", json=payload)
@@ -2525,28 +2529,58 @@ class TurnTester:
                 if extra_cars:
                     want = {uid: spec for spec, uid in zip(extra_cars, extra_uids)
                             if any(spec.get(k) is not None
-                                   for k in ('livery', 'tyre_lines', 'detail_window'))}
+                                   for k in ('color', 'livery', 'tyre_lines',
+                                             'detail_window'))}
                     if want:
                         byUid = {c['car_uid']: c for c in self.get_state().get('cars', [])}
                         for uid, spec in want.items():
                             c = byUid.get(uid) or {}
-                            for k in ('livery', 'tyre_lines', 'detail_window'):
-                                if spec.get(k) is None:
+                            for k in ('color', 'livery', 'tyre_lines', 'detail_window'):
+                                declared = spec.get(k)
+                                if declared is None:
                                     continue
                                 got_v = c.get(k)
-                                if k == 'livery':
-                                    ok = (got_v or '').lower() == spec['livery'].lower()
+                                if k in ('color', 'livery'):
+                                    # ONE paint, two answer words (#18 keeps
+                                    # `livery` readable). The spec must carry the
+                                    # RESOLVED hex: /state answers #rrggbb, so a
+                                    # scenario naming 'amber' could not compare.
+                                    want_paint = (spec.get('color')
+                                                  or spec.get('livery')).lower()
+                                    ok = (got_v or '').lower() == want_paint
+                                    hint = ("" if want_paint.startswith('#') else
+                                            ' — author the RESOLVED hex: /state '
+                                            'answers #rrggbb, never the name')
                                 else:
-                                    ok = got_v is spec[k]
+                                    ok = got_v is declared
+                                    hint = ''
                                 if not ok:
+                                    # A FAILED scenario, not an aborted one. Aborting
+                                    # is the cockpit's "this was never tested" verdict
+                                    # and the tally counts it as neither pass nor
+                                    # fail (rc=0!) - wiring a broken chain to it would
+                                    # leave the suite green over a real defect.
                                     print(f"   ❌ car {uid} declared {k}="
-                                          f"{spec[k]!r} but /state answers "
-                                          f"{got_v!r} — the declaration did not "
-                                          f"reach the sim")
-                                    return self._aborted_result(
-                                        start_point, direction, target_speed, results)
+                                          f"{declared!r} but /state answers "
+                                          f"{got_v!r} — the option the scenario "
+                                          f"authored is not what the sim "
+                                          f"reports{hint}")
+                                    self.test_results.append({
+                                        'start_point': start_point,
+                                        'direction': direction,
+                                        'target_speed_kmh': target_speed,
+                                        'passed': False,
+                                        'aborted': False,
+                                        'error': f'declaration lost: {k}={declared!r}'
+                                                 f' → /state {got_v!r}',
+                                    })
+                                    return {'passed': False,
+                                            'error': 'declaration lost on the wire'}
+                        # The list names what was CHECKED, and its tuple must match
+                        # the loop above: when it fell out of step the paint was
+                        # staged but never verified - and the line said "confirmed".
                         print("   🎨 declared per-car options confirmed on /state: " +
-                              ", ".join(f"{u}:{','.join(k for k in ('livery', 'tyre_lines', 'detail_window') if want[u].get(k) is not None)}"
+                              ", ".join(f"{u}:{','.join(k for k in ('color', 'livery', 'tyre_lines', 'detail_window') if want[u].get(k) is not None)}"
                                         for u in want))
                 st0 = self.get_state()
                 crash_base_extra = {c['car_uid']: c.get('crash_episodes', 0)
