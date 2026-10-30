@@ -281,6 +281,7 @@ exported in a `cars` array:
    "level": 0, "segment": 42, "progress": 0.65, "on_road": true,
    "wrong_side": false, "blinker_left": false, "blinker_right": true,
    "hazard": false, "model": "mercedes_c220", "vehicle": "mercedes_c220",
+   "state": "driving", "length_m": 4.4, "width_m": 1.8,
    "detail_window": true, "tyre_lines": false, "color": "#c62828",
    "in_contact": false, "crash_episodes": 0, "contact_with": 0,
    "body_corners": [[x, y], [x, y], [x, y], [x, y]],
@@ -289,6 +290,19 @@ exported in a `cars` array:
    "hud_label": "1/24" | null}
 ]
 ```
+
+`state` is what the car is DOING — `"driving"` | `"parking"` | `"parked"`. It is
+derived from the driver, never set by a caller: a car stopped at a yield is
+`driving`, a car reversing into a bay is `parking`, a car with the engine off and no
+route is `parked`. Before it existed the client inferred "parked" from "speed 0 and
+nobody owns it", and the sim inferred "braking" from "speed sits at a cap" — which
+made a parked car flash its brake lights when a car drove past it.
+
+`length_m` / `width_m` are the MODEL's size in metres (`Config.ModelFor(model)`), on
+every car and not just the primary. They are answered because a caller that must size
+something around a car — a scenario putting two parked cars either side of a bay —
+should read the truth rather than hard-code a length that goes stale the day the
+model table is retuned. Livery and paint never change them.
 `vehicle` names what the car IS — sprite, physics class and footprint all come
 from it: `blue`, `silver`, `police`, `tan`, `tractor` (Sattelschlepper engine
 unit), `pickup`, `mixer` - assigned deterministically as
@@ -398,6 +412,16 @@ Content-Type: application/json
 # crossing stress runs; the lane offset is applied relative to the actual
 # heading, so the car still starts in its own right-hand lane):
 {"segment": 128, "progress": 0.5, "reverse": true, "add": true}
+```
+
+`lat_m` (optional) places the car ACROSS the road instead of in its driving lane:
+lateral offset from the road centreline in metres, signed, so it crosses with
+`reverse` the same way the lane offset does. On the 19.4 m parking avenue
+(`pkw_n→pkw_s`) the driving lanes run 0→7.0 m and the parking lane 7.0→9.7 m, so
+`"lat_m": 8.35` stands a car in the parking lane with 0.45 m to the kerb, while an
+ordinary spawn sits at 5.25 m. Beyond ±10.7 m the request is refused — no
+carriageway on these maps is wider, and a car standing in the hedge is worse than a
+rejected call. Placement only: it never changes dynamics or footprint.
 
 # Choose the vehicle (validated against Config.MODEL_NAMES + MODEL_ALIASES; 400 on an unknown
 # name). `vehicle` is the name; `color` is the historical spelling and still

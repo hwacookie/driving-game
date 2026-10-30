@@ -894,6 +894,25 @@ class TurnTester:
         except requests.exceptions.RequestException:
             pass
         return None
+
+    def segment_geom(self, name: str) -> dict | None:
+        """One road segment by NAME ("pkw_n→pkw_s"), in metres, via
+        GET /segment/by/{name} - index, endpoints, length. Cached, because a
+        scenario that places several cars relative to one another asks for the same
+        avenue repeatedly, and each ask used to be a round trip."""
+        cache = self.__dict__.setdefault('_seg_geom_cache', {})
+        if name not in cache:
+            cache[name] = None
+            try:
+                r = requests.get(f"{API_URL}/segment/by/{requests.utils.quote(name, safe='')}",
+                                 timeout=3)
+                if r.ok:
+                    body = r.json()
+                    if 'idx' in body:
+                        cache[name] = body
+            except requests.exceptions.RequestException:
+                pass
+        return cache[name]
     
     def send_control(self, **kwargs):
         """Send control inputs."""
@@ -931,15 +950,17 @@ class TurnTester:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        # color pinned to the sedan class: dynamics are per vehicle class
-        # (Config.VEHICLE_CLASS_SPECS) and every baseline in this suite was
-        # calibrated with sedan numbers.
-        requests.post(f"{API_URL}/teleport", json={'random': True, 'color': 'blue'})
+        # model pinned to the sedan: dynamics and size are per model
+        # (Config.MODELS) and every baseline in this suite was calibrated with
+        # sedan numbers. `color` would still work - the host routes a model word
+        # found there and prints DEPRECATED doing so - but it is the paint word
+        # since #18 and this is not about paint.
+        requests.post(f"{API_URL}/teleport", json={'random': True, 'model': 'mercedes_c220'})
         self._wait_for_new_car(old_uid)
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
                                   speed_mps: float | None = None,
-                                  color: str = "blue", role: str | None = None):
+                                  model: str = "mercedes_c220", role: str | None = None):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -947,11 +968,13 @@ class TurnTester:
         only the LAST 20% of the start segment (see docs/TESTING.md).
         speed_mps: optional rolling start in m/s (running turn tests spawn
         already moving; parking tests start from rest).
-        color: pinned to the sedan class by default on purpose - dynamics
-        are per vehicle class (Config.VEHICLE_CLASS_SPECS) and every
-        baseline in this suite was calibrated with sedan numbers; without
-        an explicit color the uid-based palette cycle would hand out truck
-        classes (80 km/h top, 1 m/s^2) to later scenarios.
+        model: the vehicle TYPE, pinned to the sedan on purpose - dynamics and size
+        are per model (Config.MODELS, #18) and every baseline in this suite was
+        calibrated with sedan numbers; without an explicit model the uid-based
+        round robin would hand truck models (80 km/h ceiling, 6.8 m/s^2 braking,
+        8.3 m long) to later scenarios. It used to be sent as `color: "blue"`,
+        which since #18 is the PAINT word - the host still routes it to the model
+        table, printing a DEPRECATED line on every single scenario.
         role: the car's ROLE in this scenario ('left_turning_car', …) - sent
         WITH the spawn, so the label exists before the car's first tick (see
         PRIMARY_CAR_ROLE and docs/TESTING.md "Named cars").
@@ -960,7 +983,7 @@ class TurnTester:
             old_uid = self.get_state().get('car_uid')
         except requests.exceptions.RequestException:
             old_uid = None
-        payload = {'start_point': name, 'progress': progress, 'color': color}
+        payload = {'start_point': name, 'progress': progress, 'model': model}
         if speed_mps is not None:
             payload['speed'] = speed_mps
         if role:
@@ -1397,11 +1420,12 @@ class TurnTester:
 
             spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
             for seg, prog in self._arc_uniform_spawns(loop, n_cars):
-                # Sedan class for every car: mixed classes would change the
+                # Sedan model for every car: mixed models would change the
                 # calibrated capacity baselines (see create_car_at_start_point).
                 self._api_session.post(f"{API_URL}/teleport", json={
                     'segment': seg, 'progress': prog,
-                    'speed': spawn_speed_mps, 'add': True, 'color': 'blue'}, timeout=5)
+                    'speed': spawn_speed_mps, 'add': True,
+                    'model': 'mercedes_c220'}, timeout=5)
             # Wait until all cars actually exist (queued teleports land
             # one per sim frame - ~17 ms each). Proportional budget: at
             # hundreds of cars a fixed 15 s would time out spuriously if
@@ -1742,10 +1766,15 @@ class TurnTester:
         spawn_speed_mps = self.STRESS_SPAWN_KMH / 3.6
         # Cycle through ALL models (Config.MODEL_NAMES) so the run
         # exercises every per-class collision footprint, not just the sedan.
+        # The order IS Config.MODEL_NAMES. It used to be sent under `color`,
+        # which since #18 means PAINT: the host still routes those words to the
+        # model table, but it prints a DEPRECATED line for every single one of
+        # the ~50 cars in this fleet (measured: 101 such lines in one suite run).
         # Arc-length uniform spawn (see _arc_uniform_spawns) - the old
         # "nearest segment midpoint" quantization could put two cars on the
         # same midpoint when n_cars > len(loop).
-        colors = ['blue', 'silver', 'police', 'tan', 'tractor', 'pickup', 'mixer']
+        models = ['mercedes_c220', 'fiat_500', 'bmw_police', 'vw_passat',
+                  'tractor_unit', 'ford_f150', 'mixer_truck']
         offset = self._crossing_safe_offset(loop, n_cars)
         # The spawn discipline (user rule): the fleet must not move AT ALL
         # while it is being placed. A rolling start meant the first cars were
@@ -1762,7 +1791,7 @@ class TurnTester:
             reverse = (k % 2 == 1)
             self._api_session.post(f"{API_URL}/teleport", timeout=5, json={
                 'segment': seg, 'progress': prog, 'speed': 0.0,
-                'add': True, 'color': colors[k % len(colors)],
+                'add': True, 'model': models[k % len(models)],
                 'reverse': reverse})
 
         # Wait until all cars exist (queued teleports land ~1 per frame).
@@ -2490,6 +2519,25 @@ class TurnTester:
                         payload['segment'] = spec['segment']
                     payload['progress'] = spec.get('progress', 0.5)
                     payload['speed'] = spec.get('speed_mps', 0.0)
+                    # WHERE in the road a staged car stands. `lat_m` is the lateral
+                    # offset from the road's CENTRELINE in metres (on the 19.4 m
+                    # parking avenue: driving lanes run 0→7.0 m, the parking lane
+                    # 7.0→9.7 m, and a normal spawn lands at 5.25 m - so 8.35 is
+                    # "in the parking lane"); `offset_m` moves the car that many
+                    # metres ALONG the segment from its `progress` point, so a spec
+                    # can say "just before the bay" without knowing the segment is
+                    # 300 m long. Both are placement only - a parked car has no
+                    # route and stays where it was put.
+                    if spec.get('lat_m') is not None:
+                        payload['lat_m'] = spec['lat_m']
+                    if spec.get('offset_m') is not None:
+                        seg_g = self.segment_geom(spec.get('segment') or '')
+                        if not seg_g:
+                            print(f"   ❌ cannot resolve segment "
+                                  f"'{spec.get('segment')}' for offset_m - aborting")
+                            return self._aborted_result(start_point, direction,
+                                                        target_speed, results)
+                        payload['progress'] += spec['offset_m'] / float(seg_g['length'])
                     if spec.get('cruise_kmh') is not None:
                         # A slow vehicle: the km/h this car chooses to drive at
                         # (its class ceiling still applies) - staging real
