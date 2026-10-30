@@ -1657,6 +1657,12 @@ public sealed class SimEngine
                 ["model"] = car.Model,      // the type (#18)
                 ["vehicle"] = car.Model,    // #10's transitional alias
                 ["color"] = car.Color,      // the PAINT — no longer the type
+                // What the PRIMARY is doing (#27). Every other top-level field
+                // already describes the primary car, and the suite reads the
+                // top level — so the state has to be here too, not only in the
+                // cars array, or the one test that could check a parking
+                // manoeuvre would have to go hunting for its own car.
+                ["state"] = car.State.ToString().ToLowerInvariant(),
                 // The same two keys the fleet builder answers — a client must
                 // not get a different contract because the map held one car
                 // instead of fifty.

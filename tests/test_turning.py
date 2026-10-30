@@ -353,6 +353,18 @@ def describe_failure(result: dict) -> str | None:
                     f"reaching the end flag ({target_pct:.0f}% point)")
         return (f"took the wrong route (ended on segment {final}, "
                 f"expected {expected})")
+    # #27 first, deliberately: "the parking states never appeared" is the more
+    # specific diagnosis, and a generic "never came to a clean stop" underneath it
+    # would hide the fact that the manoeuvre itself is missing. Measured the other
+    # way round: with this rule BELOW the stop rule, a run whose `state` field was
+    # unreadable failed as "no clean stop" while the trace said `none recorded` —
+    # the failure existed but could not be named (same lesson as #20's ordering).
+    if result.get("kerb_check") and result.get("reached_expected_segment") \
+            and not result.get("state_trace_ok", True):
+        return (f"the parking scenario never showed the parking states — trace "
+                f"{result.get('state_trace')} (expected driving → parking → parked: "
+                "a car reversing into a bay is `parking` during the manoeuvre and "
+                "`parked` when it rests)")
     if result.get("reached_expected_segment") and not result.get("stopped_at_end"):
         return "reached the destination but never came to a clean stop"
     if result.get("kerb_check") and result.get("reached_expected_segment") \
@@ -852,9 +864,23 @@ class TurnTester:
             pass
     
     def get_state(self):
-        """Get current game state."""
+        """Get current game state.
+
+        Side effect while armed (#27): record every CHANGE of the primary car's
+        `state` (driving | parking | parked) as a transition trace. Done here
+        because every poll in the runner already comes through this method —
+        sampling it in one of the many wait loops would watch whichever loop the
+        scenario happens to use, and would miss the phases between them.
+        Only changes are kept, so a run's trace reads as the manoeuvre: `['driving',
+        'parking', 'parked']`, not 400 identical entries."""
         response = requests.get(f"{API_URL}/state")
-        return response.json()
+        data = response.json()
+        if getattr(self, '_state_trace_on', False):
+            st = data.get('state')
+            trace = getattr(self, '_state_trace', None)
+            if st and trace is not None and (not trace or trace[-1] != st):
+                trace.append(st)
+        return data
     
     def get_segment_geometry(self, idx: int) -> dict | None:
         """One road segment's geometry, in METRES (0-based).
@@ -2609,6 +2635,15 @@ class TurnTester:
         if watch:
             requests.post(f"{API_URL}/freeze", json={'frozen': False})
 
+        # Record the primary car's STATE transitions for this scenario (#27):
+        # driving → parking → parked. Armed here, where the clock starts and the
+        # car exists, so the trace covers the whole manoeuvre and nothing before
+        # it. Judged only by the parking scenarios (kerb_check): the other
+        # scenarios have no opinion about parking, and a check they never asked
+        # for would fail them for the wrong reason.
+        self._state_trace = []
+        self._state_trace_on = True
+
         if _aborted():
             return self._aborted_result(start_point, direction, target_speed, results)
         
@@ -3299,6 +3334,15 @@ class TurnTester:
                             print(f"      🅿️  Stopped at the end flag ({where})")
                         else:
                             print(f"      ⚠️  Did NOT come to a clean stop at the end flag")
+                        if kerb_check:
+                            # #27: the states this run actually reported. Printed on
+                            # the parking scenarios always — pass or fail — because
+                            # when one of them is red, "which state did it reach?" is
+                            # the difference between "the parking manoeuvre never
+                            # started" and "it started and could not finish", and
+                            # that is not visible from speed alone.
+                            print(f"      🔀 state trace: "
+                                  f"{' → '.join(self._state_trace) or 'none recorded'}")
                         print(f"      Start: ({initial_pos[0]:.0f}, {initial_pos[1]:.0f}) seg {initial_segment} "
                               f"\u2192 End: ({final_pos[0]:.0f}, {final_pos[1]:.0f}) seg {state['segment']}")
                         print(f"      Distance traveled: {((final_pos[0] - initial_pos[0])**2 + (final_pos[1] - initial_pos[1])**2)**0.5:.0f} m")
@@ -3365,6 +3409,24 @@ class TurnTester:
         kerb_failed = (kerb_gaps is not None
                        and (max(kerb_gaps) > KERB_PASS_MAX_M
                             or min(kerb_gaps) <= 0.0))
+
+        # The parking scenario must SHOW its states, not just end up in one (#27):
+        # a car reversing into a bay is `parking` while it manoeuvres and `parked`
+        # when it rests. A run that jumped straight from driving to parked — or
+        # never left `driving` and simply stopped at the flag like every other
+        # scenario — is not the manoeuvre this scenario claims to test.
+        self._state_trace_on = False
+        state_trace = getattr(self, '_state_trace', []) or []
+        state_trace_ok = True
+        if kerb_check and reached_expected_segment:
+            # deliberately NOT gated on stopped_ok: the states are a property of the
+            # manoeuvre, not of where the nose ended up. Gating it would silence the
+            # only check that can say "the parking ran" on the one scenario that is
+            # red for a stop-criterion reason — measured: park_6lane_right_lane
+            # reports `driving → parking → parked` and still fails "never came to a
+            # clean stop", which is exactly the distinction this trace exists to show.
+            state_trace_ok = ('parking' in state_trace
+                              and bool(state_trace) and state_trace[-1] == 'parked')
 
         # Backstop for wrong-side hits that fell BETWEEN API polls: the
         # lane guard's frame counter is cumulative for the whole game
@@ -3462,6 +3524,8 @@ class TurnTester:
             'kerb_check': kerb_check,
             'end_flag_progress': end_flag_progress,
             'kerb_gaps_m': kerb_gaps,
+            'state_trace': state_trace,
+            'state_trace_ok': state_trace_ok,
             'max_heading_change_per_frame': max_heading_change_per_frame,
             # Quality metrics (docs §8): centreline crossings of the primary,
             # and the fleet's metres-per-second over the scenario window -
