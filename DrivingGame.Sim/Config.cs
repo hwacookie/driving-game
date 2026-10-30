@@ -113,6 +113,38 @@ public static class Config
     /// So this commit must not move a car by one centimetre — if a scenario turns
     /// differently afterwards, the transcription is wrong, not the world.
     /// </summary>
+    /// <summary>Braking rate per model, m/s² (#21). The passenger cars, the city
+    /// car and the pickup keep the long-standing CAR_BRAKING = 10.0 (~1.02 g);
+    /// the two heavy vehicles brake slower, because a simulation that lets a
+    /// laden mixer stop like a Golf invents a deceleration no 24 t truck has.
+    ///
+    /// Figures and where each comes from (retrieved 2026-10-30):
+    ///  - 10.6 / 10.5 m/s² measured for a VW Golf (23.2 m) and BMW X3 (23.5 m)
+    ///    braking 80→0 km/h at maximum permissible laden weight, dry — ADAC
+    ///    "Bremswege im Vergleich" (adac.de, Bremsweg-Vergleich). ADAC states
+    ///    its own figures are the BEST case and that wear, tyres and road surface
+    ///    must be expected worse in traffic, so the sim keeps its in-service
+    ///    anchor of 10.0 instead of the test-track 10.6.
+    ///  - 10.9 m/s² derived for a 2021 Ford F-150 XLT 4x4 from 70→0 mph in 148 ft
+    ///    (evpulse.com, 25 Jan 2021). A modern pickup is therefore NOT the weak
+    ///    braker one might assume — a single cold stop is as good as a car's, so
+    ///    no differential is justified. What that test DID report is fade (the
+    ///    truck's brakes needed cooling); the sim does not model brake fade, and
+    ///    inventing a penalty for an unmodelled mechanism would be worse than
+    ///    leaving the pickup at the anchor.
+    ///  - 6.8 m/s² measured for a DAF XF 460 FT (40 000 kg, laden) from 80 km/h in
+    ///    the same ADAC test (36.2 m) → mixer_truck.
+    ///  - 6.0 m/s² for the empty tractor_unit: an estimate INSIDE cited bounds —
+    ///    UNECE R13 requires only MFDD ≥ 5.00 m/s² for a commercial vehicle (from
+    ///    80 km/h) against ≥ 6.43 m/s² for a passenger car (from 100 km/h), and
+    ///    CLEPA/OICA's AEBS slide notes a light truck's maximum deceleration as
+    ///    7 m/s² (unece.org R13 rev.9; AEBS-07-10). An unladen unit has less
+    ///    driven-axle load than the laden tractor ADAC measured, so it sits below
+    ///    6.8 and above the 5.0 floor. Labelled an estimate, not a measurement.
+    ///  - History, for scale: TRRL laden HGV tests quoted to Parliament gave a
+    ///    60 km/h stop in 30 m dry (≈ 4.6 m/s²) in 1991 — the floor a modern
+    ///    ABS truck leaves far behind, which is why 6.8 is not alarmist.
+    /// </summary>
     public readonly record struct Model(
         string Name, string Photo,
         double MaxSpeedMps, double AccelMps2, double BrakeMps2, double LatAccelMps2,
@@ -130,11 +162,16 @@ public static class Config
         ["vw_passat"]     = new("vw_passat", "tan",
                                 CAR_SPEED, CAR_ACCELERATION, CAR_BRAKING, 4.5, 1.86, 4.75),
         ["tractor_unit"]  = new("tractor_unit", "tractor",
-                                22.2, 1.3, CAR_BRAKING, 3.5, 2.85, 7.00),   // empty unit: 80 km/h legally in DE
+                                22.2, 1.3, 6.0, 3.5, 2.85, 7.00),   // empty unit: 80 km/h legally in DE;
+                                                                    // braking = estimate inside
+                                                                    // R13's 5.0 floor and CLEPA's 7.0 max
         ["ford_f150"]     = new("ford_f150", "pickup",
-                                50.0, 2.4, CAR_BRAKING, 4.0, 2.09, 5.25),   // higher CG than a sedan
+                                50.0, 2.4, CAR_BRAKING, 4.0, 2.09, 5.25),   // higher CG than a sedan;
+                                                     // 70-0 in 148 ft ≈ 10.9 m/s²,
+                                                     // so no brake differential
         ["mixer_truck"]   = new("mixer_truck", "mixer",
-                                22.2, 1.0, CAR_BRAKING, 3.0, 2.80, 8.40),   // loaded: slowest, lowest budget
+                                22.2, 1.0, 6.8, 3.0, 2.80, 8.40),   // laden: ADAC measured
+                                                                    // 36.2 m from 80 km/h on a 40 t DAF
     };
 
     /// <summary>Model names in the order the round robin hands them out. The

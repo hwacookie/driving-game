@@ -25,9 +25,9 @@ public class ModelTableTests
     [InlineData("fiat_500",      "silver",  50.0, 2.5, 10.0, 4.5, 1.71, 3.14)]
     [InlineData("bmw_police",    "police",  55.6, 2.8, 10.0, 4.5, 1.86, 4.71)]
     [InlineData("vw_passat",     "tan",     55.6, 2.8, 10.0, 4.5, 1.86, 4.75)]
-    [InlineData("tractor_unit",  "tractor", 22.2, 1.3, 10.0, 3.5, 2.85, 7.00)]
+    [InlineData("tractor_unit",  "tractor", 22.2, 1.3,  6.0, 3.5, 2.85, 7.00)]
     [InlineData("ford_f150",     "pickup",  50.0, 2.4, 10.0, 4.0, 2.09, 5.25)]
-    [InlineData("mixer_truck",   "mixer",   22.2, 1.0, 10.0, 3.0, 2.80, 8.40)]
+    [InlineData("mixer_truck",   "mixer",   22.2, 1.0,  6.8, 3.0, 2.80, 8.40)]
     public void Model_TranscribesTheNumbersTheOldTablesHeld(
         string name, string photo, double max, double accel, double brake,
         double lat, double w, double l)
@@ -84,13 +84,70 @@ public class ModelTableTests
     }
 
     [Fact]
-    public void BrakeRate_IsTheOneLegacyConstant_ForEveryModel_Today()
+    public void BrakeRate_PassengersAtTheAnchor_HeavyVehiclesBelowIt()
     {
-        // brake_rate is a MODEL property from now on, but no model brakes
-        // differently yet: that is new physics (stopping distances move, and the
-        // suite's guardrails are in sim time) and it belongs to its own change.
-        foreach (var name in Config.MODEL_NAMES)
+        // #21 replaced "one rate for all seven" with cited figures. The band each
+        // model sits in is the contract, so a retune has to break this on purpose:
+        //   passengers + pickup  10.0  (ADAC measured 10.6/10.5 for Golf/X3 at
+        //                               80→0 km/h laden, dry — kept at the lower
+        //                               in-service anchor ADAC itself asks for;
+        //                               a 2021 F-150 measured 10.9 from 70 mph,
+        //                               so the pickup gets no differential)
+        //   mixer_truck           6.8  (ADAC: DAF XF 460 FT, 40 t laden, 36.2 m)
+        //   tractor_unit          6.0  (estimate inside R13's 5.0 floor and
+        //                               CLEPA's 7.0 light-truck maximum)
+        foreach (var name in new[] { "mercedes_c220", "fiat_500", "bmw_police",
+                                     "vw_passat", "ford_f150" })
             Assert.Equal(Config.CAR_BRAKING, Config.ModelFor(name).BrakeMps2, 6);
+        Assert.Equal(6.8, Config.ModelFor("mixer_truck").BrakeMps2, 6);
+        Assert.Equal(6.0, Config.ModelFor("tractor_unit").BrakeMps2, 6);
+        // …and the heavy pair is actually BELOW the anchor, which is the point:
+        Assert.True(Config.ModelFor("mixer_truck").BrakeMps2 < Config.CAR_BRAKING - 2.0);
+        Assert.True(Config.ModelFor("tractor_unit").BrakeMps2 >= 5.0,   // R13 floor
+                    "below the UNECE R13 minimum for a commercial vehicle");
+    }
+
+    [Fact]
+    public void StoppingDistance_FollowsTheModel_SoAMixerNeedsMoreRoadThanACityCar()
+    {
+        // v²/(2a) is arithmetic; what needs proving is that the ARITHMETIC IS THE
+        // SIM's — that a braking car actually covers the metres its model implies,
+        // through Car.Update and the collision caps, not just in the table.
+        // 15 m/s (54 km/h): 11.25 m at 10.0, 16.5 m at 6.8.
+        double fiat = MetersToStop("fiat_500"), mixer = MetersToStop("mixer_truck");
+        Assert.True(fiat > 10.5 && fiat < 12.5,
+            $"the Fiat stopped from 54 km/h in {fiat:F1} m (expected ~11.3 m at 10 m/s²)");
+        Assert.True(mixer > 15.0 && mixer < 18.0,
+            $"the mixer stopped from 54 km/h in {mixer:F1} m (expected ~16.5 m at 6.8 m/s²)");
+        Assert.True(mixer - fiat > 4.0,
+            $"the mixer needed only {(mixer - fiat):F1} m more than the Fiat — the " +
+            "heavy vehicle's weaker brakes are not reaching the motion");
+    }
+
+    /// <summary>Metres a car covers from 15 m/s to a standstill with the brake
+    /// pedal HELD, on a bare Car driven by KeyboardDriver.
+    ///
+    /// Deliberately not the engine with SetControl: a car on a route has an AI
+    /// driver, and my first version of this measured 31.9 m for the Fiat because
+    /// the nav was still deciding the throttle — i.e. it measured coasting and
+    /// called it braking. The pedal is the thing the model's brake_rate governs.</summary>
+    static double MetersToStop(string model, double startSpeedMps = 15.0)
+    {
+        var net = TestMaps.BuildTestMap("basic");
+        var car = new Car(100.0, 250.0, 180.0, 0, new KeyboardDriver()) { Model = model };
+        car.Speed = startSpeedMps;
+        var keys = new Dictionary<string, bool> { [Config.KEY_S] = true };
+        var driver = new KeyboardDriver();
+        double travelled = 0.0, px = car.X, py = car.Y;
+        for (int i = 0; i < 60 * 12; i++)
+        {
+            var control = driver.GetControl(car, net, SimEngine.DtFixed, keys);
+            car.Update(SimEngine.DtFixed, net, control);
+            travelled += Math.Sqrt(Math.Pow(car.X - px, 2) + Math.Pow(car.Y - py, 2));
+            px = car.X; py = car.Y;
+            if (car.Speed < 0.02) break;
+        }
+        return travelled;
     }
 
     [Fact]
