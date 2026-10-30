@@ -1018,9 +1018,16 @@ public static class GameApi
             {
                 string type = data.TryGetProperty("type", out var t) ? t.GetString()! : "car";
                 string color = data.TryGetProperty("color", out var c) ? c.GetString()! : "";
+                // Which vehicle is parked here (#22) — its model decides the
+                // metres of road the obstruction owns. Absent = the sedan every
+                // layout before this field described.
+                string model = data.TryGetProperty("model", out var mo) &&
+                               mo.ValueKind == System.Text.Json.JsonValueKind.String &&
+                               !string.IsNullOrEmpty(mo.GetString())
+                               ? mo.GetString()! : "mercedes_c220";
                 double x = data.GetProperty("x").GetDouble();
                 double y = data.GetProperty("y").GetDouble();
-                var ob = engine.Obstacles.Place(engine.Network, type, color, x, y);
+                var ob = engine.Obstacles.Place(engine.Network, type, color, x, y, model);
                 return Json(ob.ToDict(), 201);
             }
             catch (KeyNotFoundException e)

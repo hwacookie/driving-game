@@ -25,11 +25,16 @@ it remains to be specified in `DRIVING_MANEUVERS.md` §6.
   color. It is drawn into the scene and exists until deleted.
 - Obstacles come in two **classes**:
 - **Static** (implemented in Part 1): never moves. Current type: the
-    *parked car* — sedan-sized (`Config.CAR_LENGTH_M` × `CAR_WIDTH_M`,
-    4.4 m × 1.8 m) REGARDLESS of its color: `ObstacleGeometry.BoxCorners`
-    always uses the sedan box, so an obstacle is not (yet) per-model sized
-    like a live car is. Same sprite assets, recolored. It is scenery that
-    other cars must deal with (`DRIVING_MANEUVERS.md` §6).
+    *parked car* — sized by its **model**: `ObstacleGeometry.ObstacleFootprint`
+    reads `Config.ModelFor(ob.Model).LengthM/WidthM`, so a parked `mixer_truck`
+    owns 8.40 m × 2.80 m of road and a `fiat_500` owns 3.14 m × 1.71 m (#22).
+    A layout entry or a request that names no model is the
+    `mercedes_c220` sedan — which is the box every obstruction had before, so
+    existing layouts collide exactly as they were authored against.
+    `color` remains a **paint** (its palette maps `blue`/`yellow`/`white` to RGB
+    triples and the sprite is the same art recoloured): the two words name two
+    things, as #18 settled for live cars too. It is scenery that other cars must
+    deal with (`DRIVING_MANEUVERS.md` §6).
   - **Movable** (later parts, not yet specified): other cars, pedestrians,
     children. They move — they may leave the collision point before the car
     arrives, and may only be visible from far away — so avoiding them requires

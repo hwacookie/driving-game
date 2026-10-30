@@ -668,19 +668,24 @@ go through the same logic as the palette UI in the game window.
 ```bash
 GET /obstacles
 ```
-Returns `[{id, type, color, x, y, heading}, ...]` — `x`/`y` in **metres**
-(the API's one dialect), `heading` in degrees (0 = north). Empty list if
-none are placed.
+Returns `[{id, type, color, model, x, y, heading}, ...]` — `x`/`y` in **metres**
+(the API's one dialect), `heading` in degrees (0 = north). `model` is which
+vehicle is parked there and decides how many metres of road the obstruction owns
+(#22); `color` is its paint. Empty list if none are placed.
 
 **Place an obstacle**
 ```bash
 POST /obstacles
 Content-Type: application/json
 
-{"type": "car", "color": "blue", "x": 194, "y": 300}
+{"type": "car", "color": "blue", "model": "mixer_truck", "x": 194, "y": 300}
 ```
-- `type`: currently only `"car"` (a parked car, same size as the player car)
-- `color`: `blue`, `yellow` or `white`
+- `type`: currently only `"car"` (a parked car)
+- `color`: its PAINT — `blue`, `yellow` or `white` (a palette of RGB triples)
+- `model`: which vehicle is parked, and therefore how much road it owns (#22) —
+  a name from `Config.MODEL_NAMES` (photo words like `mixer` resolve too).
+  Absent = `mercedes_c220`, the sedan box every layout was authored against; an
+  unknown name is a 400 naming what is allowed, never a silent sedan
 - `x`, `y`: metres (the API's one dialect)
 
 The heading is NOT an input: it is computed from the lane direction under the
