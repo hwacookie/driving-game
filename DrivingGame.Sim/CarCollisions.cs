@@ -1215,8 +1215,13 @@ public static class CarCollisions
         foreach (var c in carList)
         {
             var arr = new (double, double, double, double)[nSweepSteps];
+            // The body's lateral offset from the line it follows, measured ONCE per
+            // car and tick (the sweep is 50 steps; doing it per step was the obvious
+            // first draft and this file's history says plainly how much a per-step
+            // cost here matters).
+            double offRefM = SweepOffsetFromRefM(c);
             for (int i = 0; i < nSweepSteps; i++)
-                arr[i] = PredictPos(c, (i + 1) * TtcSweepStepS);
+                arr[i] = PredictPos(c, (i + 1) * TtcSweepStepS, offRefM);
             sweeps[c.Uid] = arr;
         }
 
@@ -2143,7 +2148,48 @@ public static class CarCollisions
     /// see the constant block above). Returns the predicted pose plus the
     /// arc-length the car will have covered by then (used as its own
     /// braking distance if it turns out to be the one that must yield).</summary>
-    static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t)
+    /// <summary>How far the body stands to the RIGHT of its own reference line,
+    /// signed, in metres (#32) — but ONLY for a car that is going to STAY where it
+    /// stands: a parked one.
+    ///
+    /// A car is not its lane. A vehicle parked in a parking bay has a real lateral
+    /// position that differs from the line its nav last followed — and a neighbour
+    /// predicting it must see the body, not the stripe of road it happens to be
+    /// nearest. Measured before this existed: a Fiat parked 8.35 m from the
+    /// centreline (3.10 m beside a sedan's lane) was swept at its reference line, i.e.
+    /// IN that lane, and every car driving past braked to a standstill for a vehicle
+    /// that was never in its path (`cap=avoid#…`, min speed 0.0).
+    ///
+    /// A car UNDER WAY keeps the line, deliberately. First draft applied the offset
+    /// to every sweep and the 50-car crossing lost a new pair at t=7.6 s (fig8_xing,
+    /// which on main fails differently, at the centreline at t=8.7 s): a body's
+    /// CURRENT offset is the wrong prediction for a car whose offset is changing,
+    /// because a lane change in progress converges on the line, and the old
+    /// line-sweep was conservatively right about that. Standing off-line is the case
+    /// where the body is the better prediction; moving is not.
+    ///
+    /// Clamped rather than trusted at arm's length: a body far off its line means the
+    /// line and the car have lost track of each other, and swinging a sweep 20 m
+    /// sideways along a curve is a worse prediction than the standing behaviour.</summary>
+    const double MaxSweepRefOffsetM = 6.0;
+
+    static double SweepOffsetFromRefM(Car car)
+    {
+        if (car.State != CarState.Parked) return 0.0;   // see above: moving = the line
+        var nav = car.BicycleNav;
+        var refLine = nav?.Ref;
+        if (refLine is null) return 0.0;
+        var (bx, by) = refLine.PointAt(nav!.S);
+        double rb = Math.Radians(refLine.HeadingAt(nav.S));
+        // The sim's lateral convention, inverted: an offset O to the line's right
+        // moves a point by (cos·O, -sin·O) — see SimEngine's spawn placement — so
+        // the offset of a body from the line is its delta dotted onto that normal.
+        double off = (car.X - bx) * Math.Cos(rb) - (car.Y - by) * Math.Sin(rb);
+        return Math.Clamp(off, -MaxSweepRefOffsetM, MaxSweepRefOffsetM);
+    }
+
+    static (double X, double Y, double HeadingDeg, double DistM) PredictPos(Car car, double t,
+                                                                            double refOffsetM = 0.0)
     {
         double v = Math.Max(MinSweepSpeedMps,
                             Math.Max(car.Speed, car.TargetSpeed));
@@ -2154,7 +2200,18 @@ public static class CarCollisions
             double s0 = nav!.S;
             double sPred = Math.Min(s0 + v * t, refLine.Total);
             var (px, py) = refLine.PointAt(sPred);
-            return (px, py, refLine.HeadingAt(sPred), sPred - s0);
+            double hPred = refLine.HeadingAt(sPred);
+            // Follow the LINE for progress, keep the CAR for lateral position: this
+            // is the whole fix, and it is why the offset is applied at the predicted
+            // heading (on a curve, "3 m right of the line" is a different direction
+            // three metres on).
+            if (refOffsetM != 0.0)
+            {
+                double rp = Math.Radians(hPred);
+                px += Math.Cos(rp) * refOffsetM;
+                py -= Math.Sin(rp) * refOffsetM;
+            }
+            return (px, py, hPred, sPred - s0);
         }
         double rad = Math.Radians(car.Heading);
         double dM = v * t;
