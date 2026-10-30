@@ -60,6 +60,27 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
 
+/// <summary>What a car is doing (#27): the difference between a car that is
+/// stopped because traffic holds it and a car that is PARKED. Three values
+/// because the middle one is real and visible — reversing into a bay is neither
+/// driving nor parked, and it is the phase where a car genuinely does brake.
+///
+/// Note what is NOT here: size, colour, model, speed. Those are the model and the
+/// paint (#18); this is the state machine the same decision asked for, and an id
+/// still names the car and describes nothing.</summary>
+public enum CarState
+{
+    /// <summary>Has a route and is navigating — including momentarily stopped at a
+    /// yield or in a queue: stopped is not parked.</summary>
+    Driving,
+    /// <summary>A parking manoeuvre is in progress (phase != none).</summary>
+    Parking,
+    /// <summary>Engine off, no route, stays where it is: an obstruction the other
+    /// cars deal with (R32). This is what the separate `Obstacle` entity has been
+    /// standing in for, and why it is being retired.</summary>
+    Parked,
+}
+
 /// <summary>Change one car's per-car options WHILE IT DRIVES (issue #10): its
 /// paint, its own tyre lines, whether a detail window belongs to it.
 ///
@@ -1090,7 +1111,13 @@ public sealed class SimEngine
                             // stays steady (no tick-rate flicker); free flow has
                             // no binding cap and stays dark.
                             bool held = c.Speed >= ceiling - 0.02;
-                            if (held && (preSpeed > ceiling + 0.02 || ceiling < 1.0))
+                            if (held && (preSpeed > ceiling + 0.02 || ceiling < 1.0)
+                                // …but only for a car that could put a foot anywhere.
+                                // A PARKED car is held by definition, and reading that
+                                // as braking is the bug #27 reproduced (brake lights on
+                                // a Fiat 500 at 0.0 km/h while a car passed it): the cap
+                                // belongs to whoever is avoiding it, not to it.
+                                && c.State != CarState.Parked)
                                 c.IsBraking = true;
                         }
                         if (StepCost.Enabled) StepCost.Add(StepCost.Caps, tCap0, 1);
@@ -1465,6 +1492,11 @@ public sealed class SimEngine
                 ["blinker_right"] = c.Driver is BicycleDriver br ? br.BlinkerRight : false,
                 ["hazard"] = hazard,
                 ["braking"] = c.IsBraking,
+                // What the car is DOING (#27): driving | parking | parked. The
+                // client used to infer "parked" from "speed 0 and nobody owns it";
+                // now the sim says it, and a replay says it too because the state
+                // travels with the car it belongs to.
+                ["state"] = c.State.ToString().ToLowerInvariant(),
                 ["headlights_on"] = c.HeadlightsOn,
                 ["taillights_on"] = c.TaillightsOn,
                 // The TYPE is `model` (#18). `vehicle` stays answered as #10's
