@@ -5,29 +5,29 @@
   "status": "active",
   "autoContinue": true,
   "usage": {
-    "tokensUsed": 972405,
-    "activeSeconds": 5814
+    "tokensUsed": 1494451,
+    "activeSeconds": 10736
   },
   "sisyphus": false,
   "createdAt": "2026-10-31T12:14:50.161Z",
-  "updatedAt": "2026-10-31T15:39:43.947Z",
+  "updatedAt": "2026-10-31T17:02:51.264Z",
   "activePath": ".pi/goals/active_goal_2026103113145016_mvwd5w6p-kgm4vu.md",
-  "revision": 265,
+  "revision": 451,
   "scheduler": {
     "version": 1,
     "owner": "01a18807-5f68-75bb-b125-0a4c3dd1afec",
-    "generation": "ca9d0ce5-94e0-4877-bba5-e24c30a0e4e6",
-    "used": 1,
+    "generation": "3cfe2f41-b190-449b-8ade-07adfafef705",
+    "used": 10,
     "phase": "running",
     "repairUsed": false,
     "decision": {
       "kind": "ready",
-      "purpose": "kickoff"
+      "purpose": "ready"
     },
     "dispatch": {
-      "id": "624a98cb-cf88-49a1-9107-40124f445dfa",
-      "kind": "kickoff",
-      "claimedAt": 1793460963230
+      "id": "e732adeb-3800-4c56-af91-bb44f04fe61a",
+      "kind": "ready",
+      "claimedAt": 1793465400542
     }
   },
   "taskList": {
@@ -126,8 +126,8 @@ IF BLOCKED: stop and ask the user when a gate cannot be met without weakening or
 - Status: running
 - Auto-continue: on
 - Sisyphus mode: no
-- Time spent: 1h36m54s
-- Tokens used: 972K (972,405) tokens
+- Time spent: 2h58m56s
+- Tokens used: 1.5M (1,494,451) tokens
 ## Tasks
 
 <!-- blockCompletion: false -->
