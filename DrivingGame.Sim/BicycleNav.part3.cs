@@ -69,6 +69,7 @@ public sealed partial class BicycleNav
     private int _pkHoldTicks;
     private double _pkLastRecT;
     private double _pkAppLastT;
+    private double _pkAccLastT;
 
     /// <summary>Body corner positions relative to the rear axle, (along, right)
     /// in metres, in the car's own frame.</summary>
@@ -1875,6 +1876,27 @@ public sealed partial class BicycleNav
         if (accel && car.Speed < CREEP_SPEED && plan is null)
             accelScale = Math.Max(accelScale, CREEP_SCALE);
 
+        // #36: the deadlock this rescue exists for, applied to parking. Excluding plans
+        // cured the shudder in the roll-out's LAST second (measured there: speed sawing
+        // 0.2-0.4 km/h) and re-opened the deadlock ~1.8 m earlier, where it is fatal:
+        // with a parking plan active `control.Accelerate` is false and the steering
+        // demand puts accelScale at 0.00, so the easing gets `0 x dt` every tick and the
+        // car stands at v=0.000 while the plan's own phase table asks for V_C=2.00 m/s
+        // (measured: [PARKACC] justAfterEase v=0.000 vTgt=2.00 accel=False
+        // accelScale=0.00 phase=swerve dStop=1.84). It never reaches the 0.5 m staging
+        // gate, so the reverse tuck is never armed - which is the whole of issue 36's
+        // tight-bay failure, and the reason five steering-side changes moved nothing.
+        // The rescue is bounded to where the manoeuvre still needs movement: a plan that
+        // demands more than the car has, the car standing still, and the stop point not
+        // yet reached. Inside the last half metre nothing changes, so the shudder this
+        // file cured stays cured.
+        if (plan is not null && (plan.Value.VTarget ?? 0.0) > car.Speed + 0.05 &&
+            car.Speed < CREEP_SPEED && (dStop ?? 0.0) > 0.5)
+        {
+            accel = true;
+            accelScale = Math.Max(accelScale, CREEP_SCALE);
+        }
+
         string? dbgPlanPhase = plan is { } pp ? pp.Phase : null;     // TEMPORARY debug
         DbgState = (S, _ref?.Total ?? -1.0, dbgPlanPhase,
                     Math.Degrees(Math.Abs(delta)), TargetSpeed(S),
@@ -1913,6 +1935,19 @@ public sealed partial class BicycleNav
             }
         }
         car.Speed = Math.Max(0.0, Math.Min(V_MAX, car.Speed));
+
+        // #36: the speed can only be born in the easing above, and `accelScale` (which
+        // falls to ZERO as the steering demand grows) is a multiplier inside it. Sample
+        // immediately after the easing so a "0.00" further down the function cannot be
+        // blamed on a writer upstream of it.
+        if (plan is not null && ParkStyle == "reverse" && (dStop ?? 99.0) <= 6.0 &&
+            _navTime - _pkAccLastT >= 1.0)
+        {
+            _pkAccLastT = _navTime;
+            car.RecordDecision(_navTime,
+                $"[PARKACC] justAfterEase v={car.Speed:F3} vTgt={vTarget:F2} accel={accel} " +
+                $"accelScale={accelScale:F2} phase={plan.Value.Phase} dStop={dStop ?? -1:F2}");
+        }
 
         // End of the parking roll-out: the distance-proportional target decays
         // exponentially and never reaches zero, so drop the last 0.2 km/h once the car
