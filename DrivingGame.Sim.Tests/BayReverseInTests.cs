@@ -128,6 +128,19 @@ public class BayReverseInTests
                 // car too (#36 option (c) ends in an honest surrender). So the exit is
                 // what gets asserted, read back from the car's own decision record.
                 string notice = ParkNotice(car);
+                // #36/task-5: a rung may only pass on a VERDICT. Two of these four bays
+                // were green without ever finishing a tuck: the staging gate declares
+                // "parked forwards" when the solver cannot arm (part3:1656), which sets
+                // Parked = true and writes no decision record at all - so the whole ladder
+                // produced exactly ONE "Reverse-in: standing at the kerb" while reporting
+                // three greens. An empty notice is therefore not a pass: the manoeuvre has
+                // to say how it ended, and saying nothing means it never started the part
+                // that matters. (Stricter, not looser: the GAVE UP and hazard assertions
+                // below are unchanged.)
+                Assert.True(notice.Length > 0,
+                    $"the {clearanceM:F1} m bay reached CarState.Parked with NO parking " +
+                    $"verdict on record - the nav declared itself parked without completing " +
+                    $"a tuck (issue 36).\n" + ParkTrace(car));
                 Assert.False(notice.Contains("GAVE UP"),
                     $"the {clearanceM:F1} m bay was only 'succeeded' by giving up: " +
                     notice + "\n" + ParkTrace(car));

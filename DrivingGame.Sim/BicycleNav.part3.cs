@@ -383,7 +383,7 @@ public sealed partial class BicycleNav
                 // the car stopped 2.5 deg nose-in.
                 if (ok && ReverseParkOk(cand, seg.Width) &&
                     PathClearsBodies(cand, bay) &&
-                    -cand[^1].U <= stage - PARK_REVERSE_MIN_TAIL_M)
+                    -cand[^1].U <= stage + _parkStageExtM - PARK_REVERSE_MIN_TAIL_M)
                 {
                     if (best is null || dvT > best.Value.dvTry + 1e-9)
                     {
@@ -405,6 +405,30 @@ public sealed partial class BicycleNav
         }
         else
         {
+            // #39: the staged shuffle, done the way the geometry allows. The staging
+            // distance is planned from psi0 = 0 (PlanReverseTuck), but the car arrives at
+            // the staging point 20-40 deg across the lane, and with the short stage the
+            // run-out test then admits only the deepest candidate - which clips the front
+            // neighbour, so the envelope holds the wheel (held 59x, crash=0) and the job
+            // surrenders at the angle the gate used to refuse. Ask for room AHEAD instead
+            // of a sharper arc: the aisle has metres to spare in the measured runs, the
+            // extra is bounded, it consumes NO park attempt (the staging gate re-asks every
+            // tick), and it leaves the reverse target alone. A forward shuffle is the
+            // documented wrong direction only once the bay is committed to - here nothing
+            // is armed yet.
+            if (Math.Abs(psi0) > Math.Radians(10.0) && _parkStageTries < PARK_STAGE_EXTRA_TRIES)
+            {
+                _parkStageTries++;
+                _parkStageExtM += PARK_STAGE_EXTRA_M;
+                _routeKey = null;      // re-cut the line further past the flag
+                car.RecordDecision(_navTime,
+                    $"[PARKPLAN] EXTRA STAGE #{_parkStageTries}: no tuck clears the bay from " +
+                    $"nose {Math.Degrees(psi0):F1}° - running {PARK_STAGE_EXTRA_M:F1} m more " +
+                    $"past it (line +{_parkStageExtM:F1} m, reverse target unchanged, no " +
+                    "attempt spent)");
+                return false;
+            }
+
             pts = new List<(double, double, double, double)>();
             // No feasible tuck from here after all. Still back up: the car is
             // standing PAST its destination (it drove there to stage the

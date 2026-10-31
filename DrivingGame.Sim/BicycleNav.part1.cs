@@ -308,6 +308,18 @@ public sealed partial class BicycleNav
     private bool _parkStyleLocked;      // decided once per destination
     private double _parkTuck;
     private double _parkStageM;
+    // #39: how far PAST the staging line the car is asked to run when no tuck clears the
+    // bay from the pose it actually reached. Deliberately separate from _parkStageM: that
+    // one doubles as the reverse target (tail = max(TAIL_M, stage + u_end) in part3), so
+    // growing it mid-job makes the straight backup reverse forever (measured: -0.80 m/s,
+    // stuck at 52.6% progress, all four rungs red). These two only widen the line the car
+    // drives and the run-out the arming search may use.
+    private double _parkStageExtM;
+    private int _parkStageTries;
+    public static readonly double PARK_STAGE_EXTRA_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_M"), out var _pse) ? _pse : 1.5;
+    public static readonly int PARK_STAGE_EXTRA_TRIES = int.TryParse(
+        Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_TRIES"), out var _pst) ? _pst : 2;
     private bool _parkStageShort;
     private ReverseParkState? _reversePark;   // active manoeuvre state, or null
     /// <summary>Standing at the destination.</summary>
