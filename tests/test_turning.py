@@ -774,7 +774,36 @@ DETERMINISTIC_TESTS = [
     # overtaking lane and from inside the parking lane - are out of the
     # suite; the plain back-in park from the normal lane stays.)
     ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
-     "Back-in park into a bay between two parked cars", 0.15, True,
+     "Back-in park into a bay between two parked cars (2.5 m clearance)", 0.15, True,
+     END_FLAG_PROGRESS, False,
+     # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
+     # cars that are ALREADY parked, and success is "got in without touching either
+     # one". Every number here is derived, not picked:
+     #   pkw_n→pkw_s is 300 m long and the end flag stands at progress 0.5 → s =
+     #   150 m; the sim's own finish rule is "the NOSE touches the mark", so a car
+     #   that parks as intended ends with its CENTRE at 150 − 4.40/2 = 147.8 m
+     #   (4.40 = mercedes_c220.LengthM, the model this scenario pins for itself).
+     #   Neighbours are fiat_500 (3.14 m) at ±4.77 m from that centre, which leaves
+     #   an inner gap of 2·4.77 − 3.14 = 6.40 m for a 4.40 m car: 1.00 m of
+     #   clearance at each end. A German bay is 6.0-6.5 m, so this is a bay and not
+     #   a favour - and a car that misses the bay hits a neighbour, which the sim
+     #   reports as a crash rather than as a measurement.
+     #   lat_m 8.35 stands them in the PARKING lane (measured on this road: 19.4 m
+     #   wide = driving 0→7.0 m + parking 7.0→9.7 m, and a normal spawn lands at
+     #   5.25 m). Both are parked BEFORE the clock starts, so the scenario never has
+     #   to hope they are still there.
+     # The clearances are re-measured at the end from each car's reported length_m,
+     # so if Config's model table is ever retuned the stale numbers in this comment
+     # are visible and the bay check says "too tight" instead of quietly changing
+     # how hard the test is.
+     [{'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': -8.47,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_rear', 'bay_flank': True},
+      {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 4.07,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
+     "Back-in park into a bay between two parked cars (1 m clearance)", 0.15, True,
      END_FLAG_PROGRESS, False,
      # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
      # cars that are ALREADY parked, and success is "got in without touching either
@@ -800,6 +829,35 @@ DETERMINISTIC_TESTS = [
        'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
        'model': 'fiat_500', 'name': 'bay_rear', 'bay_flank': True},
       {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 2.57,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
+     "Back-in park into a bay between two parked cars (0.5 m clearance)", 0.15, True,
+     END_FLAG_PROGRESS, False,
+     # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
+     # cars that are ALREADY parked, and success is "got in without touching either
+     # one". Every number here is derived, not picked:
+     #   pkw_n→pkw_s is 300 m long and the end flag stands at progress 0.5 → s =
+     #   150 m; the sim's own finish rule is "the NOSE touches the mark", so a car
+     #   that parks as intended ends with its CENTRE at 150 − 4.40/2 = 147.8 m
+     #   (4.40 = mercedes_c220.LengthM, the model this scenario pins for itself).
+     #   Neighbours are fiat_500 (3.14 m) at ±4.77 m from that centre, which leaves
+     #   an inner gap of 2·4.77 − 3.14 = 6.40 m for a 4.40 m car: 1.00 m of
+     #   clearance at each end. A German bay is 6.0-6.5 m, so this is a bay and not
+     #   a favour - and a car that misses the bay hits a neighbour, which the sim
+     #   reports as a crash rather than as a measurement.
+     #   lat_m 8.35 stands them in the PARKING lane (measured on this road: 19.4 m
+     #   wide = driving 0→7.0 m + parking 7.0→9.7 m, and a normal spawn lands at
+     #   5.25 m). Both are parked BEFORE the clock starts, so the scenario never has
+     #   to hope they are still there.
+     # The clearances are re-measured at the end from each car's reported length_m,
+     # so if Config's model table is ever retuned the stale numbers in this comment
+     # are visible and the bay check says "too tight" instead of quietly changing
+     # how hard the test is.
+     [{'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': -6.47,
+       'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
+       'model': 'fiat_500', 'name': 'bay_rear', 'bay_flank': True},
+      {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 2.07,
        'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
        'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
     # NEGATIVE TEST (wrong-side detector) - runs LAST on purpose: the old
