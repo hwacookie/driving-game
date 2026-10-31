@@ -59,6 +59,15 @@ public sealed partial class BicycleNav
     // known) to the longitudinal section of the NEXT tick (where the demand lives).
     private bool _parkHeld;
     private bool _parkHeldNext;
+    // #36 black box: four executor changes in a row moved the contact zero millimetres,
+    // which means either they are all irrelevant or I cannot see what I am changing.
+    // These counters settle which: how often the envelope EASED the wheel versus how
+    // often it actually HELD the phase, plus a 1 Hz line with the pose, the separation
+    // to the nearest body beside the bay, and the phase's own speed demand. Written to
+    // the decision record because Console output is invisible under `dotnet test`.
+    private int _pkEaseTicks;
+    private int _pkHoldTicks;
+    private double _pkLastRecT;
 
     /// <summary>Body corner positions relative to the rear axle, (along, right)
     /// in metres, in the car's own frame.</summary>
@@ -509,6 +518,28 @@ public sealed partial class BicycleNav
             vTarget = Math.Min(PARK_REVERSE_CREEP_M_S, PARK_SHIMMY_M - _parkShimmyDist);
         else if (dRem <= 0.05) vTarget = 0.0;
         else vTarget = -Math.Min(PARK_REVERSE_CREEP_M_S, dRem / PARK_STOP_TAU);
+        if (_navTime - _pkLastRecT >= 1.0)
+        {
+            _pkLastRecT = _navTime;
+            double sepAlong = 0.0, sepLat = 0.0, nearD = double.MaxValue;
+            int nearUid = 0;
+            if (car.ParkingNeighbours is { Count: > 0 } list)
+                foreach (var n in list)
+                {
+                    double dx = n.X - car.X, dy = n.Y - car.Y;
+                    double d = Math.Hypot(dx, dy);
+                    if (d >= nearD) continue;
+                    nearD = d; nearUid = n.Uid;
+                    double hr = Math.Radians(car.Heading);
+                    sepAlong = dx * Math.Sin(hr) + dy * Math.Cos(hr);
+                    sepLat = dx * Math.Cos(hr) - dy * Math.Sin(hr);
+                }
+            car.RecordDecision(_navTime,
+                $"[PARKT] yaw={psiDeg:F1}° v={car.Speed:F2} vt={vTarget:F2} " +
+                $"off={eOff:F2} dRem={dRem:F1} held={_parkHeld} " +
+                $"near=#{nearUid} sep={nearD:F2} along={sepAlong:F2} lat={sepLat:F2} " +
+                $"crash={car.CrashEpisodes} contact=#{car.ContactWith} inContact={car.InContact}");
+        }
         double brakeRate = A_PARK;
         if (Math.Abs(car.Speed) < PARK_ROLL_END_M_S)
             brakeRate = Math.Min(brakeRate, PARK_ROLL_END_A);
@@ -618,7 +649,7 @@ public sealed partial class BicycleNav
             if (delta != 0.0)
                 foreach (double f in new[] { 1.0, 0.75, 0.5, 0.35, 0.2, 0.0 })
                 {
-                    if (Inside(delta * f)) { delta *= f; break; }
+                    if (Inside(delta * f)) { if (f < 1.0) _pkEaseTicks++; delta *= f; break; }
                 }
             // The wheel is already at its last free angle and the corners still sweep
             // into a body: what is left is the brake. Creeping on because the reference
@@ -629,13 +660,21 @@ public sealed partial class BicycleNav
                 (car.Speed / WHEELBASE_M) * Math.Tan(delta) * dt);
             double hs = Math.Radians(hStraight);
             var (sbx, sby) = car.BodyCenter();
-            _parkHeldNext = ClipsNeighbour(sbx + Math.Sin(hs) * car.Speed * dt,
-                                           sby + Math.Cos(hs) * car.Speed * dt, hStraight);
+            // The demand for THIS tick has to know the veto for THIS tick. Reading a
+            // flag set by the previous tick's steering section left the creep running
+            // at -0.74 m/s with held=True in the trace — the veto brake removed a
+            // fraction of a step per tick, which is the grind, not a stop.
+            _parkHeld = _parkHeldNext = ClipsNeighbour(
+                sbx + Math.Sin(hs) * car.Speed * dt,
+                sby + Math.Cos(hs) * car.Speed * dt, hStraight);
             if (_parkHeldNext)
             {
                 _parkHeld = true;
-                double v = Math.Max(0.0, Math.Abs(car.Speed) - A_PARK * dt);
-                car.Speed = car.Speed < 0.0 ? -v : v;
+                _pkHoldTicks++;
+                // Full stop, not a ramp. Raising the brake by A_PARK·dt per tick
+                // against a demand that was still asking for -0.80 m/s is what let the
+                // body keep sliding into the neighbour (trace: held=True, v=-0.74).
+                car.Speed = 0.0;
                 car.IsBraking = true;
             }
         }
@@ -705,7 +744,13 @@ public sealed partial class BicycleNav
         // sets vTarget to 0 by design, so the demand test alone would let a car parked
         // against a neighbour sit in silence forever, never escalating to an attempt or
         // an honest surrender.
-        if (Math.Abs(car.Speed) < 0.05 && (Math.Abs(vTarget) > 0.15 || _parkHeld))
+        // "The phase wants movement and the car has none": the honest signal is that
+        // path remains (dRem > 0.1 m) while the body stands still. Gating on the veto
+        // flag instead never escalated anything, because a veto is evaluated on the
+        // NEXT step and a standing car has no next step to object to — so the flag
+        // released on the very tick it was set, the stall timer reset, and the car sat
+        // in a tight bay forever without ever attempting again or admitting defeat.
+        if (Math.Abs(car.Speed) < 0.05 && (Math.Abs(vTarget) > 0.15 || dRem > 0.1))
         {
             // The phase still asks for movement and the car cannot move: that is a
             // HOLD, not a slow moment. Before #36 this state had no exit at all — the
@@ -748,6 +793,17 @@ public sealed partial class BicycleNav
                 car.RecordDecision(_navTime,
                     $"[PARK] tuck held at {psiDeg:F1}° - abandoning it and re-solving " +
                     $"from here (attempt {_parkAttempts + 1})");
+                // Re-decide immediately rather than handing the car back to a route
+                // whose destination flag still sits inside the bay (that version drove
+                // forward into P1 — measured, three cases went from stalled to in
+                // contact). It is safe now because the envelope's veto is a full stop:
+                // whatever the re-solve arms, the body cannot be advanced into a
+                // neighbour. Best case it finds a tuck that fits from this pose;
+                // otherwise it arms the straight backup, which moves the car AWAY from
+                // P1 and re-solves from further back — more room for the arc, which is
+                // what a tight bay actually needs.
+                StartReversePark();
+                return;
             }
             else
             {
@@ -777,7 +833,8 @@ public sealed partial class BicycleNav
         _parkShimmyDist = 0.0;
         Parked = true;
         ParkPhase = "stopped";
-        car.RecordDecision(_navTime, $"[PARK] {notice}");
+        car.RecordDecision(_navTime, $"[PARK] {notice} " +
+            $"[envelope: eased {_pkEaseTicks}×, held {_pkHoldTicks}×]");
         Console.WriteLine($"{(notice.StartsWith("GAVE UP") ? "⚠️" : "✅")} Reverse-in: " +
                           $"{notice}\n");
     }

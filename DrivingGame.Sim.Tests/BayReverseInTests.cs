@@ -115,7 +115,7 @@ public class BayReverseInTests
                 Assert.True(crashAt is null,
                     $"the car contacted a neighbour during the manoeuvre: {crashAt} " +
                     $"(bay clearance {clearanceM:F1} m, envelope engaged " +
-                    $"{EnvelopeFirings(car)} times while tucking)");
+                    $"{EnvelopeFirings(car)} times while tucking)\n" + ParkTrace(car));
                 // Parked alone does NOT mean the manoeuvre worked: giving up parks the
                 // car too (#36 option (c) ends in an honest surrender). So the exit is
                 // what gets asserted, read back from the car's own decision record.
@@ -155,6 +155,22 @@ public class BayReverseInTests
     {
         lock (car.Decisions)
             return car.Decisions.Count(d => d.Msg?.Contains("[PARK] envelope holds") == true);
+    }
+
+    /// <summary>The tuck's own black box: 1 Hz pose, separation to the nearest body
+    /// beside the bay, and the phase's speed demand, read back from the decision
+    /// record. Four executor changes moved the contact zero millimetres, so the next
+    /// fix has to be chosen from this trace rather than from a hypothesis.</summary>
+    static string ParkTrace(Car car, int last = 14)
+    {
+        lock (car.Decisions)
+        {
+            var rows = car.Decisions
+                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true)
+                .Select(d => d.Msg!)
+                .ToList();
+            return string.Join("\n  ", rows.TakeLast(last));
+        }
     }
 
     /// <summary>The nav's last word about the parking job, read from the car's own

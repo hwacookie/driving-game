@@ -395,6 +395,7 @@ public sealed partial class BicycleNav
         ParkStyle = "forward";
         _parkStyleLocked = false;
         _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
+        _pkEaseTicks = 0; _pkHoldTicks = 0;
         _parkTuck = 0.0;
         _parkStageM = 0.0;
         _parkStageShort = false;
@@ -411,6 +412,7 @@ public sealed partial class BicycleNav
         ParkStyle = "forward";
         _parkStyleLocked = false;
         _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
+        _pkEaseTicks = 0; _pkHoldTicks = 0;
         _parkTuck = 0.0;
         _parkStageM = 0.0;
         _reversePark = null;
