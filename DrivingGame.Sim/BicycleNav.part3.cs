@@ -857,7 +857,7 @@ public sealed partial class BicycleNav
         _reversePark = null;
         _parkShimmy = false;
         _parkShimmyDist = 0.0;
-        Parked = true;
+        Parked = !notice.StartsWith("GAVE UP");   // a surrender must not claim parked
         ParkPhase = "stopped";
         car.RecordDecision(_navTime, $"[PARK] {notice} " +
             $"[envelope: eased {_pkEaseTicks}×, held {_pkHoldTicks}×]");
