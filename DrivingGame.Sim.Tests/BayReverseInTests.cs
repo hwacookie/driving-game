@@ -115,7 +115,8 @@ public class BayReverseInTests
                     $"the {clearanceM:F1} m bay was only 'succeeded' by giving up: " +
                     notice);
                 Assert.False((car.Driver as BicycleDriver)?.Hazard ?? false,
-                    $"hazard lights are on after parking the {clearanceM:F1} m bay - " +
+                    $"hazard lights are on after parking the {clearanceM:F1} m bay, " +
+                    $"reason: '{(car.Driver as BicycleDriver)?.HazardReason ?? "?"}' - " +
                     "the driver surrendered and made it visible, as designed, so this " +
                     "is not a pass");
                 return;
