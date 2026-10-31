@@ -69,6 +69,7 @@ public sealed partial class BicycleNav
     private int _pkHoldTicks;
     private double _pkLastRecT;
     private double _pkAppLastT;
+    private double _parkHoldT;
     private double _pkAccLastT;
 
     /// <summary>Body corner positions relative to the rear axle, (along, right)
@@ -1901,6 +1902,36 @@ public sealed partial class BicycleNav
         DbgState = (S, _ref?.Total ?? -1.0, dbgPlanPhase,
                     Math.Degrees(Math.Abs(delta)), TargetSpeed(S),
                     accel, vTarget, accelScale);                     // TEMPORARY debug
+
+        // #38: the fall-through guard. At the staging point (`dStop <= 0.5`, the same
+        // condition the re-ask gate uses) the job is active and no tuck is armed - which is
+        // exactly the state where the next tick used to run lane-keeping pursuit with the
+        // kerb blend still on, and a car lying 48 deg across its lane gets MAX_STEER and
+        // circles into the oncoming half (measured: wheelRAD -0.663 = -38.0 deg held ~9 s,
+        // dStop growing 3.04 -> 4.25 m). Holding the speed at zero removes the circle by
+        // construction - the yaw rate is proportional to speed, so a standing car cannot
+        // turn - while the re-ask gate keeps trying every tick, which is the recovery the
+        // passing bays depend on (a solver `false` there means "not this tick", measured:
+        // surrendering on it turned 1 ladder failure into 3). Only if holding lasts
+        // PARK_STALL_S does the job end, and then visibly.
+        bool parkHold = ParkStyle == "reverse" && _reversePark is null &&
+                        plan is not null && (dStop ?? 99.0) <= 0.5 && !Parked;
+        if (parkHold)
+        {
+            vTarget = 0.0;
+            accel = false;
+            _parkHoldT += dt;
+            if (_parkHoldT >= PARK_STALL_S && ParkPhase != "stopped")
+            {
+                _car.Driver?.SetHazard(true, reason: "bay: holding, nothing to plan");
+                car.RecordDecision(_navTime,
+                    $"[PARK] GAVE UP - no tuck armed for {PARK_STALL_S:F1} s at the bay " +
+                    $"mouth (nose {Math.Degrees(Math.Radians(Math.WrapDeg(car.Heading - (_ref?.HeadingAt(S) ?? 0.0)))):F1}° " +
+                    $"to the lane); standing, NOT parked");
+                ParkPhase = "stopped";
+            }
+        }
+        else _parkHoldT = 0.0;
 
         // Ease speed toward the target (accel / brake rates).
         bool braked = false;   // real brake pedal applied this tick (lights)
