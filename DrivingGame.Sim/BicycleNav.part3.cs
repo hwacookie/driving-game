@@ -36,6 +36,26 @@ public sealed partial class BicycleNav
     /// counts as a hold rather than a slow moment. Same shape as the u-turn's stall
     /// guard, which has had one all along; parking did not.</summary>
     internal const double PARK_STALL_S = 5.0;
+    /// Largest angle between nose and road axis the reverse solver will arm from, in degrees
+    /// (env PARK_ENTRY_MAX_DEG for measurement runs). It is NOT an owner rule - the parking
+    /// rule is contacts / road edge / oncoming occupancy - and it is not the constraint
+    /// issue 39 hoped it was not: both numbers below were measured on the same tree.
+    ///
+    ///   20 deg (this default) - tight e2e bays are refused at nose -40.4 deg / -42.1 deg
+    ///     (tape_T_371_0) and end via the staging claim 4.9 m / 6.6 m off the kerb.
+    ///   45 deg - unit stays 165 passed / 0 failed, and the e2e bays get WORSE: the tuck arms
+    ///     from -40 deg and ends 1015 cm / 994 cm from the kerb (vs 490 / 664 cm), i.e. the
+    ///     executed plan drives the body away from the bay instead of into it, while the
+    ///     fore/aft clearances (rear +2.37 / front -0.62) look plausible. A lane guard
+    ///     violation was NOT triggered, so this failure is silent in traffic terms and loud
+    ///     in geometry terms - exactly the kind of wrong-green the bay metric exists to catch.
+    ///
+    /// So the gate stays, and retiring it needs an unwind BEFORE arming (drive the lane
+    /// until the pose is armable, bounded, with the kerb blend off) rather than a permissive
+    /// solver. That is the open half of issue 39; this constant documents where the line
+    /// currently is and what both sides of it measure.
+    public static readonly double PARK_ENTRY_MAX_RAD = Math.Radians(double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_ENTRY_MAX_DEG"), out var _pe) ? _pe : 20.0);
     /// <summary>Attempts before the car stops pretending. Two is what a driver gives
     /// a kerb bay before accepting it or driving on — the third is a spectator
     /// sport.</summary>
@@ -350,7 +370,15 @@ public sealed partial class BicycleNav
         double rx = ty, ry = -tx;
         double roadH = Math.PosDeg(Math.Degrees(Math.Atan2(tx, ty)));
         double psi0 = Math.Radians(Math.WrapDeg(car.Heading - roadH));
-        if (Math.Abs(psi0) > Math.Radians(20.0))
+        // #39: the entry limit is a measured number, not a taboo. 20 deg was a stand-in for
+        // the judgement the candidate loop makes anyway (ReverseParkOk + PathClearsBodies +
+        // run-out), and the owner rule for parking is contacts / road edge / oncoming
+        // occupancy - nobody set an entry angle. Deleting the limit outright was measured
+        // harmful (1 unit failure became 3) when the executor had no way to unwind a
+        // leftover body angle; now that the forward unwind is reachable (03dd955) the limit
+        // can be widened and judged by measurement. PARK_ENTRY_MAX_DEG keeps it adjustable
+        // for the runs that decide where it really belongs; the refusal still records why.
+        if (Math.Abs(psi0) > PARK_ENTRY_MAX_RAD)
         {
             // #36: this refusal was silent, and silence is why the tight bays looked
             // like a tuck-quality problem. Nothing is armed here, so no [PARKT] row is
