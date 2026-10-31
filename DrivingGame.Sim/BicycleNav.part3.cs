@@ -36,6 +36,12 @@ public sealed partial class BicycleNav
     /// counts as a hold rather than a slow moment. Same shape as the u-turn's stall
     /// guard, which has had one all along; parking did not.</summary>
     internal const double PARK_STALL_S = 5.0;
+    const double PARK_PLAN_DS_M = 0.02;
+    public static readonly double PARK_PSI_FOLLOW_TOL_DEG = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_PSI_FOLLOW_TOL_DEG"), out var _pt) ? _pt : 6.0;
+    public static readonly bool PARK_PSI_MAX_GUARD = !string.Equals(
+        Environment.GetEnvironmentVariable("PARK_PSI_MAX_GUARD"), "0",
+        StringComparison.OrdinalIgnoreCase);
     /// Largest angle between nose and road axis the reverse solver will arm from, in degrees
     /// (env PARK_ENTRY_MAX_DEG for measurement runs). It is NOT an owner rule - the parking
     /// rule is contacts / road edge / oncoming occupancy - and it is not the constraint
@@ -71,6 +77,7 @@ public sealed partial class BicycleNav
     internal const double PARK_NEIGHBOUR_CLEAR_M = 0.25;
 
     private double _parkStallT;
+    private double _pkTravelM;
     private double _parkShimmyDist;
     private int _parkAttempts;
     private bool _parkShimmy;
@@ -516,6 +523,7 @@ public sealed partial class BicycleNav
         {
             Steer = pts.Select(p => p.Steer).ToArray(),
             Psi = pts.Select(p => p.Psi).ToArray(),
+            ArcLenM = pts.Count > 1 ? Math.Max(0.0, -pts.Min(q => q.U)) : 0.0,
             RoadH = roadH,
             VTarget = oPark - (oPark - v0 - dv),   // reached kerb offset
             OPark = oPark,
@@ -526,6 +534,7 @@ public sealed partial class BicycleNav
         // is born, because a stale count from the last bay would let the first
         // shuffle of a new manoeuvre be the one that gives up (#36).
         _parkStallT = 0.0;
+        _pkTravelM = 0.0;
         _parkShimmy = false;
         _parkShimmyTries = 0;
         _parkShimmyDist = 0.0;
@@ -649,6 +658,7 @@ public sealed partial class BicycleNav
                 $"near=#{nearUid} sep={nearD:F2} along={sepAlong:F2} lat={sepLat:F2} " +
                 $"crash={car.CrashEpisodes} contact=#{car.ContactWith} inContact={car.InContact}");
         }
+        _pkTravelM += Math.Abs(car.Speed) * dt;
         double brakeRate = A_PARK;
         if (Math.Abs(car.Speed) < PARK_ROLL_END_M_S)
             brakeRate = Math.Min(brakeRate, PARK_ROLL_END_A);
@@ -667,6 +677,18 @@ public sealed partial class BicycleNav
             // going forward — so the shuffle steers the mirror image of the reverse
             // law, which is what unwinds the angle the tuck could not close.
             delta = -PARK_REVERSE_PSI_GAIN * psiCar + PARK_REVERSE_POS_GAIN * eOff;
+        // #39: the follow law may not exceed the body angle the armed plan asks for AT
+        // THIS ARC POSITION by more than PARK_PSI_FOLLOW_TOL_DEG. Reversing flips the
+        // kinematic sign, so only the unwinding direction stays allowed. Arc progress is
+        // counted locally: ParkS() re-projects the line and is not ours to call per tick.
+        if (PARK_PSI_MAX_GUARD && _reversePark is { } rp && rp.Psi.Length > 0 &&
+            _pkTravelM <= rp.ArcLenM)
+        {
+            int idx = Math.Min(rp.Psi.Length - 1, (int)(_pkTravelM / PARK_PLAN_DS_M));
+            double psiPlan = Math.Abs(rp.Psi[idx]);
+            if (Math.Abs(psiCar) > psiPlan + Math.Radians(PARK_PSI_FOLLOW_TOL_DEG))
+                delta = psiCar >= 0.0 ? Math.Max(0.0, delta) : Math.Min(0.0, delta);
+        }
         delta = Math.Max(-MAX_STEER, Math.Min(MAX_STEER, delta));
         // The feedback trajectory is NOT the checked two-arc path, so enforce
         // the SAME envelope it was validated against (body corners on the

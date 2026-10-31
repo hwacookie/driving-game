@@ -25,6 +25,7 @@ public sealed class ReverseParkState
     public required double[] Steer { get; init; }
     public required double[] Psi { get; init; }
     public required double RoadH { get; init; }
+    public double ArcLenM { get; init; }
     public required double VTarget { get; init; }
     public required double OPark { get; init; }
     public required double Tx { get; init; }
