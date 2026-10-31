@@ -392,7 +392,8 @@ public sealed partial class BicycleNav
             // ever written and the phase machine keeps the car standing in the bay.
             car.RecordDecision(_navTime,
                 $"[PARKPLAN] REFUSED: nose {Math.Degrees(psi0):F1}° off the road axis, " +
-                $"solver wants |psi0| <= 20° - tuck NOT armed (phase={ParkPhase})");
+                $"solver wants |psi0| <= {Math.Degrees(PARK_ENTRY_MAX_RAD):F0}° " +
+                $"(PARK_ENTRY_MAX_DEG) - tuck NOT armed (phase={ParkPhase})");
             return false;
         }
         // What stands beside the bay, in this frame. The planner has to know before it
