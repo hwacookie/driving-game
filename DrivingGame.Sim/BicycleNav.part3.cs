@@ -96,7 +96,7 @@ public sealed partial class BicycleNav
                         double? delta = null)
     {
         if (delta is null) delta = MAX_STEER;
-        double k = Math.Tan(delta.Value) / WHEELBASE_M;               // 1/R
+        double k = Math.Tan(delta.Value) / CarWheelbaseM;         // 1/R, this car's own wheelbase (#42)
         double R = 1.0 / k;
         double arg = (Math.Cos(psi0) + 1.0 - dv / R) / 2.0;
         if (arg < -1.0 || arg > 1.0) return (new List<(double, double, double, double)>(), false);
@@ -972,7 +972,7 @@ public sealed partial class BicycleNav
         }
 
         bool single = width >= UTURN_SINGLE_SWING_MIN_WIDTH_M;
-        double k = Math.Tan(MAX_STEER) / WHEELBASE_M;    // rad per metre
+        double k = Math.Tan(MAX_STEER) / CarWheelbaseM;    // rad per metre, this car's own (#42)
         const double arcDs = 0.025;
 
         double WorstCornerLat(List<(double X, double Y, double H)> linePts)

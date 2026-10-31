@@ -41,6 +41,14 @@ public sealed partial class BicycleNav
     // ====================================================================
 
     public const double WHEELBASE_M = 2.7;           // m
+
+    /// <summary>The wheelbase THIS car's model has, in metres - what the parking planner
+    /// must use. Equals WHEELBASE_M for the reference model (mercedes_c220), smaller for
+    /// the short ones, larger for the long ones (issue 42).</summary>
+    public double CarWheelbaseM => Config.WheelbaseM(_car.Model);
+
+    /// Minimum turning radius this car can hold, in metres: R = wheelbase / tan(steer).
+    public double MinTurnRadiusM => CarWheelbaseM / Math.Tan(Config.MaxSteerRad(_car.Model));
     public const double CAR_LENGTH_M = 4.5;        // m (front bumper to rear bumper)
     /// <summary>Distance from the car's reference point (rear axle - what S
     /// tracks) to the front bumper. Used to park with the bumper AT the
