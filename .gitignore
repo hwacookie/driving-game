@@ -30,5 +30,6 @@ logs/
 ## OS / Python tooling junk
 .DS_Store
 __pycache__/
-.venv/
+.venv
+   # plain ".venv" too: a symlink named .venv is NOT matched by ".venv/" and got committed once (see git log: fix #39 entry-limit-measured)
 TestResults/
