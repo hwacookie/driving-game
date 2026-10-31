@@ -178,7 +178,7 @@ public sealed partial class BicycleNav
             // blend stranded on the chopped-off tail and the car would never
             // drift to the kerb.
             rounded = CutPolylineAt(rounded, _dest.Value.X, _dest.Value.Y,
-                                    extendM: Math.Max(_parkStageM, CORRIDOR_RUNOUT_M));
+                                    extendM: Math.Max(_parkStageM + _parkStageExtM, CORRIDOR_RUNOUT_M));
         }
         // Shift the centerline into the driving lane (right-hand traffic). The
         // offset must be small enough that the car's right side stays on the
@@ -237,7 +237,7 @@ public sealed partial class BicycleNav
             // Red-flag destination: the line ENDS there - parking ramp, kerb
             // drift and stop all anchor to the truncated end.
             lane = CutPolylineAt(lane, _dest.Value.X, _dest.Value.Y,
-                                 extendM: _parkStageM);
+                                 extendM: _parkStageM + _parkStageExtM);
         }
         _ref = new RefLine(lane);
         if (RefLineMath.PARK_DEBUG)
@@ -331,7 +331,7 @@ public sealed partial class BicycleNav
                                   pullingOver: pullingOver, pullingOut: pullingOut);
             if (_dest is not null)
                 lane = CutPolylineAt(lane, _dest.Value.X, _dest.Value.Y,
-                                     extendM: _parkStageM);
+                                     extendM: _parkStageM + _parkStageExtM);
             _ref = new RefLine(lane);
         }
 
@@ -374,7 +374,7 @@ public sealed partial class BicycleNav
         {
             // Cut before solve_line - see MaybeRebuild.
             rounded = CutPolylineAt(rounded, _dest.Value.X, _dest.Value.Y,
-                                    extendM: Math.Max(_parkStageM, CORRIDOR_RUNOUT_M));
+                                    extendM: Math.Max(_parkStageM + _parkStageExtM, CORRIDOR_RUNOUT_M));
         }
         double minWidth = RouteSegments().Count > 0
             ? RouteSegments().Min(i => _network.Segments[i].Width)
@@ -396,7 +396,7 @@ public sealed partial class BicycleNav
             // Safety net: keep the endpoint exactly at the destination even
             // though the blend shifted the last metres laterally.
             lane = CutPolylineAt(lane, _dest.Value.X, _dest.Value.Y,
-                                 extendM: _parkStageM);
+                                 extendM: _parkStageM + _parkStageExtM);
             if (RefLineMath.PARK_DEBUG)
                 Console.WriteLine($"[PARKDBG] ref.total={new RefLine(lane).Total:F1} " +
                                   $"(pre-cut {sol.Cum[^1]:F1})");

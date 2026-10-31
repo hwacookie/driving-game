@@ -316,6 +316,23 @@ public sealed partial class BicycleNav
     private bool _parkStyleLocked;      // decided once per destination
     private double _parkTuck;
     private double _parkStageM;
+    // #39: how far PAST the staging line the car is asked to run when no tuck clears the
+    // bay from the pose it actually reached. Deliberately separate from _parkStageM: that
+    // one doubles as the reverse target (tail = max(TAIL_M, stage + u_end) in part3), so
+    // growing it mid-job makes the straight backup reverse forever (measured: -0.80 m/s,
+    // stuck at 52.6% progress, all four rungs red). These two only widen the line the car
+    // drives and the run-out the arming search may use.
+    private double _parkStageExtM;
+    private int _parkStageTries;
+    /// How far a straight backup (no arc) may drive before handing the manoeuvre back for
+    /// a re-solve. The comment at the fallback in part3 promises "backs up a metre to try
+    /// again"; without a cap the same code reverses the whole staging distance (~10 m).
+    public static readonly double PARK_BACKUP_MAX_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_BACKUP_MAX_M"), out var _pbm) ? _pbm : 1.2;
+    public static readonly double PARK_STAGE_EXTRA_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_M"), out var _pse) ? _pse : 1.5;
+    public static readonly int PARK_STAGE_EXTRA_TRIES = int.TryParse(
+        Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_TRIES"), out var _pst) ? _pst : 2;
     private bool _parkStageShort;
     private ReverseParkState? _reversePark;   // active manoeuvre state, or null
     /// <summary>Standing at the destination.</summary>
@@ -402,6 +419,8 @@ public sealed partial class BicycleNav
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         ParkStyle = "forward";
         _parkStyleLocked = false;
+        _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
+        _pkEaseTicks = 0; _pkHoldTicks = 0;
         _parkTuck = 0.0;
         _parkStageM = 0.0;
         _parkStageShort = false;
@@ -417,6 +436,8 @@ public sealed partial class BicycleNav
         _routeKey = null;
         ParkStyle = "forward";
         _parkStyleLocked = false;
+        _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
+        _pkEaseTicks = 0; _pkHoldTicks = 0;
         _parkTuck = 0.0;
         _parkStageM = 0.0;
         _reversePark = null;

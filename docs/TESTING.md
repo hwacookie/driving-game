@@ -152,10 +152,74 @@ sim on a crash and leaves the cars in place.
 
 ## Current baseline (the one place a number is written)
 
-> **Baseline 2026-10-23, `--warp 4`, HEAD `c827710` + comment-only doc pass**
-> (`tests/run_test_T_242_0_20261023_231042.log`). **This block is the single
-> source of the suite's numbers** - every other document links here instead of
-> restating them. Regenerate it from a full run's log; never edit the numbers
+> **Baseline 2026-10-31 (evening), `--warp 4`, parking lineage branch
+`fix-39-the-reverse-solver-refuses-a-bay-on-an` at `03dd955` + docs, supersedes the block
+below it.**
+- C# unit suite: **165 passed / 0 failed / 2 skipped** (`dotnet test`, includes main
+  `ec9e412`). All four bay rungs are green and named in the output:
+  `BayReverseInTests(clearanceM: 2.5 / 1.5 / 1 / 0.5)` plus
+  `ABayWithNoNeighboursIsStillParkedIn`. Passing that ladder requires zero contacts, no
+  `GAVE UP` in the car's own decision record, hazard off, and a recorded verdict (the
+  tightened instrument rejects an empty notice).
+  Causal check: `PARK_SHIMMY_TRIES=0` makes exactly one test red,
+  `BayReverseInTests(clearanceM: 1.5)` - the forward unwind in
+  `UpdateReversePark` is what closes that bay, so the row can fail and names itself.
+- e2e suite: **4 of 29 failed**. `park_6lane_right_lane` is GREEN (its old row "reached
+  the destination but never came to a clean stop", nose -2.29 m / perp 0.80 m, is gone);
+  the bay variant at 2.5 m clearance is GREEN (right flank 6 cm / 10 cm from the kerb,
+  limit 30 cm); the bay variants at 1.0 m and 0.5 m clearance FAIL at 4.9 m / 6.6 m off
+  the kerb - tracked by issue 31, they end through the staging-gate claim rather than a
+  tuck (issue 38/39); and `fig8_xing` / `fig8_xing_plain` remain the two pre-existing
+  out-of-scope failures from the baseline below.
+- CI is green for the same tree (`core build + unit tests`, `godot client build`): the
+  deliberately red instrument row that blocked merging all day no longer exists.
+
+> **Baseline 2026-10-31, `--warp 4`, branch `fix-36-a-car-reversing-into-a-bay-is-held`
+> at `59eb1a2` (`main` = `ee5e81f`); log `tests/run_test_T_355_0_20261031_131638.log`.**
+> This is the current source of the suite's numbers, recorded to make "no worse"
+> a fact for the parking work (issues 36, 31, 37). The 2026-10-23 block under it is
+> the superseded history - keep it for the lineage of the numbers, not as the gate.
+
+- **27 numbered scenarios** run + 1 skipped (`fig8_stress`, the capacity probe,
+  skipped in any warped run by design): **24 passed / 3 failed**.
+- Named failures:
+
+  | scenario | how it failed | sim s |
+  |---|---|---|
+  | `park_6lane_right_lane` | `reached the destination but never came to a clean stop` — the state trace is correct (`driving → parking → parked`) but it stops `nose -2.29 m off the mark (perp 0.80 m)`, outside the ±0.50 m bumper touch | 30.0 |
+  | `fig8_xing` | `unexplained centreline crossing at t=8.8s (lane_guard_errors 1 -> 2)` — an R33 lane-guard hit, not a contact | 8.8 |
+  | `fig8_xing_plain` | `crash at t=9.6s: car 103 contacted car None` | 9.6 |
+
+  `slow_pass_priority`, red here since 2026-10-23, is **green** again.
+- C# unit suite: **160 passed / 3 failed / 2 skipped** (`dotnet test
+  DrivingGame.Sim.Tests/`, ~30 s). The three failures are the bay-clearance ladder
+  of issue 36 — `BayReverseInTests.ACarReversesIntoABayBetweenTwoParkedCars` at
+  clearance **1.5 m** (gives up honestly: 16.5° off the kerb, hazard on), **1.0 m**
+  and **0.5 m** (never complete). The same theory **passes at 2.5 m** (accepted at
+  4.2°) and **with no neighbours**, and **no test reports contacting a parked
+  neighbour any more**. They stay red on purpose: they are the instrument, and
+  "never merge a red behaviour change" does not mean "delete the thermometer".
+- Skips unchanged: `CrossingStressTests.CrossingStress_NoContact_Within_15s`,
+  `RacelineReferenceTests.RebaselineReferenceFile`.
+- **Not reproducible bit-for-bit — read before blaming your change.** The stress
+  scenarios move with the warp factor because command arrival moves with it (the
+  crossing has been seen at 8.7 s and 8.8 s, the contact at 9.6 s). One further
+  member is genuinely **flaky**: the *negative* `hairpin_exit` wrong-side detector
+  (test 25) failed in two runs on 2026-10-31 and passed in the run recorded above.
+  So the gate for a parking PR is a **set comparison**, not a count:
+  1. no failure outside `{park_6lane_right_lane, fig8_xing, fig8_xing_plain}`
+     plus the flaky `hairpin_exit` wrong-side;
+  2. **no contact/crash verdict anywhere except `fig8_xing_plain`** — a parking
+     scenario that touches a neighbour fails hard even if the set otherwise matches;
+  3. `park_6lane_right_lane` is inside issue 36's scope, so it may *leave* the set;
+     nothing else may enter or leave.
+- Re-measure with the two commands above; a failed scenario leaves the host running
+  for analysis (`pkill -f DrivingGame.Server` when done, never a signal to Godot).
+
+> **Historical baseline 2026-10-23 (superseded by the block above), `--warp 4`, HEAD `c827710` + comment-only doc pass**
+> (`tests/run_test_T_242_0_20261023_231042.log`). **That convention still stands** - the current
+> numbers are in the block above, and every other document links to this section
+> instead of restating them. Regenerate it from a full run's log; never edit the numbers
 > by hand.
 
 - **27 numbered scenarios**: 26 run + 1 skipped (`fig8_stress`, the capacity
