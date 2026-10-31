@@ -73,9 +73,7 @@ public class BayReverseInTests
     // tight": with a neighbour present the car is held (avoid#<front> alternating with
     // r32#passive) while its parking phase keeps demanding the movement that hold
     // forbids, and the phase never terminates.
-    [Theory(Skip = "#36: reverse-in reaches the bay but never finishes straightening " +
-                   "when a neighbour stands beside it (residual heading 4-19 deg, held " +
-                   "by avoid#<front> / r32#passive); empty bay completes")]
+    [Theory]
     [InlineData(0.5)]
     [InlineData(1.0)]
     [InlineData(1.5)]
@@ -107,7 +105,21 @@ public class BayReverseInTests
                 string row = $"{car.ActiveCapKey}/{car.HeldByUid}";
                 if (capsSeen.Count == 0 || capsSeen[^1] != row) capsSeen.Add(row);
             }
-            if (car.State == CarState.Parked) return;      // the manoeuvre finished
+            if (car.State == CarState.Parked)
+            {
+                // Parked alone does NOT mean the manoeuvre worked: giving up parks the
+                // car too (#36 option (c) ends in an honest surrender). So the exit is
+                // what gets asserted, read back from the car's own decision record.
+                string notice = ParkNotice(car);
+                Assert.False(notice.Contains("GAVE UP"),
+                    $"the {clearanceM:F1} m bay was only 'succeeded' by giving up: " +
+                    notice);
+                Assert.False((car.Driver as BicycleDriver)?.Hazard ?? false,
+                    $"hazard lights are on after parking the {clearanceM:F1} m bay - " +
+                    "the driver surrendered and made it visible, as designed, so this " +
+                    "is not a pass");
+                return;
+            }
             if (car.Speed < minSpeed) minSpeed = car.Speed;
             if (i % 60 == 0)
                 trace.Add($"t={i * Dt:F1}s s={car.Progress * AvenueLenM:F1} m x={car.X:F2} " +
@@ -123,6 +135,20 @@ public class BayReverseInTests
             $"neighbours: rear uid {rear.Uid}, front uid {front.Uid}, pitch {pitchM:F2} m " +
             $"→ inner gap {(2 * pitchM - 3.14):F2} m for a {car.LengthM:F2} m car\n" +
             "last of the tick trace:\n  " + string.Join("\n  ", trace.TakeLast(8)));
+    }
+
+    /// <summary>The nav's last word about the parking job, read from the car's own
+    /// decision record. The exit matters more than the state: accepted, straightened
+    /// on the second attempt, and surrendered all end in `state=parked`.</summary>
+    static string ParkNotice(Car car)
+    {
+        lock (car.Decisions)
+        {
+            for (int i = car.Decisions.Count - 1; i >= 0; i--)
+                if (car.Decisions[i].Msg?.StartsWith("[PARK]") == true)
+                    return car.Decisions[i].Msg!;
+        }
+        return "(no parking decision recorded)";
     }
 
     [Fact]
@@ -142,7 +168,12 @@ public class BayReverseInTests
         for (int i = 0; i < 60 * 70; i++)
         {
             eng.Tick(Dt);
-            if (car.State == CarState.Parked) return;
+            if (car.State == CarState.Parked)
+            {
+                Assert.False(ParkNotice(car).Contains("GAVE UP"),
+                    "the empty bay was only 'succeeded' by giving up: " + ParkNotice(car));
+                return;
+            }
         }
         Assert.True(false,
             $"even the empty bay never finished (prog {car.Progress * 100:F1}%, " +

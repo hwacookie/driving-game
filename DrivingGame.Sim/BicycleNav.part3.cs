@@ -8,6 +8,40 @@ public sealed partial class BicycleNav
 
     public bool ReverseParkActive => _reversePark is not null;
 
+    // ── How a tuck ends (#36, owner decision 2026-10-31: option (c), "even 7 degrees
+    // is ok") ────────────────────────────────────────────────────────────────────
+    // The reverse-in used to finish on ONE fixed point: cross-track error under 6 cm
+    // and heading within 1.5° of the kerb, reached by creeping to the end of the
+    // planned line. That is a planner's condition, not a driver's: it has no answer
+    // for a car that is standing in its bay at 4° and is being held there by a cap
+    // from a neighbour. Measured on #36: the tuck reached the bay at every bay width
+    // tried (6.40 m gap → 161°, 7.40 m → 167°, 9.40 m → 176°, i.e. 4° residual in a
+    // bay with 2.5 m to spare) and then held at 0 km/h until the scenario timed out.
+    /// <summary>Residual angle to the kerb that still counts as PARKED. The owner
+    /// set it at 7°; a car left 4° crooked in a bay is a parked car, not a job to
+    /// retry.</summary>
+    internal const double PARK_ACCEPT_PSI_DEG = 7.0;
+    /// <summary>How far off the bay's lateral line is still "in the bay". Paired
+    /// with the angle: a straight car 60 cm outside the bay has not parked.</summary>
+    internal const double PARK_ACCEPT_OFF_M = 0.30;
+    /// <summary>SIM seconds of "the plan wants to move and the car cannot" before it
+    /// counts as a hold rather than a slow moment. Same shape as the u-turn's stall
+    /// guard, which has had one all along; parking did not.</summary>
+    internal const double PARK_STALL_S = 5.0;
+    /// <summary>Attempts before the car stops pretending. Two is what a driver gives
+    /// a kerb bay before accepting it or driving on — the third is a spectator
+    /// sport.</summary>
+    internal const int PARK_MAX_ATTEMPTS = 2;
+    /// <summary>Length of the forward shuffle that makes up the second attempt: out
+    /// a metre, wheel wound the other way, back in. A driver's "little more
+    /// forehand".</summary>
+    internal const double PARK_SHIMMY_M = 1.2;
+
+    private double _parkStallT;
+    private double _parkShimmyDist;
+    private int _parkAttempts;
+    private bool _parkShimmy;
+
     /// <summary>Body corner positions relative to the rear axle, (along, right)
     /// in metres, in the car's own frame.</summary>
     private (double Along, double Right)[] ParkCornerOffsets()
@@ -251,6 +285,13 @@ public sealed partial class BicycleNav
             Tx = tx, Ty = ty, Rx = rx, Ry = ry,
             Seg = car.SegIdx,
         };
+        // The attempt counters belong to THIS tuck: they are cleared where the attempt
+        // is born, because a stale count from the last bay would let the first
+        // shuffle of a new manoeuvre be the one that gives up (#36).
+        _parkStallT = 0.0;
+        _parkAttempts = 0;
+        _parkShimmy = false;
+        _parkShimmyDist = 0.0;
         S = 0.0;
         Console.WriteLine($"\n↩️  REVERSE-IN parking: {dv:F2} m tuck over " +
                           $"{refLine.Total:F2} m of reverse, target {oPark:F2} m from the " +
@@ -293,7 +334,22 @@ public sealed partial class BicycleNav
         // short). The run-out exists so heading/cross-track error has somewhere
         // to converge; drive it.
         double vTarget;
-        if (dRem <= 0.05) vTarget = 0.0;
+        if (_parkShimmy && _parkShimmyDist >= PARK_SHIMMY_M)
+        {
+            // The shuffle has done its metres: back to the reverse branch, with the
+            // angle the forward half bought.
+            _parkShimmy = false;
+            _parkShimmyDist = 0.0;
+        }
+        double psiDeg = Math.Abs(Math.Degrees(psiCar));
+        bool inBay = psiDeg <= PARK_ACCEPT_PSI_DEG && Math.Abs(eOff) <= PARK_ACCEPT_OFF_M;
+        // #36: converged (the planner's exact point) OR standing in the bay within the
+        // tolerances above. Not replacing the old condition — a car that hits it is
+        // still finished — but a car that cannot reach it any more stops being held.
+        bool acceptable = converged || inBay;
+        if (_parkShimmy)
+            vTarget = Math.Min(PARK_REVERSE_CREEP_M_S, PARK_SHIMMY_M - _parkShimmyDist);
+        else if (dRem <= 0.05) vTarget = 0.0;
         else vTarget = -Math.Min(PARK_REVERSE_CREEP_M_S, dRem / PARK_STOP_TAU);
         double brakeRate = A_PARK;
         if (Math.Abs(car.Speed) < PARK_ROLL_END_M_S)
@@ -307,6 +363,12 @@ public sealed partial class BicycleNav
 
         // --- steering: feedback parking law + envelope guard ---
         double delta = PARK_REVERSE_PSI_GAIN * psiCar - PARK_REVERSE_POS_GAIN * eOff;
+        if (_parkShimmy)
+            // Forward motion flips the kinematic sign: the same steer that swings the
+            // nose away from the kerb while reversing swings it towards the kerb
+            // going forward — so the shuffle steers the mirror image of the reverse
+            // law, which is what unwinds the angle the tuck could not close.
+            delta = -PARK_REVERSE_PSI_GAIN * psiCar + PARK_REVERSE_POS_GAIN * eOff;
         delta = Math.Max(-MAX_STEER, Math.Min(MAX_STEER, delta));
         // The feedback trajectory is NOT the checked two-arc path, so enforce
         // the SAME envelope it was validated against (body corners on the
@@ -350,9 +412,9 @@ public sealed partial class BicycleNav
         double rad = Math.Radians(car.Heading);
         car.X += Math.Sin(rad) * car.Speed * dt;
         car.Y += Math.Cos(rad) * car.Speed * dt;
+        if (_parkShimmy) _parkShimmyDist += Math.Abs(car.Speed) * dt;
         SyncSegment();
-
-        ParkPhase = "reverse";
+        ParkPhase = _parkShimmy ? "stopped" : "reverse";
         if (RefLineMath.PARK_DEBUG)
         {
             // Also watch the swept body corners: the feedback trajectory is NOT
@@ -371,14 +433,68 @@ public sealed partial class BicycleNav
                 Console.WriteLine($"[RVWARN] corner out of envelope: [{worstK:F2}, {worstO:F2}] " +
                                   $"lims [{centreLim:F2}, {kerbLim:F2}]");
         }
-        if ((converged || dRem <= 0.05) && Math.Abs(car.Speed) < PARK_STANDSTILL_M_S)
+        if ((acceptable || dRem <= 0.05) && Math.Abs(car.Speed) < PARK_STANDSTILL_M_S)
         {
-            car.Speed = 0.0;
-            _reversePark = null;
-            Parked = true;
-            ParkPhase = "stopped";
-            Console.WriteLine("✅ Reverse-in parking complete - standing at the kerb\n");
+            FinishReversePark(converged ? "standing at the kerb" :
+                $"standing in the bay, {psiDeg:F1}° off the kerb - accepted within " +
+                $"{PARK_ACCEPT_PSI_DEG:F0}° (#36)");
+            return;
         }
+        if (Math.Abs(car.Speed) < 0.05 && Math.Abs(vTarget) > 0.15)
+        {
+            // The phase still asks for movement and the car cannot move: that is a
+            // HOLD, not a slow moment. Before #36 this state had no exit at all — the
+            // car sat at 0 km/h asking for a few more degrees until the scenario timed
+            // out, held by a cap from the neighbour it was parking beside.
+            _parkStallT += dt;
+            if (_parkStallT <= PARK_STALL_S) return;
+            _parkStallT = 0.0;
+            _parkAttempts++;
+            if (inBay)
+            {
+                FinishReversePark($"held at {psiDeg:F1}° for {PARK_STALL_S:0} s - inside " +
+                                  $"the bay's tolerances, so it is parked");
+            }
+            else if (_parkAttempts < PARK_MAX_ATTEMPTS)
+            {
+                _parkShimmy = true;
+                _parkShimmyDist = 0.0;
+                car.RecordDecision(_navTime,
+                    $"[PARK] tuck stalled at {psiDeg:F1}° - shuffling forward " +
+                    $"{PARK_SHIMMY_M:F1} m to straighten (attempt {_parkAttempts + 1}" +
+                    $"/{PARK_MAX_ATTEMPTS})");
+            }
+            else
+            {
+                // Give up honestly: park where it stands, say so, and make it visible
+                // — the same shape the u-turn's stall guard uses. Silent eternal
+                // holding is the failure mode this branch exists to remove.
+                _car.Driver?.SetHazard(true, reason:
+                    $"parking stalled at {psiDeg:F1}° after {PARK_MAX_ATTEMPTS} attempts");
+                FinishReversePark($"GAVE UP after {PARK_MAX_ATTEMPTS} attempts - " +
+                                  $"{psiDeg:F1}° off the kerb, " +
+                                  $"{Math.Abs(eOff):F2} m off the bay line");
+            }
+        }
+        else _parkStallT = 0.0;
+    }
+
+    /// <summary>End the tuck and own the result: engine off, no route, standing where
+    /// it stands. `notice` goes to the log and the decision record verbatim, because
+    /// "completed straight" and "gave up 19° crooked" must not share one line.</summary>
+    private void FinishReversePark(string notice)
+    {
+        var car = _car;
+        car.Speed = 0.0;
+        car.TargetSpeed = 0.0;
+        _reversePark = null;
+        _parkShimmy = false;
+        _parkShimmyDist = 0.0;
+        Parked = true;
+        ParkPhase = "stopped";
+        car.RecordDecision(_navTime, $"[PARK] {notice}");
+        Console.WriteLine($"{(notice.StartsWith("GAVE UP") ? "⚠️" : "✅")} Reverse-in: " +
+                          $"{notice}\n");
     }
 
     // ====================================================================
