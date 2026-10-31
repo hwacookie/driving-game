@@ -337,7 +337,16 @@ public sealed partial class BicycleNav
         double rx = ty, ry = -tx;
         double roadH = Math.PosDeg(Math.Degrees(Math.Atan2(tx, ty)));
         double psi0 = Math.Radians(Math.WrapDeg(car.Heading - roadH));
-        if (Math.Abs(psi0) > Math.Radians(20.0)) return false;
+        if (Math.Abs(psi0) > Math.Radians(20.0))
+        {
+            // #36: this refusal was silent, and silence is why the tight bays looked
+            // like a tuck-quality problem. Nothing is armed here, so no [PARKT] row is
+            // ever written and the phase machine keeps the car standing in the bay.
+            car.RecordDecision(_navTime,
+                $"[PARKPLAN] REFUSED: nose {Math.Degrees(psi0):F1}° off the road axis, " +
+                $"solver wants |psi0| <= 20° - tuck NOT armed (phase={ParkPhase})");
+            return false;
+        }
         // What stands beside the bay, in this frame. The planner has to know before it
         // commits — asking the executor to dodge later is what produced the grinding
         // contact of #36.
@@ -357,6 +366,7 @@ public sealed partial class BicycleNav
         // The deepest feasible park wins; among equals the sharpest (shortest)
         // back-in is kept.
         (double dvTry, List<(double U, double V, double Psi, double Steer)> pts)? best = null;
+        double bestDeltaDeg = double.NaN;
         foreach (double deltaDeg in REVERSE_STEER_CANDIDATE_DEGS)
         {
             double delta = Math.Radians(deltaDeg);
@@ -373,7 +383,10 @@ public sealed partial class BicycleNav
                     -cand[^1].U <= stage - PARK_REVERSE_MIN_TAIL_M)
                 {
                     if (best is null || dvT > best.Value.dvTry + 1e-9)
+                    {
                         best = (dvT, cand);
+                        bestDeltaDeg = deltaDeg;
+                    }
                     break;
                 }
                 dvT -= 0.05;
@@ -448,6 +461,17 @@ public sealed partial class BicycleNav
         // the parking JOB; a new path is exactly what a re-attempt creates, so clearing
         // it per path would reset the guard every time and the car would back up and
         // fail forever.
+        // #36, task 2: the number that separates the two remaining explanations.
+        // planEndPsi is where the CHECKED path itself ends up nose-wise; the [PARKT]
+        // trace carries where the CAR ends up. If they agree, the search is the limit
+        // and more executor cleverness is wasted work. If they disagree, the feedback
+        // law leaves the corridor it was sold on. Console output is invisible under
+        // `dotnet test`, so this goes on the decision record.
+        car.RecordDecision(_navTime,
+            $"[PARKPLAN] arm tuck={dv:F2} m steer={bestDeltaDeg:F1}° rev={refLine.Total:F2} m " +
+            $"psi0={Math.Degrees(psi0):F1}° v0={v0:F2} planEndPsi={Math.Degrees(pts[^1].Psi):F1}° " +
+            $"planEndV={pts[^1].V:F2} oPark={oPark:F2} stage={stage:F2} " +
+            $"neighbours={bay?.Count ?? 0}");
         S = 0.0;
         Console.WriteLine($"\n↩️  REVERSE-IN parking: {dv:F2} m tuck over " +
                           $"{refLine.Total:F2} m of reverse, target {oPark:F2} m from the " +

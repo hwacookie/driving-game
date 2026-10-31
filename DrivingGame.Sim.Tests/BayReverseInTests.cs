@@ -122,7 +122,7 @@ public class BayReverseInTests
                 string notice = ParkNotice(car);
                 Assert.False(notice.Contains("GAVE UP"),
                     $"the {clearanceM:F1} m bay was only 'succeeded' by giving up: " +
-                    notice);
+                    notice + "\n" + ParkTrace(car));
                 Assert.False((car.Driver as BicycleDriver)?.Hazard ?? false,
                     $"hazard lights are on after parking the {clearanceM:F1} m bay, " +
                     $"reason: '{(car.Driver as BicycleDriver)?.HazardReason ?? "?"}' - " +
@@ -133,7 +133,8 @@ public class BayReverseInTests
             if (car.Speed < minSpeed) minSpeed = car.Speed;
             if (i % 60 == 0)
                 trace.Add($"t={i * Dt:F1}s s={car.Progress * AvenueLenM:F1} m x={car.X:F2} " +
-                          $"v={car.Speed:F1} {car.State} cap={car.ActiveCapKey ?? "-"}/{car.HeldByUid}");
+                          $"v={car.Speed:F1} {car.State} phase={car.BicycleNav?.ParkPhase ?? "-"} " +
+                          $"yaw={car.Heading:F0} cap={car.ActiveCapKey ?? "-"}/{car.HeldByUid}");
         }
 
         Assert.True(false,
@@ -144,7 +145,8 @@ public class BayReverseInTests
             $"(driving lane 2094.75, parking lane 2091.65), heading {car.Heading:F0}\n" +
             $"neighbours: rear uid {rear.Uid}, front uid {front.Uid}, pitch {pitchM:F2} m " +
             $"→ inner gap {(2 * pitchM - 3.14):F2} m for a {car.LengthM:F2} m car\n" +
-            "last of the tick trace:\n  " + string.Join("\n  ", trace.TakeLast(8)));
+            "last of the tick trace:\n  " + string.Join("\n  ", trace.TakeLast(4)) +
+            "\nthe tuck's own record:\n  " + ParkTrace(car));
     }
 
     /// <summary>How often the neighbour-aware envelope actually intervened. Read from
@@ -161,12 +163,12 @@ public class BayReverseInTests
     /// beside the bay, and the phase's speed demand, read back from the decision
     /// record. Four executor changes moved the contact zero millimetres, so the next
     /// fix has to be chosen from this trace rather than from a hypothesis.</summary>
-    static string ParkTrace(Car car, int last = 14)
+    static string ParkTrace(Car car, int last = 22)
     {
         lock (car.Decisions)
         {
             var rows = car.Decisions
-                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true)
+                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true || d.Msg?.StartsWith("[PARKPLAN]") == true)
                 .Select(d => d.Msg!)
                 .ToList();
             return string.Join("\n  ", rows.TakeLast(last));
