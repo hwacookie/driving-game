@@ -370,10 +370,14 @@ def describe_failure(result: dict) -> str | None:
     if result.get("bay_clearances_m") is not None and not result.get("bay_ok", True):
         r, f = result["bay_clearances_m"]
         side = "the car behind it" if r <= f else "the car in front"
-        return (f"did not fit the bay: clearance to the neighbours "
+        return (f"did not fit the bay: axial clearance to the neighbours "
                 f"rear {r:+.2f} m / front {f:+.2f} m - it is too close to "
                 f"{side} (owner criterion #31: park between two already-parked "
-                f"cars without touching either)")
+                f"cars without touching either). NOTE: this gap is measured along "
+                f"the road axis only, so a NEGATIVE value here does not prove "
+                f"contact - a car left in the driving lane straddles its neighbour "
+                f"fore/aft while being laterally clear (issue 40); read the perp "
+                f"value in the stop verdict before blaming the neighbour.")
     if result.get("kerb_check") and result.get("reached_expected_segment") \
             and result.get("stopped_at_end"):
         gaps = result.get("kerb_gaps_m")
