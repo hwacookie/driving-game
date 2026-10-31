@@ -8,6 +8,14 @@ public sealed partial class BicycleNav
 
     public bool ReverseParkActive => _reversePark is not null;
 
+    /// <summary>True while this car has a parking job in play — the style is decided,
+    /// a phase is running, or the tuck is armed. CarCollisions uses it to decide which
+    /// cars need their neighbour list refreshed: the PARKING planner must know what
+    /// stands beside the bay BEFORE it commits to a tuck, so waiting for the tuck to be
+    /// running (the first version's condition) was too late by construction.
+    /// Cheap enough to ask every tick: it reads three fields.</summary>
+    public bool ParkJobActive => ReverseParkActive || ParkPhase != "none" || _parkStyleLocked;
+
     // ── How a tuck ends (#36, owner decision 2026-10-31: option (c), "even 7 degrees
     // is ok") ────────────────────────────────────────────────────────────────────
     // The reverse-in used to finish on ONE fixed point: cross-track error under 6 cm
@@ -46,6 +54,11 @@ public sealed partial class BicycleNav
     private double _parkShimmyDist;
     private int _parkAttempts;
     private bool _parkShimmy;
+    private bool _parkRetried;
+    // The envelope's veto, carried from the steering section (where the geometry is
+    // known) to the longitudinal section of the NEXT tick (where the demand lives).
+    private bool _parkHeld;
+    private bool _parkHeldNext;
 
     /// <summary>Body corner positions relative to the rear axle, (along, right)
     /// in metres, in the car's own frame.</summary>
@@ -118,6 +131,113 @@ public sealed partial class BicycleNav
                 if (lat > kerbLim || lat < centreLim) return false;
             }
         }
+        return true;
+    }
+
+    /// <summary>The parked cars beside the bay, expressed in the tuck's OWN road frame
+    /// (U along from this car's rear axle, V lateral, Psi yaw relative to the road).
+    /// null when the neighbourhood is unknown or empty.</summary>
+    private List<(double U, double V, double Psi, double Length, double Width)>? BayBodies(
+        RoadSegment seg, double tx, double ty, double rx, double ry, double roadH)
+    {
+        var near = _car.ParkingNeighbours;
+        if (near is null || near.Count == 0) return null;
+        var list = new List<(double, double, double, double, double)>(near.Count);
+        foreach (var n in near)
+        {
+            // Both sides of the test use the SAME frame convention as the path: the
+            // rear axle as origin, corners from ParkCornerOffsets(). Mixing that with
+            // BodyCenter() is how the first version of this guard tested a phantom box
+            // 1.28 m behind the car (#36).
+            double u = ((n.X - seg.X1) * tx + (n.Y - seg.Y1) * ty) -
+                       ((_car.X - seg.X1) * tx + (_car.Y - seg.Y1) * ty);
+            double v = (n.X - seg.X1) * rx + (n.Y - seg.Y1) * ry;
+            double psi = Math.Radians(Math.WrapDeg(n.Heading - roadH));
+            // +clear on every side of the box built above (front, rear, both flanks)
+            list.Add((u, v, psi, n.LengthM + PARK_NEIGHBOUR_CLEAR_M,
+                      n.WidthM + 2.0 * PARK_NEIGHBOUR_CLEAR_M));
+        }
+        return list;
+    }
+
+    /// <summary>Does the planned tuck clear every body beside the bay, at every sample
+    /// of the path? (#36, the owner's rule: Pm's rectangle may never intersect P1's or
+    /// P2's while it gets in between them.)
+    ///
+    /// This is the check the planner NEVER had: the candidate search judged a tuck by
+    /// its swept corners against the KERB and the CENTRELINE only, so a bay bracketed
+    /// by two parked cars looked identical to an empty one, and the car committed to a
+    /// path through a neighbour. Measured consequence: contact with the rear neighbour
+    /// at 69-97 steering vetoes per tuck — the executor fighting a plan that was never
+    /// possible, because nobody asked the plan.
+    ///
+    /// Orthogonal frame, so plain separating-axis on the two quads is exact.</summary>
+    private bool PathClearsBodies(
+        List<(double U, double V, double Psi, double Steer)> pts,
+        List<(double U, double V, double Psi, double Length, double Width)>? bodies)
+    {
+        if (bodies is null) return true;      // no neighbours known = nothing to clear
+        var corners = ParkCornerOffsets();
+        var mine = new (double U, double V)[4];
+        foreach (var (u, v, psi, _) in pts)
+        {
+            for (int i = 0; i < corners.Length; i++)
+            {
+                var (lf, lr) = corners[i];
+                mine[i] = (u + lf * Math.Cos(psi) - lr * Math.Sin(psi),
+                           v + lf * Math.Sin(psi) + lr * Math.Cos(psi));
+            }
+            foreach (var b in bodies)
+            {
+                var other = RectAt(b.U, b.V, b.Psi, b.Length, b.Width);
+                if (QuadsOverlap(mine, other)) return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>A body rectangle in the road frame, from its rear axle — the same
+    /// corner offsets the live envelope uses, so plan and executor agree.</summary>
+    static (double U, double V)[] RectAt(double u0, double v0, double psi, double L, double W,
+                                              double padFwdM = 0.25, double padBackM = 0.25,
+                                              double padM = 0.25)
+    {
+        var o = new (double U, double V)[4];
+        // Corners from the REAR AXLE, because that is the point the frame and the
+        // path are anchored on: a body's front bumper sits ~L ahead of its rear axle
+        // and its rear bumper ~1 m behind it. Deliberately generous on both ends —
+        // the per-model rear overhang is not in the model table, and guessing it
+        // wrong is not a small error here: an earlier version of this helper put the
+        // box 1.3 m behind the car (it halved the length and shifted it the wrong
+        // way), and the feasibility gate then cheerfully approved paths that clipped.
+        var pairs = new (double, double)[] { (L, W / 2.0), (L, -W / 2.0),
+                                             (-1.0, -W / 2.0), (-1.0, W / 2.0) };
+        for (int i = 0; i < 4; i++)
+        {
+            double lf = pairs[i].Item1 + (pairs[i].Item1 > 0 ? padFwdM : -padBackM);
+            double lr = pairs[i].Item2 + (pairs[i].Item2 > 0 ? padM : -padM);
+            o[i] = (u0 + lf * Math.Cos(psi) - lr * Math.Sin(psi),
+                    v0 + lf * Math.Sin(psi) + lr * Math.Cos(psi));
+        }
+        return o;
+    }
+
+    static bool QuadsOverlap((double U, double V)[] a, (double U, double V)[] b)
+    {
+        foreach (var poly in new[] { a, b })
+            for (int i = 0; i < 4; i++)
+            {
+                var (u1, v1) = poly[i];
+                var (u2, v2) = poly[(i + 1) % 4];
+                double au = -(v2 - v1), av = u2 - u1;
+                double aMin = double.MaxValue, aMax = double.MinValue;
+                foreach (var p in a) { double d = p.U * au + p.V * av;
+                    if (d < aMin) aMin = d; if (d > aMax) aMax = d; }
+                double bMin = double.MaxValue, bMax = double.MinValue;
+                foreach (var p in b) { double d = p.U * au + p.V * av;
+                    if (d < bMin) bMin = d; if (d > bMax) bMax = d; }
+                if (aMax < bMin || bMax < aMin) return false;   // a gap → no overlap
+            }
         return true;
     }
 
@@ -209,6 +329,10 @@ public sealed partial class BicycleNav
         double roadH = Math.PosDeg(Math.Degrees(Math.Atan2(tx, ty)));
         double psi0 = Math.Radians(Math.WrapDeg(car.Heading - roadH));
         if (Math.Abs(psi0) > Math.Radians(20.0)) return false;
+        // What stands beside the bay, in this frame. The planner has to know before it
+        // commits — asking the executor to dodge later is what produced the grinding
+        // contact of #36.
+        var bay = BayBodies(seg, tx, ty, rx, ry, roadH);
         // Car position in the road frame (origin: the centreline point abeam of
         // the car).
         double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry);
@@ -236,6 +360,7 @@ public sealed partial class BicycleNav
                 // perfect tracking), and without a straight stretch to settle on,
                 // the car stopped 2.5 deg nose-in.
                 if (ok && ReverseParkOk(cand, seg.Width) &&
+                    PathClearsBodies(cand, bay) &&
                     -cand[^1].U <= stage - PARK_REVERSE_MIN_TAIL_M)
                 {
                     if (best is null || dvT > best.Value.dvTry + 1e-9)
@@ -251,6 +376,7 @@ public sealed partial class BicycleNav
         {
             dv = best.Value.dvTry;
             pts = best.Value.pts;
+            _parkRetried = false;      // a real tuck was found: not a backup run
         }
         else
         {
@@ -262,8 +388,19 @@ public sealed partial class BicycleNav
             // laterally.
             pts.Add((0.0, v0, psi0, 0.0));
             dv = 0.0;
+            // #36: with the neighbours in the feasibility test, "no feasible tuck" now
+            // has a real meaning: from HERE, at this lateral distance and this bay, no
+            // path exists that clears both bodies. A driver reads that as "I did not
+            // pull far enough past it" and backs up a metre to try again — which is
+            // exactly what the straight backup below does, so let the SAME path serve
+            // as the second attempt: back up, hand the manoeuvre back, and re-solve
+            // from the new pose (the search is anchored to the car's ACTUAL position).
+            // The first version of this retried with a forward shuffle, which is
+            // physically backwards in a reverse-in bay: forward is the front neighbour.
+            _parkRetried = bay is { Count: > 0 } && _parkAttempts < PARK_MAX_ATTEMPTS;
             Console.WriteLine("↩️  reverse tuck not feasible from here - backing " +
-                              "straight up to the destination");
+                              (_parkRetried ? "up to re-solve the tuck (attempt 2)"
+                                            : "straight up to the destination"));
         }
         // Straight run-out: fills the remaining staging distance, and gives
         // heading and cross-track error somewhere to converge.
@@ -294,9 +431,14 @@ public sealed partial class BicycleNav
         // is born, because a stale count from the last bay would let the first
         // shuffle of a new manoeuvre be the one that gives up (#36).
         _parkStallT = 0.0;
-        _parkAttempts = 0;
         _parkShimmy = false;
         _parkShimmyDist = 0.0;
+        _parkHeld = false;
+        _parkHeldNext = false;   // a fresh path starts un-vetoed
+        // NOTE: _parkAttempts is deliberately NOT cleared here. It counts attempts at
+        // the parking JOB; a new path is exactly what a re-attempt creates, so clearing
+        // it per path would reset the guard every time and the car would back up and
+        // fail forever.
         S = 0.0;
         Console.WriteLine($"\n↩️  REVERSE-IN parking: {dv:F2} m tuck over " +
                           $"{refLine.Total:F2} m of reverse, target {oPark:F2} m from the " +
@@ -339,7 +481,18 @@ public sealed partial class BicycleNav
         // short). The run-out exists so heading/cross-track error has somewhere
         // to converge; drive it.
         double vTarget;
-        if (_parkShimmy && _parkShimmyDist >= PARK_SHIMMY_M)
+        if (_parkHeld)
+        {
+            // #36, the half that mattered: the envelope refused the next step, so the
+            // PHASE stops asking for it. Braking the speed inside the steering block
+            // was not enough — the longitudinal section below re-accelerated the creep
+            // on the following tick, and that argument is what ground the body into
+            // the neighbour at 69 vetoes per tuck. Refusing a step and demanding the
+            // step are two different owners, and the demand has to lose.
+            vTarget = 0.0;
+            _parkHeld = _parkHeldNext;
+        }
+        else if (_parkShimmy && _parkShimmyDist >= PARK_SHIMMY_M)
         {
             // The shuffle has done its metres: back to the reverse branch, with the
             // angle the forward half bought.
@@ -476,9 +629,11 @@ public sealed partial class BicycleNav
                 (car.Speed / WHEELBASE_M) * Math.Tan(delta) * dt);
             double hs = Math.Radians(hStraight);
             var (sbx, sby) = car.BodyCenter();
-            if (ClipsNeighbour(sbx + Math.Sin(hs) * car.Speed * dt,
-                               sby + Math.Cos(hs) * car.Speed * dt, hStraight))
+            _parkHeldNext = ClipsNeighbour(sbx + Math.Sin(hs) * car.Speed * dt,
+                                           sby + Math.Cos(hs) * car.Speed * dt, hStraight);
+            if (_parkHeldNext)
             {
+                _parkHeld = true;
                 double v = Math.Max(0.0, Math.Abs(car.Speed) - A_PARK * dt);
                 car.Speed = car.Speed < 0.0 ? -v : v;
                 car.IsBraking = true;
@@ -521,12 +676,36 @@ public sealed partial class BicycleNav
         }
         if ((acceptable || dRem <= 0.05) && Math.Abs(car.Speed) < PARK_STANDSTILL_M_S)
         {
+            if (_parkRetried && _parkAttempts < PARK_MAX_ATTEMPTS)
+            {
+                // The backup WAS the second attempt's first half: hand the manoeuvre
+                // back to the normal parking logic, which re-solves the tuck from the
+                // pose this left the car in. Parking here would end the job crooked by
+                // choice and call it a result. Counted, never cleared here — a flag
+                // that resets on every hand-back is a livelock: back up, re-solve,
+                // fail, back up again, forever.
+                _parkAttempts++;
+                _parkRetried = false;
+                _reversePark = null;
+                _parkStallT = 0.0;
+                ParkPhase = "none";
+                car.Speed = 0.0;
+                car.TargetSpeed = 0.0;
+                car.RecordDecision(_navTime,
+                    $"[PARK] backed up to re-solve the tuck " +
+                    $"(attempt {_parkAttempts + 1}/{PARK_MAX_ATTEMPTS})");
+                return;
+            }
             FinishReversePark(converged ? "standing at the kerb" :
                 $"standing in the bay, {psiDeg:F1}° off the kerb - accepted within " +
                 $"{PARK_ACCEPT_PSI_DEG:F0}° (#36)");
             return;
         }
-        if (Math.Abs(car.Speed) < 0.05 && Math.Abs(vTarget) > 0.15)
+        // A hold is either an external cap or the envelope's own veto — and the veto
+        // sets vTarget to 0 by design, so the demand test alone would let a car parked
+        // against a neighbour sit in silence forever, never escalating to an attempt or
+        // an honest surrender.
+        if (Math.Abs(car.Speed) < 0.05 && (Math.Abs(vTarget) > 0.15 || _parkHeld))
         {
             // The phase still asks for movement and the car cannot move: that is a
             // HOLD, not a slow moment. Before #36 this state had no exit at all — the
@@ -536,19 +715,39 @@ public sealed partial class BicycleNav
             if (_parkStallT <= PARK_STALL_S) return;
             _parkStallT = 0.0;
             _parkAttempts++;
-            if (inBay)
+            if (_parkAttempts >= PARK_MAX_ATTEMPTS && !inBay)
+            {
+                // Checked BEFORE any further attempt, and first, because an
+                // "abandon and re-solve" branch that never runs out is a livelock:
+                // measured, the car abandoned, re-solved, stalled and abandoned again
+                // for the remaining 60 s while the attempt counter climbed past its
+                // own limit — the limit was only ever read by a branch that required a
+                // flag the abandon branch had just cleared.
+                _car.Driver?.SetHazard(true, reason:
+                    $"parking stalled at {psiDeg:F1}° after {PARK_MAX_ATTEMPTS} attempts");
+                FinishReversePark($"GAVE UP after {PARK_MAX_ATTEMPTS} attempts - " +
+                                  $"{psiDeg:F1}° off the kerb, " +
+                                  $"{Math.Abs(eOff):F2} m off the bay line");
+            }
+            else if (inBay)
             {
                 FinishReversePark($"held at {psiDeg:F1}° for {PARK_STALL_S:0} s - inside " +
                                   $"the bay's tolerances, so it is parked");
             }
-            else if (_parkAttempts < PARK_MAX_ATTEMPTS)
+            else if (!_parkRetried && _reversePark is not null)
             {
-                _parkShimmy = true;
-                _parkShimmyDist = 0.0;
+                // Held mid-tuck and not straight enough to accept: abandon THIS path
+                // and re-solve from here rather than fight it. A forward shuffle was
+                // my first idea and it is wrong — in a reverse-in bay the room is
+                // behind, not in front.
+                _parkRetried = true;
+                _reversePark = null;
+                ParkPhase = "none";
+                car.Speed = 0.0;
+                car.TargetSpeed = 0.0;
                 car.RecordDecision(_navTime,
-                    $"[PARK] tuck stalled at {psiDeg:F1}° - shuffling forward " +
-                    $"{PARK_SHIMMY_M:F1} m to straighten (attempt {_parkAttempts + 1}" +
-                    $"/{PARK_MAX_ATTEMPTS})");
+                    $"[PARK] tuck held at {psiDeg:F1}° - abandoning it and re-solving " +
+                    $"from here (attempt {_parkAttempts + 1})");
             }
             else
             {

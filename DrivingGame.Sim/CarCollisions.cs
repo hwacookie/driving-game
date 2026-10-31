@@ -1219,7 +1219,10 @@ public static class CarCollisions
         // spatial query to disagree with the one that decides contacts.
         foreach (var c in carList)
         {
-            if (c.BicycleNav?.ReverseParkActive != true)
+            // Filled for every car with a parking job, not only a running tuck: the
+            // planner must see the neighbours BEFORE it commits (#36) — waiting for
+            // the tuck to be armed asked the question one step too late.
+            if (c.BicycleNav is not { ParkJobActive: true })
             {
                 c.ParkingNeighbours = null;
                 continue;
