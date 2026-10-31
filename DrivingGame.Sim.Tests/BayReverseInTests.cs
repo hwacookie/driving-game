@@ -110,7 +110,15 @@ public class BayReverseInTests
                 crashAt = $"t={i * Dt:F2}s state={car.State} phase={car.BicycleNav?.ParkPhase ?? "-"} " +
                           $"h={car.Heading:F1} pos=({car.X:F2},{car.Y:F1}) " +
                           $"neighbours={(car.ParkingNeighbours?.Count ?? -1)}";
-            if (car.State == CarState.Parked)
+            // #36/task-5: the verdict must not be reachable only through the nav's own
+            // claim. Also exit on "a park verdict exists and the car stands still", so a
+            // manoeuvre that ends without ever asserting Parked = true is still judged -
+            // a refusal that stops claiming success is reported as the refusal it is,
+            // instead of timing out as "never completed".
+            string settled = ParkNotice(car);
+            if (car.State == CarState.Parked ||
+                (settled.Length > 0 && car.Speed < 0.05 &&
+                 car.BicycleNav?.ParkPhase == "stopped"))
             {
                 Assert.True(crashAt is null,
                     $"the car contacted a neighbour during the manoeuvre: {crashAt} " +
