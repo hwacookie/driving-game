@@ -36,6 +36,15 @@ public sealed partial class BicycleNav
     /// counts as a hold rather than a slow moment. Same shape as the u-turn's stall
     /// guard, which has had one all along; parking did not.</summary>
     internal const double PARK_STALL_S = 5.0;
+    /// One re-set-up: forward metres, creep speed, straightening gain, tries per job (#39).
+    public static readonly double PARK_RESETUP_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_RESETUP_M"), out var _rum) ? _rum : 1.5;
+    public static readonly int PARK_RESETUP_TRIES = int.TryParse(
+        Environment.GetEnvironmentVariable("PARK_RESETUP_TRIES"), out var _rut) ? _rut : 2;
+    public static readonly double PARK_RESETUP_SPEED = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_RESETUP_SPEED"), out var _russ) ? _russ : 0.45;
+    public static readonly double PARK_RESETUP_GAIN = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_RESETUP_GAIN"), out var _rug) ? _rug : 0.6;   // 1.2 measured as an overshoot: the 0.5 m bay ended 1023 cm off the kerb
     const double PARK_PLAN_DS_M = 0.02;
     public static readonly double PARK_PSI_FOLLOW_TOL_DEG = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_PSI_FOLLOW_TOL_DEG"), out var _pt) ? _pt : 6.0;
@@ -385,15 +394,22 @@ public sealed partial class BicycleNav
         // leftover body angle; now that the forward unwind is reachable (03dd955) the limit
         // can be widened and judged by measurement. PARK_ENTRY_MAX_DEG keeps it adjustable
         // for the runs that decide where it really belongs; the refusal still records why.
-        if (Math.Abs(psi0) > PARK_ENTRY_MAX_RAD)
+        // #39 (owner decision 2026-10-31): an ANGLE IS NOT A REASON TO REFUSE a bay. The rule
+        // is contacts / road edge / oncoming occupancy, and the candidate search below judges
+        // precisely those. The limit therefore stops being a refusal and becomes a RE-SET-UP
+        // trigger: creep forward, shrink the angle against the lane axis, re-solve. Once the
+        // re-set-ups are spent the pose is no longer an excuse either - the search simply runs
+        // and its own tests decide, so a bay is only ever refused by geometry that is on record.
+        if (Math.Abs(psi0) > PARK_ENTRY_MAX_RAD && _parkResetupTries < PARK_RESETUP_TRIES)
         {
-            // #36: this refusal was silent, and silence is why the tight bays looked
-            // like a tuck-quality problem. Nothing is armed here, so no [PARKT] row is
-            // ever written and the phase machine keeps the car standing in the bay.
+            _parkResetupTries++;
+            _parkResetup = true;
+            _parkResetupM = PARK_RESETUP_M;
             car.RecordDecision(_navTime,
-                $"[PARKPLAN] REFUSED: nose {Math.Degrees(psi0):F1}° off the road axis, " +
-                $"solver wants |psi0| <= {Math.Degrees(PARK_ENTRY_MAX_RAD):F0}° " +
-                $"(PARK_ENTRY_MAX_DEG) - tuck NOT armed (phase={ParkPhase})");
+                $"[PARKPLAN] RE-SET UP #{_parkResetupTries}: nose {Math.Degrees(psi0):F1}° off " +
+                $"the lane axis, past the {Math.Degrees(PARK_ENTRY_MAX_RAD):F0}° the solver can " +
+                $"tuck from - running {PARK_RESETUP_M:F1} m forward to shrink the angle and " +
+                "re-asking (no park attempt spent, and NOT declared parked)");
             return false;
         }
         // What stands beside the bay, in this frame. The planner has to know before it
@@ -1780,14 +1796,25 @@ public sealed partial class BicycleNav
                     UpdateReversePark(dt);
                     return;
                 }
-                // Not reachable from here after all: stay where we are, parked
-                // forwards (the pull-over has already been driven).
-                ParkStyle = "forward";
-                _parkStyleLocked = true;
-                Parked = true;
-                ParkPhase = "stopped";
-                car.Speed = 0.0;
-                return;
+                if (_parkResetup)
+                {
+                    // The unwind is owed: standing still and reporting "parked" is exactly the
+                    // lie this branch removed elsewhere. Let the forward creep below run; the
+                    // bounded hold still owns the last word, so the job cannot end without a
+                    // verdict (issue 39's invariant).
+                    ParkPhase = "staging";
+                }
+                else
+                {
+                    // Not reachable from here after all: stay where we are, parked
+                    // forwards (the pull-over has already been driven).
+                    ParkStyle = "forward";
+                    _parkStyleLocked = true;
+                    Parked = true;
+                    ParkPhase = "stopped";
+                    car.Speed = 0.0;
+                    return;
+                }
             }
         }
         bool pullingOver = plan is not null &&
@@ -2046,9 +2073,21 @@ public sealed partial class BicycleNav
                         plan is not null && (dStop ?? 99.0) <= 0.5 && !Parked;
         if (parkHold)
         {
-            vTarget = 0.0;
-            accel = false;
-            _parkHoldT += dt;
+            // #39: the re-set-up drives forward HERE - upstream of the hold, and without
+            // advancing the hold's surrender clock, so the visible give-up only starts once the
+            // unwind has been tried.
+            if (_parkResetup)
+            {
+                vTarget = PARK_RESETUP_SPEED;
+                accel = true;
+                accelScale = accelScale <= 0.0 ? 1.0 : Math.Max(accelScale, CREEP_SCALE);
+            }
+            else
+            {
+                vTarget = 0.0;
+                accel = false;
+            }
+            _parkHoldT += _parkResetup ? 0.0 : dt;
             if (_parkHoldT >= PARK_STALL_S && ParkPhase != "stopped")
             {
                 _car.Driver?.SetHazard(true, reason: "bay: holding, nothing to plan");
@@ -2145,6 +2184,27 @@ public sealed partial class BicycleNav
                 $"[PARKAPP] phase={plan.Value.Phase} dStop={dStop ?? -1:F2} " +
                 $"v={car.Speed:F2} head={car.Heading:F1} psi={Math.WrapDeg(car.Heading - 180.0):F1} " +
                 $"wheel: pre-fade={deltaPre:F1} post-fade={delta:F1}");
+        }
+
+        if (_parkResetup)
+        {
+            // The unwind itself: straighten against the LANE AXIS, not toward the kerb. Going
+            // forward there is no kinematic sign flip, so a plain proportional term on the axis
+            // error reduces the angle; the pull-over blend is not in this path and the wheel
+            // stays inside MAX_STEER by construction. Ends when the metres are used up or the
+            // nose is within 4 deg of the axis - then the solver is re-asked from the better
+            // pose, which is the point of the whole exercise.
+            double axisDeg = _ref?.HeadingAt(S) ?? car.Heading;
+            double psiAxis = Math.Radians(Math.WrapDeg(car.Heading - axisDeg));
+            delta = Math.Max(-MAX_STEER, Math.Min(MAX_STEER, -PARK_RESETUP_GAIN * psiAxis));
+            _parkResetupM -= Math.Abs(car.Speed) * dt;
+            if (_parkResetupM <= 0.0 || Math.Abs(psiAxis) < Math.Radians(4.0))
+            {
+                _parkResetup = false;
+                car.RecordDecision(_navTime,
+                    $"[PARKPLAN] RE-SET UP finished (nose {Math.Degrees(psiAxis):F1}° to the " +
+                    "lane axis) - re-asking the solver from the straightened pose");
+            }
         }
 
         // Expose the steering angle for the driver's mechanical blinker auto-off

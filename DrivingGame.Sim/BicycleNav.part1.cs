@@ -317,6 +317,13 @@ public sealed partial class BicycleNav
     private bool _parkStyleLocked;      // decided once per destination
     private double _parkTuck;
     private double _parkStageM;
+    // #39 (owner decision 2026-10-31): a bounded forward re-set-up that runs with NO tuck
+    // armed. The pose is what stops the solver from arming, so the car creeps forward,
+    // straightens toward the lane axis and asks again - instead of being refused on an angle
+    // nobody ruled on and then declared "parked forwards". Budget is per parking job.
+    private bool _parkResetup;
+    private double _parkResetupM;
+    private int _parkResetupTries;
     // #39: how far PAST the staging line the car is asked to run when no tuck clears the
     // bay from the pose it actually reached. Deliberately separate from _parkStageM: that
     // one doubles as the reverse target (tail = max(TAIL_M, stage + u_end) in part3), so
