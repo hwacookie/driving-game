@@ -199,6 +199,38 @@ public static class Config
     /// <summary>Resolve anything that names a vehicle — a model name, an old
     /// photo alias, or nothing at all — to a Model. Unknown and empty answer the
     /// sedan, exactly as the old class fallback did.</summary>
+    /// <summary>Wheelbase of a model in metres - the length that decides the minimum
+    /// turning radius (R = wheelbase / tan(steer)), so a city car must not be planned with
+    /// a sedan's radius (issue 42).
+    ///
+    /// ESTIMATE, not a spec sheet: MODELS carries W x L only and no per-model wheelbase is
+    /// in this repo (the one measured value is the sprite's 2.64 m). The rule reproduces the
+    /// reference car EXACTLY - the ratio is WHEELBASE_M / CAR_LENGTH_M, so mercedes_c220
+    /// still gets 2.70 m and every existing verdict is bit-for-bit unchanged - and scales
+    /// that proportion to the other bodies. It is deliberately conservative: a real 3.14 m
+    /// Fiat 500 has a 2.30 m wheelbase, i.e. proportionally MORE of its length between the
+    /// axles than a 4.40 m sedan, so this under-states a small car's agility rather than
+    /// over-stating it. TODO(spec): replace with manufacturer values.
+    /// PARK_WB_RATIO overrides it for measurement runs.</summary>
+    public static readonly double WheelbaseRatio = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_WB_RATIO"), out var _wr) ? _wr : (2.7 / 4.40);
+
+    /// Per-model wheelbase in metres (see WheelbaseRatio). Floored at 1 m so a malformed
+    /// table entry cannot produce a zero-radius plan.
+    public static double WheelbaseM(string? modelName) =>
+        Math.Max(1.0, ModelFor(modelName).LengthM * WheelbaseRatio);
+
+    /// Per-model maximum road-wheel steering angle, in radians. 38 deg for every model
+    /// today - that is the value the sim has always used and it is NOT measured per model;
+    /// it is a function so the wheelbase change has one place to grow into when real
+    /// steering limits arrive. PARK_MAX_STEER_DEG overrides it for measurement runs.
+    public static double MaxSteerRad(string? modelName = null)
+    {
+        double deg = double.TryParse(Environment.GetEnvironmentVariable("PARK_MAX_STEER_DEG"),
+                                     out var _ms) ? _ms : 38.0;
+        return Math.Radians(deg);
+    }
+
     public static Model ModelFor(string? name)
     {
         string key = (name ?? "").Trim();

@@ -1,4 +1,5 @@
 using DrivingGame.Sim;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Xunit;
@@ -227,5 +228,42 @@ public class ModelSpawnTests
         Assert.False(SpawnWithRole(eng, "bmw_police", "civilian", true).EmergencyRole);
         // Declared on — a sedan with a blue light.
         Assert.True(SpawnWithRole(eng, "vw_passat", "emergency", true).EmergencyRole);
+    }
+
+    // ---- issue 42: per-model geometry in the planner ----------------------------------
+
+    [Fact]
+    public void WheelbaseIsPerModelAndKeepsTheReferenceCarExact()
+    {
+        // The estimate must not move the car every existing verdict was measured with:
+        // mercedes_c220 keeps the sim's 2.70 m exactly.
+        Assert.Equal(2.7, Config.WheelbaseM("mercedes_c220"), 9);
+        // ... and a shorter body must plan shorter.
+        Assert.True(Config.WheelbaseM("fiat_500") < Config.WheelbaseM("mercedes_c220"),
+            $"a 3.14 m Fiat got wheelbase {Config.WheelbaseM("fiat_500"):.2f} m, not below " +
+            $"the 4.40 m sedan s {Config.WheelbaseM("mercedes_c220"):.2f} m");
+        Assert.True(Config.WheelbaseM("vw_passat") > Config.WheelbaseM("mercedes_c220"));
+        // An unknown name falls back to the default model, not to a zero radius.
+        Assert.Equal(2.7, Config.WheelbaseM("does_not_exist"), 9);
+        Assert.True(Config.WheelbaseM(null) >= 1.0);
+    }
+
+    [Fact]
+    public void PlannerRadiusFollowsTheCarAndNotTheReferenceSedan()
+    {
+        var net = TestMaps.BuildTestMap("basic");
+        var dSedan = new BicycleDriver();
+        var sedan = new Car(0, 0, 180.0, 0, dSedan) { Model = "mercedes_c220" };
+        sedan.BicycleNav ??= new BicycleNav(sedan, net);
+        var dSmall = new BicycleDriver();
+        var small = new Car(0, 0, 180.0, 0, dSmall) { Model = "fiat_500" };
+        small.BicycleNav ??= new BicycleNav(small, net);
+
+        // The number the planner curvature is built from - R = wheelbase / tan(max steer).
+        double sedanRef = BicycleNav.WHEELBASE_M / Math.Tan(Config.MaxSteerRad());
+        Assert.Equal(sedanRef, sedan.BicycleNav!.MinTurnRadiusM, 6);
+        Assert.True(small.BicycleNav!.MinTurnRadiusM < sedanRef - 0.5,
+            $"the Fiat was planned with radius {small.BicycleNav.MinTurnRadiusM:F2} m - the " +
+            $"sedan s {sedanRef:F2} m is what issue 42 forbids for a 3.14 m body");
     }
 }
