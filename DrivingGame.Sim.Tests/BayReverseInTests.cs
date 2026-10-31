@@ -97,6 +97,7 @@ public class BayReverseInTests
         var capsSeen = new List<string>();
         var trace = new List<string>();
         double minSpeed = 99;
+        string? crashAt = null;
         for (int i = 0; i < 60 * 70; i++)
         {
             eng.Tick(Dt);
@@ -105,8 +106,16 @@ public class BayReverseInTests
                 string row = $"{car.ActiveCapKey}/{car.HeldByUid}";
                 if (capsSeen.Count == 0 || capsSeen[^1] != row) capsSeen.Add(row);
             }
+            if (crashAt is null && car.CrashEpisodes > 0)
+                crashAt = $"t={i * Dt:F2}s state={car.State} phase={car.BicycleNav?.ParkPhase ?? "-"} " +
+                          $"h={car.Heading:F1} pos=({car.X:F2},{car.Y:F1}) " +
+                          $"neighbours={(car.ParkingNeighbours?.Count ?? -1)}";
             if (car.State == CarState.Parked)
             {
+                Assert.True(crashAt is null,
+                    $"the car contacted a neighbour during the manoeuvre: {crashAt} " +
+                    $"(bay clearance {clearanceM:F1} m, envelope engaged " +
+                    $"{EnvelopeFirings(car)} times while tucking)");
                 // Parked alone does NOT mean the manoeuvre worked: giving up parks the
                 // car too (#36 option (c) ends in an honest surrender). So the exit is
                 // what gets asserted, read back from the car's own decision record.
@@ -136,6 +145,16 @@ public class BayReverseInTests
             $"neighbours: rear uid {rear.Uid}, front uid {front.Uid}, pitch {pitchM:F2} m " +
             $"→ inner gap {(2 * pitchM - 3.14):F2} m for a {car.LengthM:F2} m car\n" +
             "last of the tick trace:\n  " + string.Join("\n  ", trace.TakeLast(8)));
+    }
+
+    /// <summary>How often the neighbour-aware envelope actually intervened. Read from
+    /// the decision record because Console output from the sim is invisible under
+    /// `dotnet test` — the count is what tells "the guard fired and lost" apart from
+    /// "the guard never fired at all", and those need very different fixes.</summary>
+    static int EnvelopeFirings(Car car)
+    {
+        lock (car.Decisions)
+            return car.Decisions.Count(d => d.Msg?.Contains("[PARK] envelope holds") == true);
     }
 
     /// <summary>The nav's last word about the parking job, read from the car's own

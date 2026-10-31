@@ -36,6 +36,11 @@ public sealed partial class BicycleNav
     /// a metre, wheel wound the other way, back in. A driver's "little more
     /// forehand".</summary>
     internal const double PARK_SHIMMY_M = 1.2;
+    /// <summary>Clearance the reverse-in keeps from a body standing beside the bay.
+    /// Not a comfort margin for two moving cars (that is SideClear's speed curve) but
+    /// the centimetres a driver leaves to a wing mirror when threading between two
+    /// cars that are not going to move.</summary>
+    internal const double PARK_NEIGHBOUR_CLEAR_M = 0.25;
 
     private double _parkStallT;
     private double _parkShimmyDist;
@@ -376,11 +381,71 @@ public sealed partial class BicycleNav
         // integrating this delta for dt would push any corner outside, ease off
         // the wheel until it won't - exactly what a driver does when the nose
         // swings too close to oncoming traffic.
-        if (delta != 0.0 && car.Speed < -1e-3)
+        // The envelope runs for BOTH directions of the manoeuvre. It used to be
+        // gated to reversing (`car.Speed < -1e-3`), and that gate alone explains why
+        // the first neighbour-aware version changed nothing: the contact the ladder
+        // measures happens while the car drives FORWARD past the bay to stage the
+        // tuck — its nose reaches the front neighbour's bumper before any reverse
+        // begins, so a guard that only listens while backing up never hears about it.
+        if (Math.Abs(car.Speed) > 1e-3)
         {
             double kerbLim = seg.Width / 2.0 - PARK_REVERSE_KERB_MARGIN_M;
             double centreLim = -PARK_CENTRELINE_MARGIN_M;
             var corners = ParkCornerOffsets();
+            // #36: and the same envelope has to include the cars standing BESIDE the
+            // bay. A kerb bay IS a gap between two bodies, and the tuck was planned
+            // and steered against the road's edges alone — which is how a reverse-in
+            // into a 9.40 m bay (2.5 m of slack at each end) finished with
+            // `crash with car 1`: the neighbour was not part of anything the guard
+            // looked at. The list arrives from CarCollisions, which owns the spatial
+            // grid, so the envelope cannot disagree with the code that decides
+            // contacts about who is nearby.
+            var beside = car.ParkingNeighbours;
+            bool ClipsNeighbour(double px, double py, double headingN)
+            {
+                if (beside is null || beside.Count == 0) return false;
+                // Real rectangle intersection, using the SAME primitive the contact
+                // code uses (EarliestConflict) — not a corner-in-box point test. A
+                // first draft tested the four corners against each neighbour's
+                // footprint and changed nothing: the ladder contacted the rear
+                // neighbour at exactly the same angles with it as without it, because
+                // two long thin boxes crossing at 20-30° intersect WITHOUT any corner
+                // of either landing inside the other. That is the geometry of a tuck,
+                // so only the full overlap test can see it.
+                var mine = ObstacleGeometry.BoxCorners(px, py, headingN,
+                                                        car.LengthM, car.WidthM);
+                var myBox = new ObstacleGeometry.BodyBox(mine, seg.Level);
+                foreach (var n in beside)
+                {
+                    // Both boxes in the SAME frame: `car.X/Y` is the REAR AXLE and
+                    // BoxCorners centres on the point it is given, so the shift goes
+                    // through the codebase's own helper (Car.BodyCenter(), whose doc
+                    // spells this out: "centered on the body centre, not the rear
+                    // axle"). A first version of this guard passed car.X/Y straight
+                    // and measured no change at all — it was testing a phantom box
+                    // 1.28 m behind the car, which is precisely where a tuck's
+                    // clearing corner is not.
+                    var (nbx, nby) = n.BodyCenter();
+                    var theirs = ObstacleGeometry.BoxCorners(nbx, nby, n.Heading,
+                        n.LengthM + 2.0 * PARK_NEIGHBOUR_CLEAR_M,
+                        n.WidthM + 2.0 * PARK_NEIGHBOUR_CLEAR_M);
+                    int lvlN = n.SegIdx >= 0 && n.SegIdx < _network.Segments.Count
+                        ? _network.Segments[n.SegIdx].Level : seg.Level;
+                    if (ObstacleGeometry.BoxesIntersect(myBox,
+                            new ObstacleGeometry.BodyBox(theirs, lvlN)))
+                    {
+                        // The decision goes into the car's OWN record, not the
+                        // console: `dotnet test` swallows Console output from the
+                        // library, and an observation nobody can read is how I came to
+                        // claim a diagnostic had proved something it had not (#36).
+                        car.RecordDecision(_navTime,
+                            $"[PARK] envelope holds the wheel: corner would clip car " +
+                            $"{n.Uid} at ({px:F2},{py:F2}) heading {headingN:F1}");
+                        return true;
+                    }
+                }
+                return false;
+            }
             bool Inside(double d)
             {
                 double rate = (car.Speed / WHEELBASE_M) * Math.Tan(d);
@@ -391,11 +456,32 @@ public sealed partial class BicycleNav
                     double lat = vN + lf * Math.Sin(psiN) + lr * Math.Cos(psiN);
                     if (lat > kerbLim || lat < centreLim) return false;
                 }
-                return true;
+                double headingN = st.RoadH + Math.Degrees(psiN);
+                double hn = Math.Radians(headingN);
+                var (cbx, cby) = car.BodyCenter();
+                return !ClipsNeighbour(cbx + Math.Sin(hn) * car.Speed * dt,
+                                       cby + Math.Cos(hn) * car.Speed * dt, headingN);
             }
-            foreach (double f in new[] { 1.0, 0.75, 0.5, 0.35, 0.2, 0.0 })
+            if (delta != 0.0)
+                foreach (double f in new[] { 1.0, 0.75, 0.5, 0.35, 0.2, 0.0 })
+                {
+                    if (Inside(delta * f)) { delta *= f; break; }
+                }
+            // The wheel is already at its last free angle and the corners still sweep
+            // into a body: what is left is the brake. Creeping on because the reference
+            // line says so is precisely how a parked neighbour got scraped. And this
+            // hold is not a deadlock — it is the state the stall counter above reads,
+            // which is what turns it into a second attempt or an honest surrender.
+            double hStraight = st.RoadH + Math.Degrees(psiCar +
+                (car.Speed / WHEELBASE_M) * Math.Tan(delta) * dt);
+            double hs = Math.Radians(hStraight);
+            var (sbx, sby) = car.BodyCenter();
+            if (ClipsNeighbour(sbx + Math.Sin(hs) * car.Speed * dt,
+                               sby + Math.Cos(hs) * car.Speed * dt, hStraight))
             {
-                if (Inside(delta * f)) { delta *= f; break; }
+                double v = Math.Max(0.0, Math.Abs(car.Speed) - A_PARK * dt);
+                car.Speed = car.Speed < 0.0 ? -v : v;
+                car.IsBraking = true;
             }
         }
         car.SteerAngle = delta;
