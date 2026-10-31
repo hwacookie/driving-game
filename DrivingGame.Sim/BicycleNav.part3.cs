@@ -54,6 +54,16 @@ public sealed partial class BicycleNav
     private double _parkShimmyDist;
     private int _parkAttempts;
     private bool _parkShimmy;
+    private int _parkShimmyTries;
+    /// How many forward unwinds one parking job may attempt. Bounded, because an unbounded
+    /// shuffle is the livelock this file has already been burned by (#36).
+    public static readonly int PARK_SHIMMY_TRIES = int.TryParse(
+        Environment.GetEnvironmentVariable("PARK_SHIMMY_TRIES"), out var _smt) ? _smt : 2;
+    /// How far outside the accepted lateral tolerance a held car may still be while the
+    /// unwind is considered: the unwind fixes the ANGLE, so it only makes sense for a car
+    /// that is already near its bay line (measured 1.5 m rung: off=-0.30 m at yaw 20.0 deg).
+    public static readonly double PARK_SHIMMY_OFF_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_SHIMMY_OFF_M"), out var _smo) ? _smo : 0.60;
     private bool _parkRetried;
     // The envelope's veto, carried from the steering section (where the geometry is
     // known) to the longitudinal section of the NEXT tick (where the demand lives).
@@ -489,6 +499,7 @@ public sealed partial class BicycleNav
         // shuffle of a new manoeuvre be the one that gives up (#36).
         _parkStallT = 0.0;
         _parkShimmy = false;
+        _parkShimmyTries = 0;
         _parkShimmyDist = 0.0;
         _parkHeld = false;
         _parkHeldNext = false;   // a fresh path starts un-vetoed
@@ -818,6 +829,29 @@ public sealed partial class BicycleNav
             _parkStallT += dt;
             if (_parkStallT <= PARK_STALL_S) return;
             _parkStallT = 0.0;
+            // #36: the forward unwind exists in this method - the creep speed demand, the
+            // MIRRORED steering law that unwinds an angle the reverse cannot close, the
+            // distance accounting - and it was never reachable: _parkShimmy is assigned
+            // false in five places and true in none. So a tuck held by a NEIGHBOUR CORNER
+            // while the body is already on its bay line had no move left but to quit:
+            // measured 1.5 m rung, yaw=20.0 deg, off=-0.30 m, dRem=5.1 m still to reverse,
+            // held=True, near=#1 at 4.27 m with along=-4.02 - the rear corner is what
+            // cannot sweep further, the front neighbour is not the blocker, and 13 deg of
+            // angle are all that stands between this pose and the accepted 7 deg.
+            // Unwind first, and only then fall through to the abandon / give-up ladder.
+            if (_parkShimmyTries < PARK_SHIMMY_TRIES && psiDeg > PARK_ACCEPT_PSI_DEG &&
+                Math.Abs(eOff) <= PARK_ACCEPT_OFF_M + PARK_SHIMMY_OFF_M)
+            {
+                _parkShimmyTries++;
+                _parkShimmy = true;
+                _parkShimmyDist = 0.0;
+                car.RecordDecision(_navTime,
+                    $"[PARK] SHIMMY #{_parkShimmyTries} - held at {psiDeg:F1}° with the " +
+                    $"body {Math.Abs(eOff):F2} m off the bay line, so creep forward and " +
+                    $"unwind the angle ({PARK_SHIMMY_M:F1} m, mirrored law) instead of " +
+                    "quitting mid-tuck");
+                return;
+            }
             _parkAttempts++;
             if (_parkAttempts >= PARK_MAX_ATTEMPTS && !inBay)
             {
