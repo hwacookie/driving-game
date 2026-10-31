@@ -632,8 +632,19 @@ public sealed partial class BicycleNav
                     sepAlong = dx * Math.Sin(hr) + dy * Math.Cos(hr);
                     sepLat = dx * Math.Cos(hr) - dy * Math.Sin(hr);
                 }
+            // #39: which term drives the wheel. A runaway was measured on the avenue
+            // (yaw 33 -> 52 deg with held=False) while the same law converges in the unit
+            // ladder from a similar lateral error, so the open question is not the size of
+            // the error but whether the angle term and the lateral term ever oppose each
+            // other in the right direction while reversing. psiT = angle term, posT =
+            // lateral term, sum = their command before clamping, sat = it exceeded
+            // MAX_STEER (so the executed wheel no longer says what the law wanted).
+            double psiT = PARK_REVERSE_PSI_GAIN * psiCar;
+            double posT = -PARK_REVERSE_POS_GAIN * eOff;
             car.RecordDecision(_navTime,
                 $"[PARKT] yaw={psiDeg:F1}° v={car.Speed:F2} vt={vTarget:F2} " +
+                $"psiT={psiT:F3} posT={posT:F3} sum={psiT + posT:F3} " +
+                $"sat={System.Math.Abs(psiT + posT) > MAX_STEER} " +
                 $"off={eOff:F2} dRem={dRem:F1} held={_parkHeld} " +
                 $"near=#{nearUid} sep={nearD:F2} along={sepAlong:F2} lat={sepLat:F2} " +
                 $"crash={car.CrashEpisodes} contact=#{car.ContactWith} inContact={car.InContact}");
