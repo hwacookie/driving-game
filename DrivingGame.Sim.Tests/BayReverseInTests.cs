@@ -168,7 +168,7 @@ public class BayReverseInTests
         lock (car.Decisions)
         {
             var rows = car.Decisions
-                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true || d.Msg?.StartsWith("[PARKPLAN]") == true)
+                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true || d.Msg?.StartsWith("[PARKPLAN]") == true || d.Msg?.StartsWith("[PARKAPP]") == true)
                 .Select(d => d.Msg!)
                 .ToList();
             return string.Join("\n  ", rows.TakeLast(last));

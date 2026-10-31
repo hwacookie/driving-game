@@ -68,6 +68,7 @@ public sealed partial class BicycleNav
     private int _pkEaseTicks;
     private int _pkHoldTicks;
     private double _pkLastRecT;
+    private double _pkAppLastT;
 
     /// <summary>Body corner positions relative to the rear axle, (along, right)
     /// in metres, in the car's own frame.</summary>
@@ -1931,8 +1932,26 @@ public sealed partial class BicycleNav
         // across [0.3, 0.5] m/s while the parking plan is active - continuous, and free above
         // 0.5 m/s where the rotation budget actually lives. Other maneuvers (U-turn,
         // reverse-in) keep their full commands.
-        if (plan is not null && car.Speed < 0.5)
+        double deltaPre = delta;   // #36: the wheel as the manoeuvre asked for it
+                if (plan is not null && car.Speed < 0.5)
             delta *= Math.Max(0.0, Math.Min(1.0, (car.Speed - 0.3) / 0.2));
+
+        // #36, the discriminator between the two remaining explanations for the steep
+        // nose handed to the reverse solver. Both predict "24-35 deg at the stop", so
+        // the pose cannot tell them apart - only the wheel command can. If deltaPre is
+        // what the manoeuvre needs (~21 deg to unwind over the 3 m tail) and delta is a
+        // quarter of it, the end-of-stop fade is suppressing the straightening; if both
+        // are small, the pursuit never asked to straighten and the drift geometry is the
+        // whole story. The avenue runs at 180 deg, so car.Heading reads the nose angle.
+        if (ParkStyle == "reverse" && plan is not null && (dStop ?? 99.0) <= 6.0 &&
+            _navTime - _pkAppLastT >= 1.0)
+        {
+            _pkAppLastT = _navTime;
+            car.RecordDecision(_navTime,
+                $"[PARKAPP] phase={plan.Value.Phase} dStop={dStop ?? -1:F2} " +
+                $"v={car.Speed:F2} head={car.Heading:F1} psi={Math.WrapDeg(car.Heading - 180.0):F1} " +
+                $"wheel: pre-fade={deltaPre:F1} post-fade={delta:F1}");
+        }
 
         // Expose the steering angle for the driver's mechanical blinker auto-off
         // (steered in + steered back = indicator cancels itself).
