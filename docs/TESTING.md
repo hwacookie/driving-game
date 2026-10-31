@@ -152,6 +152,28 @@ sim on a crash and leaves the cars in place.
 
 ## Current baseline (the one place a number is written)
 
+> **Baseline 2026-10-31 (evening), `--warp 4`, parking lineage branch
+`fix-39-the-reverse-solver-refuses-a-bay-on-an` at `03dd955` + docs, supersedes the block
+below it.**
+- C# unit suite: **165 passed / 0 failed / 2 skipped** (`dotnet test`, includes main
+  `ec9e412`). All four bay rungs are green and named in the output:
+  `BayReverseInTests(clearanceM: 2.5 / 1.5 / 1 / 0.5)` plus
+  `ABayWithNoNeighboursIsStillParkedIn`. Passing that ladder requires zero contacts, no
+  `GAVE UP` in the car's own decision record, hazard off, and a recorded verdict (the
+  tightened instrument rejects an empty notice).
+  Causal check: `PARK_SHIMMY_TRIES=0` makes exactly one test red,
+  `BayReverseInTests(clearanceM: 1.5)` - the forward unwind in
+  `UpdateReversePark` is what closes that bay, so the row can fail and names itself.
+- e2e suite: **4 of 29 failed**. `park_6lane_right_lane` is GREEN (its old row "reached
+  the destination but never came to a clean stop", nose -2.29 m / perp 0.80 m, is gone);
+  the bay variant at 2.5 m clearance is GREEN (right flank 6 cm / 10 cm from the kerb,
+  limit 30 cm); the bay variants at 1.0 m and 0.5 m clearance FAIL at 4.9 m / 6.6 m off
+  the kerb - tracked by issue 31, they end through the staging-gate claim rather than a
+  tuck (issue 38/39); and `fig8_xing` / `fig8_xing_plain` remain the two pre-existing
+  out-of-scope failures from the baseline below.
+- CI is green for the same tree (`core build + unit tests`, `godot client build`): the
+  deliberately red instrument row that blocked merging all day no longer exists.
+
 > **Baseline 2026-10-31, `--warp 4`, branch `fix-36-a-car-reversing-into-a-bay-is-held`
 > at `59eb1a2` (`main` = `ee5e81f`); log `tests/run_test_T_355_0_20261031_131638.log`.**
 > This is the current source of the suite's numbers, recorded to make "no worse"
