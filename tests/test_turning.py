@@ -1033,12 +1033,24 @@ class TurnTester:
         ux, uy = (float(seg['x2']) - x1) / L, (float(seg['y2']) - y1) / L
         by_uid = {c['car_uid']: c for c in state.get('cars', [])}
 
+        seg_h = math.degrees(math.atan2(ux, uy))
+
         def extent(uid):
+            # Fore/aft span ALONG the road axis for a car that may be crooked (#40).
+            # This used to be length/2 only, which silently assumed every car stands
+            # parallel to the road: for a 4.40 x 1.80 car yawed 30 deg the reach along
+            # the axis is L/2*cos + W/2*sin, and ignoring the yaw invented overlap for
+            # a crooked car while hiding real overlap for a straight one. Both
+            # length_m and width_m come from the sim, so the metric still follows the
+            # model table instead of a hardcoded car.
             c = by_uid.get(uid)
-            if not c or c.get('length_m') is None:
+            if not c or c.get('length_m') is None or c.get('width_m') is None:
                 return None
             s = (c['x'] - x1) * ux + (c['y'] - y1) * uy
-            return (s - c['length_m'] / 2.0, s + c['length_m'] / 2.0)
+            psi = math.radians((float(c.get('heading_deg', c.get('heading', 0.0))) - seg_h + 180.0) % 360.0 - 180.0)
+            half = (c['length_m'] / 2.0) * abs(math.cos(psi)) + \
+                   (c['width_m'] / 2.0) * abs(math.sin(psi))
+            return (s - half, s + half)
 
         prim = extent(primary_uid)
         flank = [extent(u) for u in flank_uids]
