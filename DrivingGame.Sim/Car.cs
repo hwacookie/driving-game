@@ -260,6 +260,18 @@ public class Car
     /// (docs/CAR_DETAIL_WINDOW.md).</summary>
     public int HeldByUid { get; internal set; }
 
+    /// <summary>The cars standing within a few metres of this one, filled by
+    /// CarCollisions ONLY while this car is tucking into a parking space (#36).
+    ///
+    /// The nav plans and steers with `_car` and `_network` and nothing else, which is
+    /// why a reverse-in could scrape the car parked beside its bay: the manoeuvre's
+    /// envelope knows the kerb and the centreline and has never been told that the
+    /// neighbouring bodies are part of the space it must fit through. A full
+    /// neighbour map for every car every substep was the obvious first draft and this
+    /// codebase's history says plainly what that costs, so this list exists for the
+    /// one car at a time that needs it.</summary>
+    public List<Car>? ParkingNeighbours { get; internal set; }
+
     /// <summary>Node id of the last crossing this car committed to (nose
     /// past the yield stop line) - logs one decision entry per crossing,
     /// not per tick. Set by CarCollisions.ComputeAvoidCaps.</summary>

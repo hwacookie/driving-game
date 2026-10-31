@@ -1212,6 +1212,27 @@ public static class CarCollisions
         // free - recomputing it per PAIR is O(pairs), per CAR is O(cars).
         int nSweepSteps = (int)Math.Round(TtcSweepMaxS / TtcSweepStepS);
         var sweeps = new Dictionary<int, (double X, double Y, double H, double Dist)[]>();
+        // #36: hand the car that is tucking into a bay the list of bodies beside it.
+        // Scoped to that case deliberately — at 50 cars a per-tick neighbour map for
+        // everyone is exactly the cost this file has already paid once — and rebuilt
+        // from the grid it already has, so the parking envelope never invents its own
+        // spatial query to disagree with the one that decides contacts.
+        foreach (var c in carList)
+        {
+            // Filled for every car with a parking job, not only a running tuck: the
+            // planner must see the neighbours BEFORE it commits (#36) — waiting for
+            // the tuck to be armed asked the question one step too late.
+            if (c.BicycleNav is not { ParkJobActive: true })
+            {
+                c.ParkingNeighbours = null;
+                continue;
+            }
+            var near = new List<Car>();
+            foreach (var o in grid.Near(c.X, c.Y, (int)Math.Ceiling(14.0 / CellSizeM) + 1))
+                if (o.Uid != c.Uid && Math.Hypot(o.X - c.X, o.Y - c.Y) <= 14.0)
+                    near.Add(o);
+            c.ParkingNeighbours = near;
+        }
         foreach (var c in carList)
         {
             var arr = new (double, double, double, double)[nSweepSteps];
