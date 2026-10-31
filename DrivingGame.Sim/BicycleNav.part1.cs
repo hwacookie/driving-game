@@ -316,6 +316,11 @@ public sealed partial class BicycleNav
     // drives and the run-out the arming search may use.
     private double _parkStageExtM;
     private int _parkStageTries;
+    /// How far a straight backup (no arc) may drive before handing the manoeuvre back for
+    /// a re-solve. The comment at the fallback in part3 promises "backs up a metre to try
+    /// again"; without a cap the same code reverses the whole staging distance (~10 m).
+    public static readonly double PARK_BACKUP_MAX_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_BACKUP_MAX_M"), out var _pbm) ? _pbm : 1.2;
     public static readonly double PARK_STAGE_EXTRA_M = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_M"), out var _pse) ? _pse : 1.5;
     public static readonly int PARK_STAGE_EXTRA_TRIES = int.TryParse(

@@ -454,7 +454,15 @@ public sealed partial class BicycleNav
         // Straight run-out: fills the remaining staging distance, and gives
         // heading and cross-track error somewhere to converge.
         double uEnd = pts[^1].U, vEnd = pts[^1].V;
-        double tail = Math.Max(PARK_REVERSE_TAIL_M, stage + uEnd);   // u_end < 0
+        // #39: the run-out fills the staging distance - right for a real tuck, whose arcs
+        // stop short of the flag and are completed by this straight stretch. For the
+        // straight BACKUP (dv = 0, no arc) the same formula sets the target to the whole
+        // stage, while the comment above promises "backs up a metre to try again": the code
+        // reversed ~10 m, and with a longer line that is how a job ends without a verdict
+        // (measured: v = -0.80 m/s stuck at 49-53% progress, rungs "never completed").
+        double tail = dv == 0.0
+            ? Math.Min(PARK_REVERSE_TAIL_M, PARK_BACKUP_MAX_M)
+            : Math.Max(PARK_REVERSE_TAIL_M, stage + uEnd);   // u_end < 0
         int nTail = Math.Max(1, (int)(tail / 0.02));
         for (int i_ = 1; i_ <= nTail; i_++)
             pts.Add((uEnd - i_ * tail / nTail, vEnd, 0.0, 0.0));
