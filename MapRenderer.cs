@@ -107,7 +107,9 @@ public partial class MapRenderer : Node2D
     // car-detail paths a hand would take, fired from the script, so "does a
     // click on a car open the menu in the LIVE viewer, and does the live frame
     // feed an open slot?" is answerable without a finger on the mouse.
-    private int _testCarHook;           // 1 = the menu, 2 = open a slot
+    private int _testCarHook;           // 1 = the menu, 2 = open a slot, 3 = a click on a
+                                        // NAMED car (window 0's rebind, measured)
+    private long _testCarClickUid;      // --test-car-click <uid>
     private StreamWriter _motionLog;
     private bool _testPan;
     private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
@@ -123,7 +125,6 @@ public partial class MapRenderer : Node2D
     private bool _testBarUi;         // --test-bar-ui: wheel-zoom + marker tooltip/click
     private bool _testFocusProbe;    // --test-focus-probe: review auto-focus + follow trace
     private bool _dumpAllControls;   // probe-internal: list every Control once
-    private bool _testInfoWindowOut;     // --test-window-out: park a window illegally, let the guard answer
     // --quit-on-test-done: exit IN-APP (GetTree().Quit) once a polled test
     // run finishes. Used by scripts/run_e2e.sh so the window never has to
     // be killed from outside - any kill signal (SIGTERM -> .NET abort,
@@ -321,11 +322,6 @@ public partial class MapRenderer : Node2D
     // Decision log for the selected car (info window): polled from
     // GET /car/{uid}/decisions (sim side: Car.Decisions - one event per
     // CHANGE of braking reason, newest shown first).
-    private HttpRequest _decHttp;
-    private bool _decBusy;
-    private long _decUidFor = -1;    // uid the displayed lines belong to
-    private ulong _decLastMs = 0;    // wall time of the last fetch attempt
-    private List<string> _decLines = new();
     private bool _autoFollow = true;   // until the user takes manual control
     private double _lastMaxTime = double.NegativeInfinity;
     // Wall-clock driven render target: rt advances with REAL time between
@@ -362,10 +358,6 @@ public partial class MapRenderer : Node2D
     private double _flowRate = -1.0;   // m/s over the whole run (-1 = n/a)
     private double _flowTotal = -1.0;  // metres driven since sim start
     private int _standstillN = 0;      // R31: cars stuck < 1 m in the window
-    private Panel _infoPanel;          // click-to-inspect car info window
-    private Label _infoSpeed;          // live speed row (updated per frame)
-    private TextEdit _infoText;        // selectable/scrollable/copyable log
-    private string _lastInfoDecKey = "";    // uid|content: full-reset key
 
     // Clean-shutdown generation: scripts/run_e2e.sh NEVER signals Godot
     // (a SIGTERM kills .NET's exit path into an abort and pops a macOS
@@ -374,8 +366,6 @@ public partial class MapRenderer : Node2D
     const string GodotGenFile = "/tmp/driving_game_godot_gen";
     private string _godotGen = "";
     private ulong _godotGenLastMs;
-    private Button _infoCopyBtn;   // "copy": whole log -> clipboard
-    private ulong _copyFlashUntil; // "copied!" flash revert timestamp
 
     static string ReadGodotGen()
     {
@@ -773,8 +763,6 @@ public partial class MapRenderer : Node2D
                 _testPlay = true;
             else if (args[i] == "--no-play-lerp")
                 _noPlayLerp = true;
-            else if (args[i] == "--test-window-out")
-                _testInfoWindowOut = true;
             else if (args[i] == "--test-minimap-pan" && i + 2 < args.Length)
             {
                 // Dev hook (same family as --test-seek and --test-scrub-drag):
@@ -812,6 +800,16 @@ public partial class MapRenderer : Node2D
                 _testCarHook = 1;
             else if (args[i] == "--test-car-slot")
                 _testCarHook = 2;
+            else if (args[i] == "--test-car-click" && i + 1 < args.Length)
+            {
+                // Left-click THAT car through the real pick path, so "window 0 follows the
+                // click" is answered by the code a hand would run into, not by a screenshot
+                // nobody can re-run. Needs a uid that exists in this frame (the cast names
+                // them: parking_car, bay_rear, bay_front).
+                _testCarHook = 3;
+                _testCarClickUid = long.Parse(args[i + 1]);
+                i += 1;
+            }
             else if (args[i] == "--quit-on-test-done")
                 _quitOnTestDone = true;
             else if (args[i] == "--motionlog" && i + 1 < args.Length)
@@ -956,8 +954,15 @@ public partial class MapRenderer : Node2D
                 _tapeFirstStep = -1; _tapeHead = -1; _deliveredStep = -1;
                 _playing = true;          // the cursor chases the head at the dialled rate
                 _cursor = 0; _playPos = 0.0;
-                GD.Print("REVIEW-SOURCE live tape tip (no file loaded): " +
-                         $"recording={DrivingGame.Sim.RunTape.Recording}");
+                // A tip poll answers the HOST's recording flag; this line can only report
+                // the in-process static, which is False for an attached client (--source
+                // http) even when the host records happily - saying `recording=False` there
+                // read as "no tape" and sent me looking for a dead recorder. Say what this
+                // one actually knows, and where the real answer arrives.
+                GD.Print("REVIEW-SOURCE live tape tip (no file loaded): the host's tape " +
+                         "answers on the first /tape/tip response " +
+                         $"(local embedded sim recording={DrivingGame.Sim.RunTape.Recording}" +
+                         f"{(_simHost is not null ? ", attached to a remote host" : ", embedded host")})");
             }
             else
             {
@@ -1091,16 +1096,6 @@ public partial class MapRenderer : Node2D
             RequestState(_stateHttpA);
         }
 
-        // Test-runner UI + its own HTTP node (the map/state nodes are busy
-        // with their pipelines).
-        // The decision fetch belongs to the CLIENT, not to the REST-source
-        // branch: embedded mode has a REST API too (in-process, on
-        // --port), and clicking a car used to dereference a null _decHttp
-        // there. One node, the port the client actually talks to.
-        _decHttp = new HttpRequest { UseThreads = true, Timeout = 1.0 };
-        AddChild(_decHttp);
-        _decHttp.RequestCompleted += (id, code, hdr, body) =>
-            OnDecisionsResponse(code, body);
 
         _cmdHttp = new HttpRequest { UseThreads = true, Timeout = 5.0 };
         AddChild(_cmdHttp);
@@ -1704,48 +1699,6 @@ public partial class MapRenderer : Node2D
             };
         }
 
-        if (_testInfoWindowOut)
-        {
-            // Dev hook (same family as --test-pan): put windows somewhere a
-            // hand is not allowed to leave them - partly out of the main
-            // window, and on top of each other - and read back where the
-            // guard settled them, so "windows cannot be dragged out, and they
-            // keep 5 px from each other" is a measured answer rather than a
-            // claim.
-            // After --resize when one is asked for: the point of the test is
-            // the size the windows have to share, so the resize comes first.
-            var whenWin = _resizeTo.X > 0 ? Mathf.Max(2.0, _shotDelay - 0.8) : 1.5;
-            GetTree().CreateTimer(whenWin).Timeout += () =>
-            {
-                var asked = "";
-                foreach (var w in _windows) asked += $" {w.Title}@({w.Position.X},{w.Position.Y})";
-                GD.Print($"TEST-WINDOW ask:{asked}");
-                for (var i = 0; i < _windows.Count; i++)
-                    // All outside the same corner, all overlapping each other.
-                    _windows[i].Position = new Vector2I(-200 + 30 * i, -200 + 20 * i);
-                GetTree().CreateTimer(0.3).Timeout += () =>
-                {
-                    var got = "";
-                    foreach (var w in _windows) got += $" {w.Title}@({w.Position.X},{w.Position.Y}) {w.Size.X}x{w.Size.Y}";
-                    GD.Print($"TEST-WINDOW enforced:{got}");
-                    // The gap that is actually left between the outer rects of
-                    // neighbours, in px - the number the decision asks for is
-                    // 5.
-                    for (var i = 0; i < _windows.Count; i++)
-                    {
-                        for (var j = i + 1; j < _windows.Count; j++)
-                        {
-                            var a = OuterRect(_windows[i]);
-                            var b = OuterRect(_windows[j]);
-                            var gx = Mathf.Max(b.Position.X - a.End.X, a.Position.X - b.End.X);
-                            var gy = Mathf.Max(b.Position.Y - a.End.Y, a.Position.Y - b.End.Y);
-                            GD.Print($"TEST-WINDOW gap {_windows[i].Title} vs {_windows[j].Title} = " +
-                                     $"{Mathf.Max(gx, gy):F0} px clear (want {WinGapPx})");
-                        }
-                    }
-                };
-            };
-        }
 
         if (_testMmPan.X != 0f || _testMmPan.Y != 0f)
         {
@@ -2373,59 +2326,6 @@ public partial class MapRenderer : Node2D
             _mmHud.AddChild(_testLabel);
 
             // Car info window: click a car in the map to select it. Static
-            // position under the minimap, same background as the minimap.
-            var sbInfo = new StyleBoxFlat
-            {
-                BgColor = MinimapNode.Bg,
-                BorderColor = MinimapNode.Border,
-                BorderWidthLeft = 2, BorderWidthRight = 2,
-                BorderWidthTop = 2, BorderWidthBottom = 2,
-                ContentMarginLeft = 10, ContentMarginRight = 10,
-                ContentMarginTop = 8, ContentMarginBottom = 8,
-            };
-            _infoPanel = new Panel { Visible = false };
-            _infoPanel.AddThemeStyleboxOverride("panel", sbInfo);
-            // Live speed row on top - kept OUT of the text view so its
-            // per-frame churn never resets the user's scroll position.
-            _infoSpeed = new Label { Text = "" };
-            _infoSpeed.AddThemeColorOverride("font_color",
-                new Color(220 / 255f, 220 / 255f, 220 / 255f));
-            _infoSpeed.AddThemeFontSizeOverride("font_size", 16);
-            _infoSpeed.SetAnchorsPreset(Control.LayoutPreset.TopWide);
-            _infoSpeed.OffsetLeft = 8;  _infoSpeed.OffsetRight = -8;
-            _infoSpeed.OffsetTop = 6;   _infoSpeed.OffsetBottom = 30;
-            _infoPanel.AddChild(_infoSpeed);
-            // Real text view instead of a Label: selectable, scrollable and
-            // copyable (Editable=false still allows select + copy), so the
-            // full decision log - up to 100 lines - can be read and copied
-            // out for analysis, not just the ~10 a fixed label could show.
-            _infoText = new TextEdit
-            {
-                Editable = false,   // read-only: nothing can be typed in ...
-                SelectingEnabled = true,   // ...but select + copy still work
-                WrapMode = TextEdit.LineWrappingMode.Boundary,
-                AutowrapMode = TextServer.AutowrapMode.Word,
-            };
-            _infoText.AddThemeFontSizeOverride("font_size", 16);
-            _infoText.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-            _infoText.OffsetLeft = 8;   _infoText.OffsetTop = 34;
-            _infoText.OffsetRight = -8; _infoText.OffsetBottom = -8;
-            _infoPanel.AddChild(_infoText);
-            // "copy" button: copies the ENTIRE log to the clipboard in one
-            // click - manual select-all over 100 lines is the pain this
-            // removes.
-            _infoCopyBtn = new Button { Text = "copy" };
-            _infoCopyBtn.SetAnchorsPreset(Control.LayoutPreset.TopRight);
-            _infoCopyBtn.OffsetLeft = -110; _infoCopyBtn.OffsetTop = 2;
-            _infoCopyBtn.OffsetRight = -8;   _infoCopyBtn.OffsetBottom = 26;
-            _infoCopyBtn.Pressed += () =>
-            {
-                DisplayServer.ClipboardSet(_infoText.Text);
-                _infoCopyBtn.Text = "copied!";
-                _copyFlashUntil = Time.GetTicksMsec() + 1200;
-            };
-            _infoPanel.AddChild(_infoCopyBtn);
-            _mmHud.AddChild(_infoPanel);
         }
         _minimap.Setup(_mmSegs, _bounds, roadColor, _cam);
         // The inset doubles as the VIEW HANDLE (binding user decision 2026-10-22):
@@ -3795,39 +3695,6 @@ public partial class MapRenderer : Node2D
 
     // ------------------------------------------------- M2: car tracking
 
-    /// <summary>Decision-log response for the SELECTED car. Stale responses
-    /// (selection changed in flight) are dropped; the poll re-fires on the
-    /// next frame. Failures just keep the last lines (server may be down).
-    /// </summary>
-    private void OnDecisionsResponse(long responseCode, byte[] body)
-    {
-        _decBusy = false;
-        if (responseCode != 200 || _selectedUid is not long sel) return;
-        try
-        {
-            var root = JsonDocument.Parse(body).RootElement;
-            if (!root.TryGetProperty("uid", out var uEl) || uEl.GetInt64() != sel)
-                return;
-            _decUidFor = sel;
-            var lines = new List<string>();
-            if (root.TryGetProperty("decisions", out var arr))
-                foreach (var d in arr.EnumerateArray())
-                    lines.Add($"{d.GetProperty("t").GetDouble():F1}s  " +
-                              d.GetProperty("msg").GetString());
-            if (lines.Count == 0)
-            {
-                _decLines = new List<string> { "(no decisions yet)" };
-                return;
-            }
-            lines = lines.TakeLast(5).ToList();
-            lines.Reverse();   // newest first
-            _decLines = lines;
-        }
-        catch
-        {
-            _decLines = new List<string> { "(unparsable response)" };
-        }
-    }
 
     private void OnStateResponse(long responseCode, byte[] body,
                                  HttpRequest next)
@@ -4092,7 +3959,17 @@ public partial class MapRenderer : Node2D
                 }
 
                 if (_autoFollow && anyNewCar && newestUid > 0 && _crashFocusUid == 0L)
+                {
                     _followUid = newestUid;
+                    // WINDOW NULL when the run names NO focus car (the bay scenarios declare a
+                    // PLACE): it takes the PRIMARY car, which is the one that reached the map
+                    // first - the harness stages the subject before its cast, measured uid 1 =
+                    // parking_car with 2/3 the two bay neighbours. Only while window 0 does not
+                    // exist, so a neighbour appearing later never moves the subject.
+                    if (_tFocusUid <= 0L && _carBuf.Count > 0 &&
+                        (_winZero is null || !GodotObject.IsInstanceValid(_winZero)))
+                        BindWindowZero(_carBuf.Keys.Min());
+                }
             }
             else if (root.TryGetProperty("has_car", out var hc) && hc.GetBoolean())
                 Add(root.GetProperty("car_uid").GetInt64(),
@@ -4732,62 +4609,9 @@ public partial class MapRenderer : Node2D
 
         // Car info window (click selection): id, type, live speed, driver
         // class - static under the minimap, same background as the minimap.
-        if (_infoPanel != null)
-        {
-            bool show = _selectedUid.HasValue &&
-                        _carNodes.ContainsKey(_selectedUid.Value);
-            if (show)
-            {
-                long uid = _selectedUid.Value;
-                // Fetch on selection change, then refresh once a second:
-                // a stuck car's log is static, a busy one keeps appending.
-                ulong nowMs = Time.GetTicksMsec();
-                if (!_decBusy &&
-                    (uid != _decUidFor || nowMs - _decLastMs >= 1000))
-                {
-                    _decBusy = true;
-                    _decLastMs = nowMs;
-                    if (uid != _decUidFor) _decLines = new() { "(loading...)" };
-                    _decHttp.Request(
-                        $"http://127.0.0.1:{_embeddedPort}/car/{uid}/decisions");
-                }
-                var mSel = _carMeta.GetValueOrDefault(uid);
-                // The header used to read `tan (car)` - a PHOTO name plus a class
-                // no part of the sim consults. A model answers for itself now (#18);
-                // ModelFor resolves the old photo words, so a tape or a host that
-                // still says `tan` shows what it actually is.
-                var model = DrivingGame.Sim.Config.ModelFor(mSel?.Model);
-                float kmh = 0f;
-                if (_carBuf.TryGetValue(uid, out var bufSel) && bufSel.Count > 0)
-                    kmh = bufSel[^1].SpeedKmh;
-                // The speed row lives in its own Label (per-frame churn is
-                // fine there). The TextEdit is only reset on a STRUCTURAL
-                // change (new decision line, new car) - a full reset drops
-                // the scroll position, so it must not happen more often.
-                _infoSpeed.Text = $"speed   {kmh:F1} km/h";
-                var sb = new System.Text.StringBuilder();
-                sb.Append($"#{uid}   {model.Name}\n");
-                sb.Append($"driver  {mSel?.Driver ?? "?"}\n");
-                sb.Append("decisions (newest first):\n");
-                foreach (var line in _decLines)
-                    sb.Append(line).Append('\n');
-                string decKey = $"{uid}|{sb}";
-                if (decKey != _lastInfoDecKey)
-                {
-                    _lastInfoDecKey = decKey;
-                    _infoText.Text = sb.ToString();
-                }
-            }
-            _infoPanel.Visible = show;
-        }
         LayoutUnderMinimap();
-        LayoutInfoFooter();
     }
 
-    // Height of the car info FOOTER (full-width bar at the bottom of the
-    // window): 4 header lines + up to 5 decision lines. Full width means
-    // the decision lines never wrap, so this fits them all.
-    const int FooterHeight = 240;
 
     /// <summary>Click selection: hit-test every car's body box (in the car's
     /// local frame, node origin = rear axle so the body centre sits
@@ -4805,7 +4629,8 @@ public partial class MapRenderer : Node2D
             return;
         }
         long uid = _selectedUid ?? _carBuf.Keys.Min();
-        if (_testCarHook == 1)
+        if (_testCarHook == 3 && _carBuf.ContainsKey(_testCarClickUid)) uid = _testCarClickUid;
+        if (_testCarHook == 1 || _testCarHook == 3)
         {
             var vp = GetViewport().GetVisibleRect().Size;
             var buf = _carBuf[uid];
@@ -4847,15 +4672,14 @@ public partial class MapRenderer : Node2D
             if (d < bestD) { bestD = d; best = kv.Key; }
         }
         _selectedUid = best;
-        // A click on a car offers what the reviewer's click offers: the MENU
-        // that decides WHERE this car gets shown - an already open detail slot
-        // or a new one (docs/CAR_DETAIL_WINDOW.md). The live viewer had only a
-        // highlight, which is the asymmetry the user named on 2026-10-25
-        // ("die Features, die wir sonst nur im Reviewerfenster haben: ein Auto
-        // anklicken und über das Pop-up-Menü auswählen, dass es in den
-        // Cardetails mitangezeigt wird").
-        if (best.HasValue && !_review)
-            OpenDetailMenu(screenPos, best.Value);
+        // LEFT CLICK = "show that car" - in WINDOW NULL (owner decision 2026-11-01).
+        // It replaces two older things at this gesture: the footer status panel (deleted;
+        // it duplicated what a detail window shows better) and the click menu, whose
+        // question - "where do I want to see this car?" - is now answered without asking.
+        // The menu itself is unchanged on RIGHT click (ReviewSelect → OpenDetailMenu),
+        // where choosing a slot is still the point; window 0 is not offered there, because
+        // it is not a slot but the operator's default view of the car they pointed at.
+        if (best.HasValue) BindWindowZero(best.Value);
     }
 
     /// <summary>Stack the overlays under the minimap, top to bottom: speed
@@ -5011,19 +4835,6 @@ public partial class MapRenderer : Node2D
         }
     }
 
-    /// <summary>Position the car info panel as a full-width FOOTER at the
-    /// bottom of the window (only visible while a car is selected). Wider
-    /// than the old minimap-side box: the decision log reads on one line
-    /// each instead of wrapping in a 360 px column.
-    /// </summary>
-    void LayoutInfoFooter()
-    {
-        if (_infoPanel == null || !_infoPanel.Visible) return;
-        var vp = GetViewport().GetVisibleRect();
-        var m = (float)WinGapPx;
-        _infoPanel.Position = new Vector2(m, vp.Size.Y - FooterHeight - m);
-        _infoPanel.Size = new Vector2(vp.Size.X - 2 * m, FooterHeight);
-    }
 
     /// <summary>Follow mode: the Camera2D tracks the node of the bound car.
     /// The engine's position smoothing gives the follow lag; a rebind (Tab)
@@ -5093,10 +4904,6 @@ public partial class MapRenderer : Node2D
 
     void UpdateOverlays()
     {
-        // Revert the "copied!" flash on the copy button.
-        if (_infoCopyBtn != null && _infoCopyBtn.Text == "copied!" &&
-            Time.GetTicksMsec() >= _copyFlashUntil)
-            _infoCopyBtn.Text = "copy";
         // Stale-window self-quit: the runner bumped the generation file
         // (this window belongs to a finished/previous run) -> quit clean.
         ulong nowMsGen = Time.GetTicksMsec();
@@ -5513,6 +5320,15 @@ public partial class MapRenderer : Node2D
     /// per-frame re-assert would fight every hand that touches the mouse.</summary>
     void ApplyFocus()
     {
+        // WINDOW NULL follows the decision the CAMERA makes: the car a run names as its
+        // FOCUS is the car the operator wants readouts of, so it owns window 0 from the
+        // first focus record (docs/CAR_DETAIL_WINDOW.md, owner decision 2026-11-01).
+        // Deliberately ABOVE the early return below: with the runner now launching the
+        // window on the live tape (`--tape-live`), every watch window would otherwise
+        // return here and never bind. One behaviour, whichever source named the focus -
+        // the live /focus declaration or the tape's `# focus` record.
+        long focusUid = _tFocusUid > 0L ? _tFocusUid : _focusUid;
+        if (focusUid > 0L) BindWindowZero(focusUid);
         if (_review || _tapeLive || _tFocusManual) return;      // the hand outranks the run
         if (_tFocusKind == "loc")
         {
