@@ -749,16 +749,6 @@ public partial class MapRenderer : Node2D
                 _testJog = true;
             else if (args[i] == "--ignore-map-hash")
                 _ignoreMapHash = true;
-            else if (args[i] == "--tape-live")
-                // The live window's PICTURE from the tip of a tape that is still
-                // being written - the unification of viewer and reviewer (docs/
-                // SIMULATIONS_REVIEWER.md → "One client, one data source", the
-                // user's decision of 2026-10-25): the scrub bar, the cursor and
-                // the rate dropdown exist here too. This is a SOURCE, not a mode:
-                // it does NOT set `_review`, because the live surface (speed,
-                // flow, the test runner) describes the same run the picture shows
-                // and must stay on screen.
-                _tapeLive = true;
             else if (args[i] == "--test-play")
                 _testPlay = true;
             else if (args[i] == "--no-play-lerp")
@@ -940,11 +930,21 @@ public partial class MapRenderer : Node2D
         // cannot build the named map (`_noGround`) paints nothing at all: no
         // retry will ever help, and cars without streets are a lie about where
         // they drove (issue #2).
+        // ONE chrome for every window (owner decision 2026-11-02: "we always
+        // want the scrollbar at the bottom - no difference between live and
+        // review"): every window that is not loading a FINISHED TAPE FILE
+        // (`--review`) reads the tape the engine is still writing. The recorder
+        // starts with the sim (SimEngine.cs), so there is no live run without a
+        // tape - the scrub bar, the cursor and the rate are in every window now.
+        // The ONE exception is `--screenshot` (AGENTS.md's measurement recipe):
+        // a one-shot diagnostic PNG must show the map as the LIVE sim holds it,
+        // with no instrument painted into the bottom band it measures against.
+        if (!_review && string.IsNullOrEmpty(_screenshotPath)) _tapeLive = true;
         if (_review || _tapeLive)
         {
             // The reviewer and the live window are ONE instrument; what differs
             // is the SOURCE. A file (`--review [path]`) is loaded whole; the
-            // live window's source is the host's GROWING tape (`--tape-live`),
+            // live window's source is the host's GROWING tape (the default now, #64),
             // which arrives by hops instead of in one read - and there is nothing
             // to fall back to when a hop has not landed yet, because the tape
             // starts with the sim (decision (a) of 2026-10-25: every run is
@@ -979,33 +979,36 @@ public partial class MapRenderer : Node2D
                     GD.Print($"REVIEW of {TapeNameOf(tape)}: {_tape.Count} substeps, " +
                              $"dt {_tapeDt:F6} s, map {_tapeMap} #{_tapeHash}");
                 }
-                else if (!_tapeLive)
+                else
                 {
                     _review = false;
-                    GD.Print("!! review: no tape readable - falling back to the live view");
+                    _tapeLive = true;
+                    GD.Print("!! review: no tape readable - falling back to the live tape");
                 }
             }
             BuildReviewHud();
-            if (!_tapeLive)
-                BuildRunPicker();   // a live session has ONE run: the current one
+            // The picker belongs to every window's bar (one chrome, no modes):
+            // 📂 on a live window means "jump to an old run", and
+            // ReviewRunSelect switches the source from the tip to that file.
+            BuildRunPicker();
             if (_tapeLive && _simHost == null)
             {
                 // The http half of the live tape source: ONE node (see `RequestTapeTip`
-                // in the reviewer part - a hop carries up to 24 substeps, so one
-                // request per rendered frame is already 2.4 substeps/frame against
-                // the sim's 60/s). Kick it once here; the response rearms it.
+                // in the reviewer part - the pump is paced by wall clock, #61; the
+                // response handler never re-arms it). Kick it once here; _Process's
+                // per-frame pull is the only arm after that.
                 _tipHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
                 AddChild(_tipHttp);
                 _tipHttp.RequestCompleted += (id, code, hdr, body) =>
                     OnTapeTipResponse(id, code, hdr, body);
                 RequestTapeTip();
             }
-            // A review window draws the TAPE, so a live sim beside it is
-            // irrelevant to the picture - and the live surface (speed label,
+            // A FILE review draws the TAPE, so a live sim beside it is
+            // irrelevant to the picture, and the live surface (speed label,
             // flow, test runner) is hidden per frame. ⏹ stop is what freezes
             // the host, and only when the user presses it (docs/
-            // SIMULATIONS_REVIEWER.md). `--tape-live` keeps the live surface:
-            // its picture and the live sim are the same run.
+            // SIMULATIONS_REVIEWER.md). A live window keeps the live surface:
+            // its picture (the tip) and the live sim are the same run.
         }
 
         // The window title carries the REST port: two windows of this
@@ -1078,19 +1081,9 @@ public partial class MapRenderer : Node2D
             _stateHttpB = new HttpRequest { UseThreads = true, Timeout = 1.0 };
             AddChild(_stateHttpA);
             AddChild(_stateHttpB);
-            if (_tapeLive)
-            {
-                // The live tape hop: ONE node (see `RequestTapeTip` in the
-                // reviewer part - a hop carries 24 substeps, so a single
-                // request per frame is already ~2.4 substeps/frame against
-                // the sim's 60/s; the state pair needs two because a /state
-                // answer carries exactly one).
-                _tipHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
-                AddChild(_tipHttp);
-                _tipHttp.RequestCompleted += (id, code, hdr, body) =>
-                    OnTapeTipResponse(id, code, hdr, body);
-                RequestTapeTip();
-            }
+            // (the tape tip node was already built in the map-ready block —
+            // both run for the http source; building it twice left one dead
+            // HttpRequest in the tree, #64)
             _stateHttpA.RequestCompleted += (id, code, hdr, body) =>
                 OnStateResponse(code, body, _stateHttpB);
             _stateHttpB.RequestCompleted += (id, code, hdr, body) =>
@@ -1801,7 +1794,11 @@ public partial class MapRenderer : Node2D
     /// exactly that leak, with cars instead of scenery).</summary>
     void ArmObstaclePoll()
     {
-        if (_review || _tapeLive) return;
+        // Only a FILE review skips the scenery: its world is the tape's, and a
+        // live host's parked cars beside it are not part of the run under review
+        // (#4). A live window shows the same parked scenery as always - the
+        // tape source changed its PICTURE, not its world.
+        if (_review) return;
         if (_obstacleHttp == null)
         {
             _obstacleHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
@@ -3578,7 +3575,19 @@ public partial class MapRenderer : Node2D
         if (_review || _tapeLive)
         {
             if (_tapeLive)
+            {
                 PullTapeTip();
+                // The live surface (flow, speed, warp) keeps its feed: an
+                // attached window gets /state from the http pipeline; an
+                // EMBEDDED one has no pipeline, so the in-process snapshot is
+                // ingested here — the same single source the direct-live view
+                // read before the tape became the picture (#64). The buffers it
+                // touches are guarded by the tape-ownership checks inside
+                // IngestState (no car prune, no time-warp wipe).
+                if (_simHost != null)
+                    IngestState(JsonSerializer.SerializeToUtf8Bytes(
+                        _simHost.Engine.StateSnapshot()), "embedded /state (tape)");
+            }
             ReviewTick(delta);
         }
         else if (_simHost != null)
@@ -5325,9 +5334,9 @@ public partial class MapRenderer : Node2D
         // WINDOW NULL follows the decision the CAMERA makes: the car a run names as its
         // FOCUS is the car the operator wants readouts of, so it owns window 0 from the
         // first focus record (docs/CAR_DETAIL_WINDOW.md, owner decision 2026-11-01).
-        // Deliberately ABOVE the early return below: with the runner now launching the
-        // window on the live tape (`--tape-live`), every watch window would otherwise
-        // return here and never bind. One behaviour, whichever source named the focus -
+        // Deliberately ABOVE the early return below: every window now runs on
+        // the live tape (#64), so one would otherwise return here and never
+        // bind. One behaviour, whichever source named the focus -
         // the live /focus declaration or the tape's `# focus` record.
         long focusUid = _tFocusUid > 0L ? _tFocusUid : _focusUid;
         if (focusUid > 0L) BindWindowZero(focusUid);

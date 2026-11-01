@@ -390,6 +390,10 @@ public partial class MapRenderer : Node2D
         _tapePanel.Visible = false;   // the choice closes the dialog
         // A new run is a new tape: reload, rewind, and re-point the camera.
         // The window itself survives - it is long-lived, the run is not.
+        // On a LIVE window this is also the source switch: from now on the
+        // picture is this FILE, not the tip the host is still writing (the
+        // pump in _Process stops with the flag).
+        _tapeLive = false;
         _reviewPath = path;
         _tape.Clear();
         _tapeKinds.Clear();
@@ -883,7 +887,7 @@ public partial class MapRenderer : Node2D
     }
 
     /// <summary>The live window's PICTURE, read from the tip of a tape that is
-    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md → "One
+    /// still being written (live tape source, #64, docs/RECORD_PLAYBACK.md → "One
     /// client, one data source"): viewer and reviewer are one display and the
     /// only difference is the SOURCE — a tape file on disk or the host's growing
     /// recorder. `_tape` is that source, filled here instead of by `LoadTape`;
@@ -896,7 +900,7 @@ public partial class MapRenderer : Node2D
     /// so this parser is `LoadTape`'s parser: two frame readers are how a live
     /// window and its own tape disagree about one run.</summary>
     /// <summary>The live window's PICTURE, read from the tip of a tape that is
-    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md → "One
+    /// still being written (live tape source, #64, docs/RECORD_PLAYBACK.md → "One
     /// client, one data source"): the viewer and the reviewer are one display
     /// and the only difference is the SOURCE — a tape file on disk or the host's
     /// <summary>The last substep APPENDED into the live sample rings by the
@@ -906,7 +910,7 @@ public partial class MapRenderer : Node2D
     private long _lastRenderStep = -1;
 
     /// <summary>The live window's PICTURE, read from the tip of a tape that is
-    /// still being written (`--tape-live`, docs/RECORD_PLAYBACK.md -> "One client,
+    /// still being written (live tape source, #64, docs/RECORD_PLAYBACK.md -> "One client,
     /// one data source"): the viewer and the reviewer are one display and the
     /// only difference is the SOURCE - a tape file on disk or the host's growing
     /// recorder. `_tape` is that source, filled by `ApplyTipPayload` instead of
@@ -1591,6 +1595,11 @@ public partial class MapRenderer : Node2D
         // asked for every frame, before the early return below, because a
         // faded bar must come back even when no tape is loaded.
         BarIdle(delta);
+        // A live window comes up BEFORE the first hop has landed (and before the
+        // host may even answer): with no frames there is no cursor, no picture
+        // and no camera claim - the opening fit owns the view until the tape
+        // speaks. The readout and the bar keep painting; everything that reads
+        // `_tape[_cursor]` waits for step one.
         if (_tape.Count == 0) return;
         // Advance the cursor: ▶ play runs at playRate x sim time; a held scrub
         // key accelerates along the ramp curve.
@@ -1681,11 +1690,18 @@ public partial class MapRenderer : Node2D
             _reviewAt = 0;
         }
         ReviewFeed();
-        // The live surface belongs to the viewer, not to the review window.
-        if (_speedLabel != null) _speedLabel.Visible = false;
-        if (_flowLabel != null) _flowLabel.Visible = false;
-        if (_testLabel != null) _testLabel.Visible = false;
-        if (_runStatus != null) _runStatus.Visible = false;
+        // The live surface belongs to the viewer, not to a FILE under review.
+        // A live window (whose picture is the growing tape, #64) keeps speed,
+        // flow, test number and run status: they describe the SAME run the
+        // tape shows. Only a review of a finished file hides them, because
+        // there the live sim beside the window is somebody else's clock.
+        if (_review)
+        {
+            if (_speedLabel != null) _speedLabel.Visible = false;
+            if (_flowLabel != null) _flowLabel.Visible = false;
+            if (_testLabel != null) _testLabel.Visible = false;
+            if (_runStatus != null) _runStatus.Visible = false;
+        }
         ReviewLabels();
         ReviewHud();
         ReviewPoseCheck();

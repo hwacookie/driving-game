@@ -171,18 +171,17 @@ Consequences I will not defer, since the classes are settled now:
   a review window paints a phase only if the tape recorded the change that
   started it.
 
-## The viewer IS the reviewer at runtime (`--tape-live`, wired 2026-11-01, issue 52)
+## Every window shows the run through the tape (owner decision 2026-11-02, issue 64)
 
-`scripts/run_e2e.sh` now launches the watch window with `--tape-live`: its PICTURE comes from the
-host's growing tape (`POST /tape/tip` ships the head in hops of up to 24 substeps) while `/state`
-still feeds the readout, the flow and the runner. What the owner gets is the reviewer's
-instrument on a run that has not finished: the scrub bar with the fluidity curve, `←`/`→` and a
-drag to any substep, the rate dropdown — and the test keeps driving in the background, because
-the cursor owns only the picture. The tape is started **before** the window for this reason:
-`_tapeLive` deliberately has no fallback (`"the live view is never without a picture"` holds only
-if the recorder was already running), and the runner used to switch the tape on after the launch.
+There is no live/review difference any more: **every window carries the scrub bar at the bottom**, because every window that is not opening a finished tape file reads the tape the engine is still writing. The decision of 2026-10-25 ("the live case IS the tip of a tape that is still being written") is now simply how the client works — the `--tape-live` flag that used to select it is gone, and so is `DG_TAPE_LIVE`.
 
-`DG_TAPE_LIVE=0` returns to the old direct-live surface, e.g. to compare the two renderers.
+`scripts/run_e2e.sh` needs no flag either: the watch window's PICTURE comes from the host's growing tape (`POST /tape/tip` ships the head in hops, paced by wall clock — #61) while `/state` still feeds the readout, the flow and the runner. The tape is started **before** the window: `_tapeLive` deliberately has no fallback (`"the live view is never without a picture"` holds only if the recorder was already running).
+
+What remains distinct:
+
+- **`--review [path]`** — open a FINISHED tape file whole instead of the growing tip. That is a source, not a chrome: the bar is the same, the readout simply owns a range that can no longer grow. (A `--review` whose file cannot be read falls back to the live tip — the bar never disappears.)
+- **`--screenshot`** — the one-shot measurement run (AGENTS.md's recipe) stays on the direct-live surface: a diagnostic PNG must show the map as the sim holds it, with no instrument painted into the band it measures against.
+- **📂 on a live window** — "jump to an old run": the picker is in every bar, and picking a file switches that window's source from the tip to the file.
 
 ## One client, one data source (binding user decisions, 2026-10-25)
 

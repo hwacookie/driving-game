@@ -380,23 +380,20 @@ if [ "$RUN_GODOT" -eq 1 ]; then
   else
     echo "==> Launching Godot client (visible window) -> $GODOT_LOG"
     # The window shows the run THROUGH THE TAPE (docs/SIMULATIONS_REVIEWER.md,
-    # "One client, one data source", owner decision 2026-10-25; never wired until
-    # now, which is why a running test had no scrubber). The host records every
-    # substep, `POST /tape/tip` ships the growing head in hops, and the client's
-    # picture is the tape while /state still feeds the HUD, the speed and the
-    # runner. Effect for the eye: the scrub bar at the bottom is live during the
-    # test - drag it back to the moment the car hesitated, and the run keeps
-    # going in the background because the cursor only owns the PICTURE.
-    # DG_TAPE_LIVE=0 falls back to the old direct-live view.
-    GODOT_TAPE_ARGS=()
-    if [ "${DG_TAPE_LIVE:-1}" = "1" ]; then
-      GODOT_TAPE_ARGS=(--tape-live)
-    fi
+    # "One client, one data source"; scrub bar in EVERY window since #64, so no
+    # flag selects it any more). The host records every substep, `POST /tape/tip`
+    # ships the growing head in hops, and the client's picture is the tape while
+    # /state still feeds the HUD, the speed and the runner. Effect for the eye:
+    # the scrub bar at the bottom is live during the test - drag it back to the
+    # moment the car hesitated, and the run keeps going in the background because
+    # the cursor only owns the PICTURE. The tape is started ABOVE, before this
+    # launch: the tip source has no fallback, and "the live view is never
+    # without a picture" only holds when the recorder was already running.
 
     # The runner closes this window again on exit (clean self-quit via the
     # generation file - never a signal). On failure the C# host stays up,
     # so the scene can be re-opened in a new Godot window.
-    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_TAPE_ARGS[@]+"${GODOT_TAPE_ARGS[@]}"} ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} ${GODOT_ROAD_ARGS[@]+"${GODOT_ROAD_ARGS[@]}"} ${GODOT_SIZE_ARGS[@]+"${GODOT_SIZE_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
+    nohup "$GODOT_BIN" --path "$ROOT" ${GODOT_WIN_ARGS[@]+"${GODOT_WIN_ARGS[@]}"} -- ${GODOT_CAM_ARGS[@]+"${GODOT_CAM_ARGS[@]}"} ${GODOT_ROAD_ARGS[@]+"${GODOT_ROAD_ARGS[@]}"} ${GODOT_SIZE_ARGS[@]+"${GODOT_SIZE_ARGS[@]}"} > "$GODOT_LOG" 2>&1 &
     GODOT_PID=$!
     sleep 3   # let the window come up before the first car teleports in
   fi
