@@ -1471,17 +1471,31 @@ public sealed class SimEngine
     {
         var nav = c.BicycleNav;
         if (nav is null) return null;
-        // A parked NEIGHBOUR has no job and no destination: it must not answer a box, or
-        // the two cars bracketing the bay would each draw one next to the parking car's.
-        if (!nav.HasDestination() && !nav.ParkJobActive) return null;
 
-        double anX = c.X, anY = c.Y;      // which bay? the one the destination points at
+        // WHICH car owns a bay: the one that was SENT somewhere, and only if the mark it
+        // was sent to is its declared end flag. Both halves are needed - measured on issue
+        // 51 the first hour out, a staged PARKED NEIGHBOUR answered a box of its own 8.3 m
+        // away, so one bay drew two amber rectangles while nothing had asked that car to
+        // park anywhere (it was teleported into the row: style `forward`, no end flag).
+        // "Has a parking job in play" alone is not the test: a car resting in a bay has a
+        // phase, and so does one that was placed there.
+        if (!nav.HasDestination() && !nav.ParkJobActive) return null;
         var fr = tf?.FlagRed;
-        if (fr is not null && fr.Length >= 2) { anX = fr[0]; anY = fr[1]; }
+        if (fr is null || fr.Length < 2) return null;
+        double anX = fr[0], anY = fr[1];     // which bay: the one the mark points at
 
         var parked = new List<Car>(_cars.Count);
         foreach (var n in _cars.Values)
-            if (!ReferenceEquals(n, c) && n.State == CarState.Parked) parked.Add(n);
+        {
+            if (ReferenceEquals(n, c) || n.State != CarState.Parked) continue;
+            // A neighbour that is itself the subject of a parking job is not scenery: the
+            // stretch beside it belongs to that job, not to this one. Without this, the
+            // just-parked car became one of the two bracketing bodies for its own
+            // neighbour, and that pair invented a second bay (issue 56).
+            if (n.BicycleNav?.ParkJobActive == true &&
+                _carFlags.GetValueOrDefault(n.Uid)?.FlagRed is not null) continue;
+            parked.Add(n);
+        }
         if (parked.Count < 2) return null;
 
         double bestD = double.MaxValue, bMid = 0.0, bLat = 0.0, bHead = 0.0;
