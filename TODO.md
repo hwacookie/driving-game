@@ -6,6 +6,27 @@
 > ([docs/](docs/), index in [README.md](README.md)) — every entry here points
 > at the one that governs it.
 
+## Resting bodies as terrain — **design only, NOT implemented** (issue 58)
+
+Spec: [docs/REST_BODIES_AS_TERRAIN.md](docs/REST_BODIES_AS_TERRAIN.md). Agreed with
+the owner 2026-11-01 and written down on purpose *before* any code, so the next
+session does not mistake it for behaviour that exists.
+
+Measured today (in-process sweep, `--bench-parked`):
+
+    50 moving, 0 parked      pace 0.894   ← the documented real-time ceiling
+    0 moving, 1000 parked    pace 0.016   ← 62 s of wall per sim-second
+
+So a resting car costs nearly what a driving one costs. The rule the design rests
+on, and the one that must survive implementation: **rest is a state, never a
+speed** — a car standing in a queue is traffic (it has a route, it has `heldBy`),
+and treating it as "no road here" would let a jam delete the road out of the
+routes of everyone behind it.
+
+Gates before this may be called done: flat pace across `--bench-parked 0,500,2000`
+at 50 moving; 1000 parked alone at ≥ 1.0×; `park_block_*`/`slow_pass_*`/bay
+verdicts and the unit suite green; `lockdowns` at 0.
+
 ## 0. Done since this list was written (2026-10-24, later that night)
 
 - **The decision dedup** (`Car.RecordDecision` drops a line that repeats the

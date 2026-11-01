@@ -224,8 +224,15 @@ if (benchMode)
             {
                 int seg = i % segs;
                 int round = i / segs;
+                // ON the lane, not beside it: a lateral offset puts the body off the
+                // carriageway on the map's NARROW segments, and the validator then prints
+                // "OFF-ROAD!" per car per check - measured, and it dominated the timer so
+                // completely that the first two attribution runs measured the logger. The
+                // number we want is what a resting body costs the sim, and on the lane it
+                // is measured without that noise (there is no traffic in a parked-only
+                // phase, so nothing is being blocked by parking in the driving line).
                 eng.EnqueueCommand(new TeleportCommand(null, seg,
-                    0.15 + 0.25 * round, true, 0.0, LatOffsetM: 7.5));
+                    0.15 + 0.25 * round, true, 0.0));
             }
             eng.Tick(BenchDt);
             foreach (var uid in eng.Cars.Keys.ToList())
