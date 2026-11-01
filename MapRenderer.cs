@@ -428,6 +428,9 @@ public partial class MapRenderer : Node2D
         public long CourtesyFor = 0L;
         public string CourtesyKind = "";
         public (float X, float Y, float Hdg)? FlagGreen, FlagRed;
+        // The bay this car has to end in, as the sim declared it (xM, yM, headingDeg,
+        // lengthM, widthM, inside) - drawn as the green acceptance rectangle.
+        public (float X, float Y, float Hdg, float LenM, float WidM, bool Inside)? ParkTarget;
         public string HudLabel;
         // Collision footprint (the box used for crash detection), in metres,
         // derived from /state body_corners. 0 = not known yet.
@@ -1938,6 +1941,23 @@ public partial class MapRenderer : Node2D
         _obstacleLayer.AddChild(root);
         _obstacleNodes[id] = root;
     }
+
+    /// <summary>The string a property holds, or null when the key is absent or is not a
+    /// string (a declared paint is answered as JSON null when unauthored).
+    ///
+    /// This helper exists because the code it replaces read
+    /// `(tryGet "a" ? a : tryGet "b" ? b : default).GetString() ?? ""` - and
+    /// `default(JsonElement).GetString()` does NOT answer null, it throws
+    /// InvalidOperationException ("Operation is not valid due to the current state of the
+    /// object"), so the `?? fallback` could never run. Measured consequence: EVERY /state
+    /// frame of a car with no declared paint threw here, the per-car loop aborted, and the
+    /// window kept the cars it had parsed before that point and drew nothing after - no
+    /// cast, no bay rectangle, no flags ("the cars appeared a minute late" / "I see no
+    /// change", issue 47's watch-mode sessions). A fallback that reads like null has to
+    /// actually be one.</summary>
+    static string StrProp(JsonElement root, string key) =>
+        root.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() : null;
 
     /// <summary>The obstacle palette is an RGB triple per name (which is why
     /// #17's rename was refused: it really is a colour). The mask shader wants
@@ -3938,19 +3958,11 @@ public partial class MapRenderer : Node2D
                     // `color` is NOT read here any more (#18): it carries the PAINT,
                     // so a client that still asked for the type under that word
                     // would turn a crimson car into a vehicle called "crimson".
-                    m.Model = (c.TryGetProperty("model", out var cm)
-                                 && cm.ValueKind == JsonValueKind.String ? cm
-                                 : c.TryGetProperty("vehicle", out var cv)
-                                 && cv.ValueKind == JsonValueKind.String ? cv
-                                 : default).GetString() ?? "mercedes_c220";
+                    m.Model = StrProp(c, "model") ?? StrProp(c, "vehicle") ?? "mercedes_c220";
                     // The PAINT (#18's word, with `livery` — #10's stand-in — still
                     // read): null/absent means the photographed colour, so a cast
                     // that declares nothing looks exactly as it always did.
-                    m.Color = (c.TryGetProperty("color", out var cp)
-                                 && cp.ValueKind == JsonValueKind.String ? cp
-                                 : c.TryGetProperty("livery", out var liv)
-                                 && liv.ValueKind == JsonValueKind.String ? liv
-                                 : default).GetString() ?? "";
+                    m.Color = StrProp(c, "color") ?? StrProp(c, "livery") ?? "";
                     // The declared view options (issue #9): absent stays absent
                     // (null), so an unauthored cast keeps today's behaviour.
                     m.OptTracks = c.TryGetProperty("tyre_lines", out var tl) &&
@@ -3999,6 +4011,7 @@ public partial class MapRenderer : Node2D
                     m.TaillightsOn = c.TryGetProperty("taillights_on", out var lo2) && lo2.GetBoolean();
                     m.FlagGreen = ParseFlag(c, "green");
                     m.FlagRed = ParseFlag(c, "red");
+                    m.ParkTarget = ParseParkTarget(c);
                     m.HudLabel = c.TryGetProperty("hud_label", out var hlc)
                                   && hlc.ValueKind == JsonValueKind.String
                            ? hlc.GetString() : null;
@@ -4221,8 +4234,71 @@ public partial class MapRenderer : Node2D
             // A state frame always has "time" (checked above), so anything
             // that still throws is an unexpected payload shape - log and
             // keep the last good state.
-            GD.PrintErr($"{origin}: bad payload: {e.Message}");
+            GD.PrintErr($"{origin}: bad payload: {e.Message} at {e.StackTrace?.Split('\n')[0]}");
         }
+    }
+
+    /// <summary>Parse the bay's acceptance rectangle as the sim stated it
+    /// (SimEngine.ParkTargetPayload, owner decision 2026-11-01). null when the car has no
+    /// parking job or nothing brackets a bay for it.</summary>
+    static (float X, float Y, float Hdg, float LenM, float WidM, bool Inside)? ParseParkTarget(
+        JsonElement car)
+    {
+        if (!car.TryGetProperty("park_target", out var t) ||
+            t.ValueKind != JsonValueKind.Object) return null;
+        float Num(string k) => t.TryGetProperty(k, out var v) &&
+                               v.ValueKind == JsonValueKind.Number ? (float)v.GetDouble() : 0f;
+        double lenM = Num("lengthM"), widM = Num("widthM");
+        if (lenM <= 0.0 || widM <= 0.0) return null;
+        bool inside = t.TryGetProperty("inside", out var ins) &&
+                      ins.ValueKind == JsonValueKind.True;
+        return (Num("xM"), Num("yM"), Num("headingDeg"), (float)lenM, (float)widM, inside);
+    }
+
+    /// <summary>The GREEN RECTANGLE: the area a parked car must end inside, i.e. its own
+    /// body rectangle placed in the middle of the gap between the two parked neighbours
+    /// and grown by the sim's margin (Config.PARK_BOX_MARGIN_M, the 0.30 m the kerb check
+    /// already uses). The geometry is the SIM's - this only paints what /state says, so
+    /// the picture and the e2e verdict can never disagree (owner decision 2026-11-01:
+    /// "the test passes when the car's outer dimensions are inside the rectangle").
+    /// Green while the body is inside it, amber while it is not.</summary>
+    void DrawParkTarget((float X, float Y, float Hdg, float LenM, float WidM, bool Inside)? b)
+    {
+        if (b == null) return;
+        var (x, y, h, lenM, widM, inside) = b.Value;
+        float rad = Mathf.DegToRad(h);
+        float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);    // forward (same convention as DrawFlag)
+        float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);   // right
+        // Corners in METRES, then W(): W is the world->screen transform and takes metres,
+        // so a length must never be added after it (that is how a marking drawn "0.3 m"
+        // once came out 3 m wide).
+        Vector2 Off(double along, double side) =>
+            W(x + fx * (float)along + rx * (float)side,
+              y + fy * (float)along + ry * (float)side);
+        float hl = lenM * 0.5f, hw = widM * 0.5f;
+        var pts = new[]
+        {
+            Off(hl, hw), Off(hl, -hw), Off(-hl, -hw), Off(-hl, hw),
+        };
+        var poly = new Polygon2D
+        {
+            Color = inside ? new Color(0f, 0.85f, 0.35f, 0.34f)
+                           : new Color(0.98f, 0.75f, 0.1f, 0.24f),
+            Polygon = pts,
+            ZIndex = 2,
+        };
+        var line = new Line2D
+        {
+            Points = pts,
+            DefaultColor = inside ? new Color(0f, 0.62f, 0.24f) : new Color(0.78f, 0.52f, 0.04f),
+            Width = TrailWidthM,
+            Closed = true,
+            ZIndex = 2,
+        };
+        _world.AddChild(poly);
+        _world.AddChild(line);
+        _flagNodes.Add(poly);
+        _flagNodes.Add(line);
     }
 
     static (float X, float Y, float Hdg)? ParseFlag(JsonElement root, string key)
@@ -5076,7 +5152,10 @@ public partial class MapRenderer : Node2D
             foreach (var kv in _carMeta)
                 fp.Append(kv.Key).Append(':')
                   .Append(kv.Value.FlagGreen?.ToString() ?? "-").Append(',')
-                  .Append(kv.Value.FlagRed?.ToString() ?? "-").Append(';');
+                  .Append(kv.Value.FlagRed?.ToString() ?? "-").Append(',')
+                  // The bay rectangle rides the same fingerprint: it appears when the
+                  // parking job exists and redraws when the body lands inside it.
+                  .Append(kv.Value.ParkTarget?.ToString() ?? "-").Append(';');
         else
             fp.Append(_flagGreen?.ToString() ?? "-")
               .Append(',').Append(_flagRed?.ToString() ?? "-");
@@ -5372,6 +5451,7 @@ public partial class MapRenderer : Node2D
         if (_carMeta.Count > 0)
             foreach (var kv in _carMeta)
             {
+                DrawParkTarget(kv.Value.ParkTarget);      // under the pennants and the cars
                 DrawFlag(kv.Value.FlagGreen, new Color(0f, 0.784f, 0.314f),
                                          new Color(0f, 0.353f, 0.157f));
                 DrawFlag(kv.Value.FlagRed, new Color(0.902f, 0.196f, 0.196f),
