@@ -69,6 +69,19 @@ KERB_PASS_MAX_M = 0.30
 # derived from it.
 PARK_AVENUE_WIDTH_M = 19.4
 
+
+# Issue 47 (owner decision 2026-11-01): a scenario's 'duration' field is SIM seconds.
+# A back-in bay park was measured STILL closing into the bay - lateral offset 3.12 m
+# down to 0.77 m, steering demand 4.18 down to 0.02, v = -0.80 m/s - when the old 45 s
+# WALL budget cut the run at 45.03 s and reported "timed out". The owner's ruling: if
+# the manoeuvre takes longer, the test gets more time, and the clock it is measured on
+# has to be the sim's, so --warp cannot change a verdict.
+PARK_BAY_SIM_SECONDS = 120.0
+# Wall-clock ceiling as a multiple of the sim budget: catches a host that stopped
+# ticking, without ever cutting a legitimately slow drive (same shape as the stress
+# loop's STRESS_PHASE_SECONDS * 20 precedent).
+WALL_SAFETY_FACTOR = 20.0
+
 # Running turn tests (docs/TESTING.md): the scenario drives THROUGH the
 # corner - no stopping, no parking (parking is covered by the dedicated
 # parking-offset scenarios). The car spawns in the LAST 20% of the start
@@ -117,6 +130,18 @@ def red(text: str) -> str:    return _c(text, "31")
 def yellow(text: str) -> str: return _c(text, "33")
 def cyan(text: str) -> str:   return _c(text, "36")
 def dim(text: str) -> str:    return _c(text, "2")
+
+
+def _wts() -> str:
+    """Wall-clock stamp (HH:MM:SS) on the suite's stage lines.
+
+    Issue 47 made this necessary: a bay scenario looked like it staged its two
+    neighbour cars "a minute late", and the tape proved they existed from frame 1 -
+    the minute was spent on the WALL clock (build, boot, the previous scenario's
+    window) which nothing in the output carried. A sim clock answers "what happened
+    in the world"; only a wall stamp can answer "why did the screen look empty".
+    """
+    return time.strftime('%H:%M:%S')
 
 
 def _poll_dt(state: dict, prev_sim, prev_wall: float, now_wall: float) -> float:
@@ -365,6 +390,22 @@ def describe_failure(result: dict) -> str | None:
                 f"{result.get('state_trace')} (expected driving → parking → parked: "
                 "a car reversing into a bay is `parking` during the manoeuvre and "
                 "`parked` when it rests)")
+    # The owner's rule for a bay park, stated as geometry (2026-11-01): the car is IN the
+    # bay when all four corners of its body lie inside the green rectangle the sim declares
+    # from the two cars that bracket the gap. This is the FIRST parking criterion because it
+    # is the definition of success; the kerb distance and the fore/aft clearances below are
+    # properties of a pose, this says the pose is in the right place at all.
+    box = result.get("park_box")
+    if (result.get("kerb_check") and result.get("reached_expected_segment")
+            and box is not None and not box.get("inside", False)):
+        return (f"not inside the bay rectangle: the tightest corner is "
+                f"{-box.get('marginM', 0.0) * 100:.0f} cm OUTSIDE the box "
+                f"({box.get('lengthM', 0):.2f} x {box.get('widthM', 0):.2f} m at "
+                f"({box.get('xM', 0):.1f}, {box.get('yM', 0):.1f}), heading "
+                f"{box.get('headingDeg', 0):.0f}\u00b0, between cars "
+                f"#{box.get('behind_uid')}/#{box.get('ahead_uid')}). Owner rule: every "
+                "corner of the body inside the drawn rectangle - the box is the car's own "
+                "outer dims grown by PARK_BOX_MARGIN_M on every side.")
     if result.get("reached_expected_segment") and not result.get("stopped_at_end"):
         return "reached the destination but never came to a clean stop"
     if result.get("bay_clearances_m") is not None and not result.get("bay_ok", True):
@@ -509,6 +550,15 @@ SCENARIO_FOCUS = {
     # obstruction / on the crawler the primary has to squeeze past.
     'park_block_priority': {"kind": "named", "name": "parked_car"},
     'slow_pass_overtake':  {"kind": "named", "name": "slow_car"},
+    # The BAY is the subject of the back-in tests, and it is a PLACE: the two neighbours
+    # and the gap between them never move, while the parking car arrives from ~100 m up
+    # the road. Following the parking car (the old default, kind="car") held the camera on
+    # the approach, so the window showed an empty stretch of kerb for the first minute and
+    # the two parked cars seemed to "appear" only as the camera drove up to them - while
+    # the tape shows all three present from frame 1. Wide zoom: the 300 m segment stays in
+    # frame, so the approach AND the bay are watchable at once.
+    'park_6lane_right_lane': {"kind": "loc", "segment": "pkw_n\u2192pkw_s", "t": 0.5,
+                              "zoom": 12.0},
 }
 
 # px/m the client holds at a declared focus. A PLACE gets the wide view (the
@@ -582,7 +632,7 @@ DETERMINISTIC_TESTS = [
     #
     # Tuple fields (see run_deterministic_test):
     #   0 start_point  1 direction  2 target km/h  3 expected end segment
-    #   4 duration s   5 description 6 start_progress 7 kerb_check
+    #   4 duration SIM s   5 description 6 start_progress 7 kerb_check
     #   8 end_flag_progress  9 expect_wrong_side (NEGATIVE test)
     #  10 extra_cars: list of dicts {start_point|segment, progress, speed_mps,
     #      throttle, expect_end, name} - other cars in the same world. throttle=False
@@ -777,7 +827,7 @@ DETERMINISTIC_TESTS = [
     # (2026-10-19, user decision: the two other lateral starts - from the
     # overtaking lane and from inside the parking lane - are out of the
     # suite; the plain back-in park from the normal lane stays.)
-    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', PARK_BAY_SIM_SECONDS,
      "Back-in park into a bay between two parked cars (2.5 m clearance)", 0.15, True,
      END_FLAG_PROGRESS, False,
      # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
@@ -806,7 +856,7 @@ DETERMINISTIC_TESTS = [
       {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 4.07,
        'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
        'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
-    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', PARK_BAY_SIM_SECONDS,
      "Back-in park into a bay between two parked cars (1 m clearance)", 0.15, True,
      END_FLAG_PROGRESS, False,
      # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
@@ -835,7 +885,7 @@ DETERMINISTIC_TESTS = [
       {'segment': 'pkw_n→pkw_s', 'progress': 0.5, 'offset_m': 2.57,
        'lat_m': 8.35, 'speed_mps': 0.0, 'throttle': False, 'park': True,
        'model': 'fiat_500', 'name': 'bay_front', 'bay_flank': True}]),
-    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', 45.0,
+    ('park_6lane_right_lane', 'straight', 80, 'pkw_n→pkw_s', PARK_BAY_SIM_SECONDS,
      "Back-in park into a bay between two parked cars (0.5 m clearance)", 0.15, True,
      END_FLAG_PROGRESS, False,
      # THE TWO NEIGHBOURS (#31, owner decision 2026-10-30): the bay is bracketed by
@@ -3040,6 +3090,11 @@ class TurnTester:
         frames_checked = 0
         segment_changed = False
         reached_expected_segment = False
+        # The bay's acceptance rectangle as the sim declared it (GET /state park_target;
+        # owner decision 2026-11-01: the park passes when the car's OUTER DIMENSIONS lie
+        # inside it). Kept live, so the last read before the stop is what gets judged.
+        park_box: dict | None = None
+        stand_sim: float | None = None
         # Progress along the target segment when the car FIRST entered it -
         # tells us which side of the 50% mark it has to cross.
         end_entry_progress: float | None = None
@@ -3084,8 +3139,19 @@ class TurnTester:
                 'error': 'connection lost during setup (teleport/accelerate phase)',
             }
         
+        # #47 (owner decision 2026-11-01): the window is a SIM-time budget, not a
+        # wall-clock one. The scenario asks "does the car finish this drive", and a
+        # drive happens in sim seconds - so --warp must not decide the verdict. It
+        # used to: bay 1 m reached kerb verdicts at --warp 4 and ended "timed out" at
+        # real time on the SAME build, with the tape showing the car still reversing
+        # into the bay (lateral offset 3.12 m -> 0.77 m, steering demand 4.18 -> 0.02,
+        # v=-0.80) when the wall budget expired. Wall time stays as a generous safety
+        # net only, so a frozen host still ends the scenario instead of hanging.
+        sim_elapsed = 0.0
+        wall_safety = duration * WALL_SAFETY_FACTOR
         while not setup_crashed and not _aborted() \
-                and time.time() - start_time < duration:
+                and sim_elapsed < duration \
+                and time.time() - start_time < wall_safety:
             # A teleport-watchdog violation inside the game crashes that
             # process outright (a deliberate hard invariant - see
             # PhysicsValidator / docs/SPEC.md's "Physics Judge"
@@ -3142,6 +3208,31 @@ class TurnTester:
             # assumed fixed frame dt, since polling isn't frame-locked).
             now = time.time()
             poll_dt = _poll_dt(state, last_poll_sim, now, last_poll_time)
+            sim_elapsed += poll_dt
+
+            # "Standing in the bay" is the end of a parking scenario - not "the flag's
+            # segment and progress". Measured: a bay park that finished its tuck still
+            # reported "timed out: never reached expected segment 151", because a car
+            # sitting 8.35 m off the lane axis, in the parking row, does not satisfy a
+            # criterion written for a car driving IN the lane. The box is the goal, so
+            # the box decides when the drive is over (issue 47).
+            pt = state.get('park_target')
+            if isinstance(pt, dict) and pt.get('lengthM'):
+                park_box = pt
+            if kerb_check and park_box is not None:
+                if abs(state.get('speed_kmh') or 0.0) < 0.4:
+                    t_now = state.get('time') or 0.0
+                    if stand_sim is None:
+                        stand_sim = t_now
+                    elif t_now - stand_sim >= 1.5 and (
+                            state.get('state') == 'parked' or t_now - stand_sim >= 6.0):
+                        reached_expected_segment = True
+                        print(f"\n   \U0001f7e9 [{_wts()}] Standing in the bay at sim "
+                              f"t={t_now:.1f} s - the bay rectangle is the goal, so the "
+                              "drive is over here")
+                        break
+                else:
+                    stand_sim = None
             moved_m = ((state['x'] - last_poll_pos[0]) ** 2 +
                        (state['y'] - last_poll_pos[1]) ** 2) ** 0.5
             # Generous margin: highest plausible speed (~50 m/s cruise)
@@ -3652,6 +3743,21 @@ class TurnTester:
         # side" and "0.1 m each side" are two different parks that a single ✅ could
         # never tell apart, and the owner's criterion is exactly this margin.
         bay = None
+        # The rectangle verdict, printed for every parking scenario, pass or fail: it IS
+        # the owner's criterion, so the number behind the ✅/❌ belongs on the screen, not
+        # only in a failure text.
+        if kerb_check and park_box is not None:
+            ok_box = bool(park_box.get('inside'))
+            print(f"      "
+                  f"{'\U0001f7e9' if ok_box else '\U0001f7e1'}  bay rectangle: "
+                  f"{'all four corners inside' if ok_box else 'body NOT inside the box'} - "
+                  f"tightest corner {park_box.get('marginM', 0.0) * 100:+.0f} cm "
+                  f"(box {park_box.get('lengthM', 0):.2f} x {park_box.get('widthM', 0):.2f} m "
+                  f"between cars #{park_box.get('behind_uid')}"
+                  f"/#{park_box.get('ahead_uid')})")
+        elif kerb_check:
+            print("      \u26a0\ufe0f  /state carried no bay rectangle for this parking "
+                  "job - the sim declared no acceptance box")
         if bay_flank_uids and reached_expected_segment and len(bay_flank_uids) == 2:
             try:
                 bay = self.bay_clearances_m(self.get_state(), expected_end_segment,
@@ -3728,6 +3834,18 @@ class TurnTester:
                 and not wrong_side_detected
                 and not collision_detected
                 and not priority_failed
+                # The bay rectangle IS the goal (owner decision 2026-11-01): every corner
+                # of the body inside the green box the sim declares from the two parked
+                # neighbours. This term has to live HERE, not in describe_failure - that
+                # function opens with `if result["passed"]: return None`, so it can only
+                # EXPLAIN a failure, never cause one. Measured without it: the 2.5 m bay
+                # printed ✅ PASSED with kerb 8/10 cm, no contact and "fits", while the box
+                # drawn beside it said the body was 195 cm outside - a car pressed 0.25 m
+                # against the neighbour behind it, 2 m off the middle of the gap.
+                # Only scenarios that STAGE a bay (bay_flank) are held to it; a kerb park
+                # with nothing bracketing it has no box and no claim on this rule.
+                and (not bay_flank_uids
+                     or (park_box is not None and bool(park_box.get('inside'))))
             )
         
         # The run is over: if the whole run never stated a mark, the fallback
@@ -3747,6 +3865,7 @@ class TurnTester:
             'target_speed_kmh': target_speed,
             'frames_checked': frames_checked,
             'duration': time.time() - start_time,
+            'park_box': park_box,
             'initial_segment': initial_segment,
             'expected_end_segment': expected_end_segment,
             'final_segment': state['segment'],

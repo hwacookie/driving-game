@@ -215,6 +215,15 @@ public static class Config
     public static readonly double WheelbaseRatio = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_WB_RATIO"), out var _wr) ? _wr : (2.7 / 4.40);
 
+    /// How much larger than the car's own body the bay's ACCEPTANCE BOX is drawn on every
+    /// side (docs/TESTING.md "the green rectangle", owner decision 2026-11-01: the park
+    /// counts as passed when the car's OUTER DIMENSIONS lie inside it). 0.30 m is not a
+    /// new rule invented here - it IS the kerb tolerance the suite already judges a parked
+    /// car against (tests/test_turning.py KERB_PASS_MAX_M = 0.30), so the box and the kerb
+    /// line ask the same thing of the same pose. PARK_BOX_MARGIN_M overrides for measurement.
+    public static readonly double PARK_BOX_MARGIN_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_BOX_MARGIN_M"), out var _pbm) ? _pbm : 0.30;
+
     /// Per-model wheelbase in metres (see WheelbaseRatio). Floored at 1 m so a malformed
     /// table entry cannot produce a zero-radius plan.
     public static double WheelbaseM(string? modelName) =>

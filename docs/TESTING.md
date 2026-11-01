@@ -262,6 +262,30 @@ below it.**
   25, of the console host 5, and an *incremental* build prints 0 because
   nothing recompiles.
 
+## The bay rectangle: what a park has to satisfy (owner decision 2026-11-01)
+
+A back-in park **passes when every corner of the car's body lies inside the green rectangle**
+the sim declares from the two parked neighbours that bracket the bay (`GET /state` →
+`park_target`, documented in `docs/REST_API.md`). The client draws that rectangle at the same
+moment the parking job exists, so what the eye sees and what the verdict reads are one
+geometry, not two. The scenario's older criteria stay as extra requirements (no contact with
+either neighbour, stopped, on the right side of the road, kerb within 30 cm) — the rectangle is
+what makes the pose *the right pose*, and it is stricter: measured the first hour it was in
+force, the 2.5 m bay passed kerb (8/10 cm), contact and "fits" while its body sat **195 cm
+outside** the box, pressed 0.25 m against the car behind it instead of centred in a 9.40 m gap.
+
+Two plumbing rules came with it, both measured:
+
+- **A scenario's `duration` is SIM seconds.** It used to be wall seconds, which made the
+  verdict depend on pacing: the same build reached kerb verdicts at `--warp 4` and died as
+  "timed out" at real time. Wall time is a safety net only (`WALL_SAFETY_FACTOR = 20`), so a
+  host that stopped ticking still ends the run. The bay scenarios run
+  `PARK_BAY_SIM_SECONDS = 120` s because 45 s cut a manoeuvre that was still closing.
+- **The bay tests focus the bay, not the parking car** (`SCENARIO_FOCUS`: `kind: loc` on
+  `pkw_n→pkw_s` at t=0.5, zoom 12 px/m). Following the car from its spawn 100 m up the road
+  kept the neighbours and their box off screen for the first minute, which read as "the cars
+  appeared late" — the tape showed all three present from frame 1.
+
 ## Capacity benchmark (the sim's own throughput)
 
 This measures the SIM, not the client, so it lives on the C# side: the console

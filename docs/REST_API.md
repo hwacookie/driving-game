@@ -724,6 +724,39 @@ DELETE /obstacles/1
 ```
 Returns `200` (`{"ok": true, "id": 1}`) or `404` for an unknown id.
 
+## `park_target` — the bay acceptance box (per car, `GET /state`)
+
+A car that has a destination or a parking job answers one more object, and **null** when it
+has neither, when nothing brackets a bay, or when no gap near it fits the model:
+
+```json
+"park_target": {
+  "units": "meters", "xM": 2091.65, "yM": 700.92, "headingDeg": 180.0,
+  "lengthM": 5.00, "widthM": 2.40, "inside": false, "marginM": -1.95,
+  "behind_uid": 2, "ahead_uid": 3
+}
+```
+
+It is **the area the parked car must end in**, declared by the sim (`SimEngine.ParkTargetPayload`)
+from what is physically there: the two parked cars that bracket the widest free stretch beside
+the destination bound the gap, and the box is the parking car's own body rectangle
+(`lengthM`/`widthM` = model dims + `Config.PARK_BOX_MARGIN_M` on every side, 0.30 m default =
+the kerb tolerance the suite already uses) centred in that stretch, on the line the neighbours
+stand on. `headingDeg` is the row's direction (north-zero clockwise, the sim's convention).
+
+`inside` / `marginM` are the same fact the picture and the e2e verdict use: a convex body lies
+in a rectangle iff all four of its corners do, and `marginM` is the tightest corner's distance
+to an edge — positive = inside with that much to spare, negative = that far outside. So a
+verdict can say *how far* outside instead of only "no". `behind_uid`/`ahead_uid` name the two
+cars that define it, which is what issue 31's criterion asks for.
+
+One geometry, three consumers: the sim states it, the Godot client paints it (green while the
+body is inside, amber while not — `MapRenderer.DrawParkTarget`), the e2e suite judges it
+(`tests/test_turning.py`, "the bay rectangle"). Bodies and box are measured from `BodyCenter()`,
+so the drawn rectangle is the body the eye sees; the conservative contact rect stays as it is,
+and issue 37 owns unifying the two frames (measured there today: `REAR_AXLE_OFFSET_M` is one
+global 4.40 m value, which biases a 3.14 m neighbour's body centre 1.28 m forward).
+
 ## Example Usage
 
 ### Python (requests)

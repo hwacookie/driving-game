@@ -1447,6 +1447,128 @@ public sealed class SimEngine
         ["unexplained_crossings"] = s.UnexplainedCrossings,
     };
 
+    /// <summary>The bay this car is meant to END IN, as an acceptance box that the picture
+    /// and the verdict share (owner decision 2026-11-01: "the test passes when the car's
+    /// OUTER DIMENSIONS lie inside the green rectangle").
+    ///
+    /// Declared from the world, not from a constant: the parked cars beside the car's
+    /// destination bound the row's free stretches, and the box is THIS car's own body
+    /// rectangle (model length x model width) centred in the middle of the stretch nearest
+    /// its destination, on the line those neighbours stand on, grown by
+    /// Config.PARK_BOX_MARGIN_M on every side. Bodies and box are both taken from
+    /// BodyCenter(), so the drawn rectangle is the body the eye sees; the conservative
+    /// CONTACT rect (BicycleNav RectAt: [-1 m, +L] from the rear axle) stays what it is,
+    /// and issue 37 owns unifying the two frames.
+    ///
+    /// `inside` / `marginM` answer the owner's rule with the box's own geometry: a convex
+    /// body lies in a rectangle iff all four corners do, and marginM is the tightest of
+    /// those corners' distance to an edge (negative = outside) - so a verdict can say HOW
+    /// FAR outside, not only "no".
+    ///
+    /// null = no box to show: the car has neither a destination nor a parking job, nothing
+    /// brackets a stretch this model fits, or the pair is not a bay near this car.</summary>
+    Dictionary<string, object?>? ParkTargetPayload(Car c, TestFlags? tf)
+    {
+        var nav = c.BicycleNav;
+        if (nav is null) return null;
+        // A parked NEIGHBOUR has no job and no destination: it must not answer a box, or
+        // the two cars bracketing the bay would each draw one next to the parking car's.
+        if (!nav.HasDestination() && !nav.ParkJobActive) return null;
+
+        double anX = c.X, anY = c.Y;      // which bay? the one the destination points at
+        var fr = tf?.FlagRed;
+        if (fr is not null && fr.Length >= 2) { anX = fr[0]; anY = fr[1]; }
+
+        var parked = new List<Car>(_cars.Count);
+        foreach (var n in _cars.Values)
+            if (!ReferenceEquals(n, c) && n.State == CarState.Parked) parked.Add(n);
+        if (parked.Count < 2) return null;
+
+        double bestD = double.MaxValue, bMid = 0.0, bLat = 0.0, bHead = 0.0;
+        long uidBehind = -1, uidAhead = -1;
+        for (int i = 0; i < parked.Count; i++)
+        {
+            for (int j = i + 1; j < parked.Count; j++)
+            {
+                var n1 = parked[i];
+                var n2 = parked[j];
+                // Parallel bodies = the same row direction. 20 deg is generous: a car
+                // left crooked in front of the bay still defines the bay's axis.
+                if (Math.Abs(Math.WrapDeg(n1.Heading - n2.Heading)) > 20.0) continue;
+                double h = n1.Heading + 0.5 * Math.WrapDeg(n2.Heading - n1.Heading);
+                double r = Math.Radians(h);
+                // The sim's heading is north-zero clockwise, so forward = (sin, cos) and
+                // right = (cos, -sin) - the same pair the client's flag drawing uses.
+                double ax = Math.Sin(r), ay = Math.Cos(r);
+                double qx = Math.Cos(r), qy = -Math.Sin(r);
+                var (x1, y1) = n1.BodyCenter();
+                var (x2, y2) = n2.BodyCenter();
+                double c1 = x1 * ax + y1 * ay, l1 = x1 * qx + y1 * qy;
+                double c2 = x2 * ax + y2 * ay, l2 = x2 * qx + y2 * qy;
+                if (Math.Abs(l1 - l2) > 3.0) continue;      // side by side, not in a row
+                double lo, hi; long ub, ua;
+                if (c1 <= c2)
+                {
+                    lo = c1 + n1.LengthM / 2.0; hi = c2 - n2.LengthM / 2.0;
+                    ub = n1.Uid; ua = n2.Uid;
+                }
+                else
+                {
+                    lo = c2 + n2.LengthM / 2.0; hi = c1 - n1.LengthM / 2.0;
+                    ub = n2.Uid; ua = n1.Uid;
+                }
+                if (hi - lo < c.LengthM) continue;          // a stretch this car cannot fit
+                double mid = 0.5 * (lo + hi), lat = 0.5 * (l1 + l2);
+                double gx = mid * ax + lat * qx, gy = mid * ay + lat * qy;
+                double d = Math.Sqrt((gx - anX) * (gx - anX) + (gy - anY) * (gy - anY));
+                if (d >= bestD) continue;
+                bestD = d; bMid = mid; bLat = lat; bHead = h; uidBehind = ub; uidAhead = ua;
+            }
+        }
+        // A bay 60 m away is not THIS car's bay - it is the next row along.
+        if (bestD > 60.0) return null;
+
+        double rr = Math.Radians(bHead);
+        double fax = Math.Sin(rr), fay = Math.Cos(rr);
+        double fqx = Math.Cos(rr), fqy = -Math.Sin(rr);
+        double lenM = c.LengthM + 2.0 * Config.PARK_BOX_MARGIN_M;
+        double widM = c.WidthM + 2.0 * Config.PARK_BOX_MARGIN_M;
+
+        // The live body, expressed in the box's own frame: (dp, dq) is its centre offset
+        // and psi its yaw against the row; the four corners then decide the owner's rule.
+        var (bx, by) = c.BodyCenter();
+        double dp = bx * fax + by * fay - bMid;
+        double dq = bx * fqx + by * fqy - bLat;
+        double psi = Math.Radians(Math.WrapDeg(c.Heading - bHead));
+        double cp = Math.Cos(psi), sp = Math.Sin(psi);
+        double hl = c.LengthM / 2.0, hw = c.WidthM / 2.0;
+        double margin = double.MaxValue;
+        for (int k = 0; k < 4; k++)
+        {
+            double lu = (k == 0 || k == 3) ? hl : -hl;
+            double lv = k < 2 ? hw : -hw;
+            double u = dp + lu * cp - lv * sp;
+            double v = dq + lu * sp + lv * cp;
+            double m = Math.Min(lenM / 2.0 - Math.Abs(u), widM / 2.0 - Math.Abs(v));
+            if (m < margin) margin = m;
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["units"] = "meters",
+            ["xM"] = bMid * fax + bLat * fqx,
+            ["yM"] = bMid * fay + bLat * fqy,
+            ["headingDeg"] = bHead,
+            ["lengthM"] = lenM,
+            ["widthM"] = widM,
+            ["inside"] = margin >= 0.0,
+            ["marginM"] = margin,
+            // Named so a verdict can say WHICH neighbour it ended on (issue 31's rule).
+            ["behind_uid"] = uidBehind,
+            ["ahead_uid"] = uidAhead,
+        };
+    }
+
     private void UpdateState(Car? followed, int stepsThisFrame)
     {
         // Multi-car: the top-level fields keep describing the PRIMARY
@@ -1562,6 +1684,9 @@ public sealed class SimEngine
                     ["reversing"] = c.BicycleNav?.ReverseParkActive == true,
                 },
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(c.Uid)),
+                // The bay this car has to end in, as the rectangle the client draws and
+                // the e2e suite judges (owner decision 2026-11-01, see ParkTargetPayload).
+                ["park_target"] = ParkTargetPayload(c, _carFlags.GetValueOrDefault(c.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(c.Uid, out var tf) ? tf.HudLabel : null,
             });
         }
@@ -1704,6 +1829,9 @@ public sealed class SimEngine
                 // visual and the frontend records it client-side from the
                 // x/y/heading samples.)
                 ["flags"] = FlagsPayload(_carFlags.GetValueOrDefault(car.Uid)),
+                // The bay this car has to end in (see ParkTargetPayload) - mirrored on the
+                // ROOT payload because the e2e suite reads the primary car there.
+                ["park_target"] = ParkTargetPayload(car, _carFlags.GetValueOrDefault(car.Uid)),
                 ["hud_label"] = _carFlags.TryGetValue(car.Uid, out var tf2) ? tf2.HudLabel : null,
                 ["lockdowns"] = CarCollisions.LockdownEvents.Count,
                 ["lockdown_last"] = CarCollisions.LockdownEvents.Count > 0
