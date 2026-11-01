@@ -180,6 +180,15 @@ suite). Two things stay honest at 4x: the capacity probe (`fig8_stress`) is
 skipped by design, and a warped run is not a bit-identical replay of the
 real-time one (control commands land at different points in the sim).
 
+**Parking work is always tested in watch mode (user decision, 2026-11-01).**
+Any e2e run of the parking scenarios that I start goes `--watch --realtime`: visible
+maximized window, sim frozen while the cars are staged, released at 1x, output streaming in
+the foreground (never `nohup >log &`, never `--no-godot`) - and the tape the runner records is
+the artifact to review (`scripts/open.sh --review <tape>`). The `--warp 4` default above stays
+for non-parking CI-style loops and only when the user asks for speed. Reason: warp 4 hid a
+harness defect - the same build reached kerb verdicts at 4x and ended "timed out" at 1x, so a
+parking result that depends on pacing is not a result.
+
 **"I want to watch it" means `--realtime`.** When the user says they want to
 watch a run (any wording to that effect), run it at real time — the 4x default
 exists to save wall-clock time in CI-like loops, not to make a spectacle faster
