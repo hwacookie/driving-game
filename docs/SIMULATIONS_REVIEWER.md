@@ -171,6 +171,19 @@ Consequences I will not defer, since the classes are settled now:
   a review window paints a phase only if the tape recorded the change that
   started it.
 
+## The viewer IS the reviewer at runtime (`--tape-live`, wired 2026-11-01, issue 52)
+
+`scripts/run_e2e.sh` now launches the watch window with `--tape-live`: its PICTURE comes from the
+host's growing tape (`POST /tape/tip` ships the head in hops of up to 24 substeps) while `/state`
+still feeds the readout, the flow and the runner. What the owner gets is the reviewer's
+instrument on a run that has not finished: the scrub bar with the fluidity curve, `←`/`→` and a
+drag to any substep, the rate dropdown — and the test keeps driving in the background, because
+the cursor owns only the picture. The tape is started **before** the window for this reason:
+`_tapeLive` deliberately has no fallback (`"the live view is never without a picture"` holds only
+if the recorder was already running), and the runner used to switch the tape on after the launch.
+
+`DG_TAPE_LIVE=0` returns to the old direct-live surface, e.g. to compare the two renderers.
+
 ## One client, one data source (binding user decisions, 2026-10-25)
 
 The viewer and the reviewer **are the same thing**. What differs is the data
