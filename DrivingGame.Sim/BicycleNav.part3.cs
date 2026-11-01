@@ -51,26 +51,6 @@ public sealed partial class BicycleNav
     public static readonly bool PARK_PSI_MAX_GUARD = !string.Equals(
         Environment.GetEnvironmentVariable("PARK_PSI_MAX_GUARD"), "0",
         StringComparison.OrdinalIgnoreCase);
-    /// Largest angle between nose and road axis the reverse solver will arm from, in degrees
-    /// (env PARK_ENTRY_MAX_DEG for measurement runs). It is NOT an owner rule - the parking
-    /// rule is contacts / road edge / oncoming occupancy - and it is not the constraint
-    /// issue 39 hoped it was not: both numbers below were measured on the same tree.
-    ///
-    ///   20 deg (this default) - tight e2e bays are refused at nose -40.4 deg / -42.1 deg
-    ///     (tape_T_371_0) and end via the staging claim 4.9 m / 6.6 m off the kerb.
-    ///   45 deg - unit stays 165 passed / 0 failed, and the e2e bays get WORSE: the tuck arms
-    ///     from -40 deg and ends 1015 cm / 994 cm from the kerb (vs 490 / 664 cm), i.e. the
-    ///     executed plan drives the body away from the bay instead of into it, while the
-    ///     fore/aft clearances (rear +2.37 / front -0.62) look plausible. A lane guard
-    ///     violation was NOT triggered, so this failure is silent in traffic terms and loud
-    ///     in geometry terms - exactly the kind of wrong-green the bay metric exists to catch.
-    ///
-    /// So the gate stays, and retiring it needs an unwind BEFORE arming (drive the lane
-    /// until the pose is armable, bounded, with the kerb blend off) rather than a permissive
-    /// solver. That is the open half of issue 39; this constant documents where the line
-    /// currently is and what both sides of it measure.
-    public static readonly double PARK_ENTRY_MAX_RAD = Math.Radians(double.TryParse(
-        Environment.GetEnvironmentVariable("PARK_ENTRY_MAX_DEG"), out var _pe) ? _pe : 20.0);
     /// <summary>Attempts before the car stops pretending. Two is what a driver gives
     /// a kerb bay before accepting it or driving on — the third is a spectator
     /// sport.</summary>
@@ -386,32 +366,13 @@ public sealed partial class BicycleNav
         double rx = ty, ry = -tx;
         double roadH = Math.PosDeg(Math.Degrees(Math.Atan2(tx, ty)));
         double psi0 = Math.Radians(Math.WrapDeg(car.Heading - roadH));
-        // #39: the entry limit is a measured number, not a taboo. 20 deg was a stand-in for
-        // the judgement the candidate loop makes anyway (ReverseParkOk + PathClearsBodies +
-        // run-out), and the owner rule for parking is contacts / road edge / oncoming
-        // occupancy - nobody set an entry angle. Deleting the limit outright was measured
-        // harmful (1 unit failure became 3) when the executor had no way to unwind a
-        // leftover body angle; now that the forward unwind is reachable (03dd955) the limit
-        // can be widened and judged by measurement. PARK_ENTRY_MAX_DEG keeps it adjustable
-        // for the runs that decide where it really belongs; the refusal still records why.
-        // #39 (owner decision 2026-10-31): an ANGLE IS NOT A REASON TO REFUSE a bay. The rule
-        // is contacts / road edge / oncoming occupancy, and the candidate search below judges
-        // precisely those. The limit therefore stops being a refusal and becomes a RE-SET-UP
-        // trigger: creep forward, shrink the angle against the lane axis, re-solve. Once the
-        // re-set-ups are spent the pose is no longer an excuse either - the search simply runs
-        // and its own tests decide, so a bay is only ever refused by geometry that is on record.
-        if (Math.Abs(psi0) > PARK_ENTRY_MAX_RAD && _parkResetupTries < PARK_RESETUP_TRIES)
-        {
-            _parkResetupTries++;
-            _parkResetup = true;
-            _parkResetupM = PARK_RESETUP_M;
-            car.RecordDecision(_navTime,
-                $"[PARKPLAN] RE-SET UP #{_parkResetupTries}: nose {Math.Degrees(psi0):F1}° off " +
-                $"the lane axis, past the {Math.Degrees(PARK_ENTRY_MAX_RAD):F0}° the solver can " +
-                $"tuck from - running {PARK_RESETUP_M:F1} m forward to shrink the angle and " +
-                "re-asking (no park attempt spent, and NOT declared parked)");
-            return false;
-        }
+        // #39 (owner decision, restated 2026-11-01): NO ANGLE LIMITS THIS SOLVER. The parking
+        // rule is contacts / road edge / oncoming occupancy, and the candidate search below is
+        // what judges exactly those. The 20 deg "entry limit" is deleted: it survived several
+        // rounds of my measurement only because it stood in for a gap in the planner (our
+        // two-arc family cannot sweep from a steep pose without a straight reverse leg), and
+        // leaving it in meant an invented number decided what the car is even allowed to try.
+        // What decides now is geometry, and when geometry says no the job RE-SETS UP (below).
         // What stands beside the bay, in this frame. The planner has to know before it
         // commits — asking the executor to dodge later is what produced the grinding
         // contact of #36.
@@ -467,27 +428,25 @@ public sealed partial class BicycleNav
         }
         else
         {
-            // #39: the staged shuffle, done the way the geometry allows. The staging
-            // distance is planned from psi0 = 0 (PlanReverseTuck), but the car arrives at
-            // the staging point 20-40 deg across the lane, and with the short stage the
-            // run-out test then admits only the deepest candidate - which clips the front
-            // neighbour, so the envelope holds the wheel (held 59x, crash=0) and the job
-            // surrenders at the angle the gate used to refuse. Ask for room AHEAD instead
-            // of a sharper arc: the aisle has metres to spare in the measured runs, the
-            // extra is bounded, it consumes NO park attempt (the staging gate re-asks every
-            // tick), and it leaves the reverse target alone. A forward shuffle is the
-            // documented wrong direction only once the bay is committed to - here nothing
-            // is armed yet.
-            if (Math.Abs(psi0) > Math.Radians(10.0) && _parkStageTries < PARK_STAGE_EXTRA_TRIES)
+            // #39: THIS is the honest refusal - no path clears the bay from the pose reached.
+            // It says nothing about the angle: a bay can be refused at 5 deg (a neighbour too
+            // close) or taken at 40 deg (room to sweep). So the job re-sets up: bounded forward
+            // run, then the same search from the new pose. No park attempt is spent, because
+            // the staging gate re-asks ~60x/s and a per-tick budget starves the recovery
+            // (measured, issue 36). When the re-set-ups are spent, the straight backup below
+            // runs and the bounded hold still ends the job visibly - never silently, and never
+            // as a false "parked".
+            if (!_parkResetup && _parkResetupTries < PARK_RESETUP_TRIES)
             {
-                _parkStageTries++;
-                _parkStageExtM += PARK_STAGE_EXTRA_M;
-                _routeKey = null;      // re-cut the line further past the flag
+                _parkResetupTries++;
+                _parkResetup = true;
+                _parkResetupM = PARK_RESETUP_M;
                 car.RecordDecision(_navTime,
-                    $"[PARKPLAN] EXTRA STAGE #{_parkStageTries}: no tuck clears the bay from " +
-                    $"nose {Math.Degrees(psi0):F1}° - running {PARK_STAGE_EXTRA_M:F1} m more " +
-                    $"past it (line +{_parkStageExtM:F1} m, reverse target unchanged, no " +
-                    "attempt spent)");
+                    $"[PARKPLAN] RE-SET UP #{_parkResetupTries}: no path clears this bay from " +
+                    $"the pose reached (nose {Math.Degrees(psi0):F1}° to the lane axis, " +
+                    $"{System.Math.Abs(oPark - v0):F2} m to open) - running " +
+                    $"{PARK_RESETUP_M:F1} m forward and re-asking; no attempt spent, not " +
+                    "declared parked");
                 return false;
             }
 
