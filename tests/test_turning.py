@@ -2788,17 +2788,7 @@ class TurnTester:
                     # Tell the game which car the ROLE went to, as soon as it
                     # exists: the focus announcement at the scenario's start
                     # could not know it (the cast is staged here, after it).
-                    # The focus refinement exists so a scenario that names a CAR as its
-                    # subject (`kind: named`, e.g. 'parked_car') can resolve that role to the
-                    # uid it landed on - the cast is staged after the focus was announced.
-                    # It must not let any named car of the cast steal the subject: staging the
-                    # two bay neighbours re-announced the focus as `bay_front` (measured: the
-                    # tape's first record is `kind=car uid=3`), which both moved the camera off
-                    # the bay the scenario declared and gave WINDOW NULL the wrong car. A
-                    # declared PLACE keeps its place; a named focus resolves to its own car only.
-                    if (spec.get('name') and getattr(self, '_focus_decl', None)
-                            and self._focus_decl.get('kind') == 'named'
-                            and self._focus_decl.get('name') == spec['name']):
+                    if spec.get('name') and getattr(self, '_focus_decl', None):
                         self._focus_decl = self.announce_focus(
                             start_point, label=self._focus_decl.get('label'),
                             desc=self._focus_decl.get('desc'), name_uid=got)

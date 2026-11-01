@@ -156,13 +156,6 @@ public partial class CarDetailWindow : Window
     /// <summary>The chain id the pointer is over while a button is held — the
     /// highlight the client draws on the map (docs: press-and-hold an id).</summary>
     public long HighlightUid;
-    /// <summary>True for WINDOW NULL (owner decision 2026-11-01): the one detail window
-    /// that is always open, opens with the client, starts on the run's FOCUS car and
-    /// rebinds to whichever car the operator left-clicks - while every other detail
-    /// window keeps the subject it was given. It is a normal detail window otherwise;
-    /// the only special case is that it is never offered as a slot in the click menu,
-    /// because a slot is chosen and this one is automatic.</summary>
-    public bool IsWindowZero;
 
     // --- what the client is asked to do (a window never moves the camera or
     //     the cursor itself: it names the ask, the client owns the state) -----
