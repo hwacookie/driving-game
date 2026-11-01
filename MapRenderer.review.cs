@@ -923,6 +923,19 @@ public partial class MapRenderer : Node2D
     private readonly int TipWindowFrames = 9_000;   // 150 s at 60 Hz
     private HttpRequest _tipHttp;
     private bool _tipBusy;
+    // Issue #61: the pump's pace, in wall-clock ms. A loopback hop answers in ~1 ms,
+    // so chaining requests back-to-back ran the pump at ~900 hops/s - and since
+    // `HttpRequest` opens one fresh TCP connection per call and each close leaves a
+    // 240 s TIME_WAIT, the ephemeral pool (16 384 ports on macOS) drained in ~16 s:
+    // every OTHER client of :5001 (the test suite's /state poll, the runner's curls)
+    // then failed with EADDRNOTAVAIL. The hop budget below is what the design always
+    // meant ("one request per rendered frame"): a per-frame kick plus this interval,
+    // so the rate can never exceed the interval no matter how fast responses land.
+    // 10 hops/s still delivers 600 substeps/s of head-room against the sim's 60/s
+    // (a hop carries up to 600), keeps the tip lag under 100 ms, and caps the
+    // TIME_WAIT stock at 240 × 10 = 2 400 - three orders of magnitude of head-room.
+    private const ulong TipHopIntervalMs = 100;
+    private ulong _tipNextHopMs;    // 0 = the very first hop may fire immediately
     private int _tipDbg, _tipGapDbg;
     private long _tipGap;   // substeps the client's window rolled past (a seek behind them is a source question)
 
@@ -1039,6 +1052,13 @@ public partial class MapRenderer : Node2D
     private void RequestTapeTip()
     {
         if (_tipBusy || _tipHttp == null) return;
+        // The pace lives HERE, not in the response handler (#61): a hop may leave
+        // no sooner than TipHopIntervalMs after the previous one was sent. Every
+        // caller (the per-frame pull, the kick at setup) passes this gate at most
+        // once per interval, so a fast response can never re-arm a fast pump.
+        var now = Time.GetTicksMsec();
+        if (now < _tipNextHopMs) return;
+        _tipNextHopMs = now + TipHopIntervalMs;
         _tipBusy = true;
         _tipHttp.Request("http://127.0.0.1:" +
                          (_embeddedPort > 0 ? _embeddedPort : PortOfUrl(MapUrl)) + "/tape/tip",
@@ -1051,7 +1071,10 @@ public partial class MapRenderer : Node2D
     {
         _tipBusy = false;
         ApplyTipPayload(respBody);          // the same model a hop in-process feeds
-        if (_tapeLive) RequestTapeTip();    // keep the hop coming, empty or not
+        // NEVER re-arm here (#61): chained in the handler this line WAS the pump -
+        // a loopback response re-fired the request at ~900/s and exhausted the
+        // ephemeral ports. `_Process`'s per-frame `PullTapeTip()` is the arm;
+        // `RequestTapeTip`'s interval is the brake.
     }
 
     /// <summary>One tape line -> one frame, or null. `LoadTape` and the live
