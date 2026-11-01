@@ -2,33 +2,24 @@
   "version": 3,
   "id": "mvwd5w6p-kgm4vu",
   "objective": "Make reverse parking actually work, with its two foundation defects landed alongside.\n\nSUCCESS CRITERIA (observable): `dotnet test` shows 0 failures with all four bay-clearance rungs (0.5 / 1.0 / 1.5 / 2.5 m) named as passing and zero contacts to the neighbouring bodies; issue 31's between-two-cars bay passes in the e2e suite; `park_6lane_right_lane` is green (it is one of the four pre-existing reds today, so making it green is inside this goal, not a gate on a red); issues 36, 31 and 37 carry verdict lines and measured numbers.\n\nBOUNDARIES - in scope: the parking planner/executor in DrivingGame.Sim (BicycleNav part1/2/3, Car, CarCollisions, Config model table); BayReverseInTests as the instrument and issue 31's bay scenario in tests/test_turning.py; issue 37's body-box frame unification and per-model wheelbase/max steer, each its own branch and PR; docs for the accepted-pose rule and bay geometry; API fields only where a verdict needs one (units-suffixed, docs/REST_API.md updated). Out of scope: the other three pre-existing e2e reds (fig8 crash, fig8 centreline crossing, hairpin wrong-side) unless caused by these changes; issue 28; issue 27 slice 2; livery/sprite/Godot drawing; new parking styles; map/road-network changes; tape-format changes.\n\nCONSTRAINTS: binding workflow one issue = one branch = one PR (scripts/issue.sh, fix.sh, pr.sh, merge.sh), behaviour never lands on main directly; a PR is not done until its body carries the verdict lines (PR_VERDICTS) and it writes \"issue N\" WITHOUT the #; never merge a red behaviour change; never do physically impossible things (no teleport, no instant heading, no turn below the model's own minimum radius) and never weaken a check to make a verdict pass; reproduce first, fix second - every fix starts from a trace line or a failing test that predicted it; a change that regresses a gate is reverted and the negative result recorded in the issue; tapes stay out of git (tests/tape_T_*.txt gitignored, evidence tapes added to docs/tapes/ by name); never signal Godot; work visibly (announce each run and the expected verdict, stream long output, poll with bounded loops, no fixed sleeps); English everywhere; any access outside this machine beyond git push to origin needs asking first.\n\nGATE before every merge, quoted in the PR body: (1) `dotnet test` - no new failure, every previously-failing rung named as now passing; (2) `scripts/run_e2e.sh --tests park_6lane_right_lane --warp 4 --no-godot` - no worse than the recorded baseline; (3) `scripts/run_e2e.sh --warp 4` - failure SET is a subset of that baseline, no new failure and no new crash verdict anywhere; (4) CI green (core build + unit tests, godot client build) before merge.sh. Every new assertion is falsified once by breaking its source so a failure names itself; a check that cannot fail is not verification; verdicts are read from the sim's decision record and test output, never from swallowed Console lines.\n\nIF BLOCKED: stop and ask the user when a gate cannot be met without weakening or deleting a check; when a rung proves geometrically impossible for that model at that road width - deliver the proof (diagonal sqrt(L^2+W^2), the yaw the steering can deliver, which constraint binds) instead of moving the bar, since you set \"all four rungs, no exceptions\"; when required work belongs to another issue; when the tree is unexpectedly dirty or a host/Godot process I did not start is running; when GitHub or CI is unreachable (take the documented offline loop, never bypass the gate).",
-  "status": "active",
+  "status": "blocked",
   "autoContinue": true,
   "usage": {
-    "tokensUsed": 972405,
-    "activeSeconds": 5814
+    "tokensUsed": 2657004,
+    "activeSeconds": 13440
   },
   "sisyphus": false,
   "createdAt": "2026-10-31T12:14:50.161Z",
-  "updatedAt": "2026-10-31T15:39:43.947Z",
+  "updatedAt": "2026-11-01T12:16:03.162Z",
   "activePath": ".pi/goals/active_goal_2026103113145016_mvwd5w6p-kgm4vu.md",
-  "revision": 265,
+  "revision": 544,
   "scheduler": {
     "version": 1,
     "owner": "01a18807-5f68-75bb-b125-0a4c3dd1afec",
-    "generation": "ca9d0ce5-94e0-4877-bba5-e24c30a0e4e6",
-    "used": 1,
-    "phase": "running",
-    "repairUsed": false,
-    "decision": {
-      "kind": "ready",
-      "purpose": "kickoff"
-    },
-    "dispatch": {
-      "id": "624a98cb-cf88-49a1-9107-40124f445dfa",
-      "kind": "kickoff",
-      "claimedAt": 1793460963230
-    }
+    "generation": "99c21d88-d322-4d63-9d22-5086312217ab",
+    "used": 16,
+    "phase": "idle",
+    "repairUsed": false
   },
   "taskList": {
     "tasks": [
@@ -68,13 +59,17 @@
         "id": "task-9",
         "title": "Fix the ownership: one steering source per tick in the parking executor",
         "verificationContract": "Own branch, own PR, 'issue N' written without #. A plan armed for pose P must not keep steering a car that left P - either re-plan or follow the feedback law, never both. Gates quoted in the PR body: dotnet test with no new failure and the named rungs; scripts/run_e2e.sh --tests 24-26 --warp 4 (bays 2.5 / 1.0 / 0.5 m); full scripts/run_e2e.sh --warp 4 failure set a subset of the 2026-10-31 baseline; CI green. Measured-dead, do not retry: deleting the 20 deg entry gate alone (1 -> 3 unit failures), and any refusal/give-up rule that consumes PARK_MAX_ATTEMPTS per tick (the staging gate re-asks 60x/s).",
-        "status": "pending"
+        "status": "complete",
+        "completedAt": "2026-10-31T17:11:32.863Z",
+        "evidence": "Landed in main 55dc36d (PR #41, CI green): at the bay mouth the job holds speed at 0 instead of falling through to lane-keeping pursuit (yaw ∝ speed, so the oncoming-lane circle is impossible by const"
       },
       {
         "id": "task-5",
         "title": "Get the 1.5 m rung green and keep 0.5 / 1.0 / 2.5 green",
         "verificationContract": "All four BayReverseInTests clearances green in one dotnet test run, zero contacts, no hazard, verdicts judging the manoeuvre's exit rather than arrival. If a rung proves geometrically impossible for that model at that road width, STOP and deliver the proof (diagonal sqrt(L^2+W^2), the yaw the steering can deliver, which constraint binds) instead of moving the bar.",
-        "status": "pending"
+        "status": "complete",
+        "completedAt": "2026-10-31T17:11:32.863Z",
+        "evidence": "main 9a9b68d: dotnet test Passed 165 / Failed 0 / Skipped 2; BayReverseInTests(clearanceM: 2.5/1.5/1/0.5) all Passed + ABayWithNoNeighboursIsStillParkedIn. Cause was an unreachable recovery (_parkShim"
       },
       {
         "id": "task-6",
@@ -92,7 +87,9 @@
         "id": "task-10",
         "title": "Unblock landing: keep the instrument red where it is honestly red, without making CI lie",
         "verificationContract": "Awaiting the owner's pick; recommendation is the instrument trait plus a CI filter, so CI measures the checks while the red rows stay red and are quoted in every PR body. Do NOT reach for skip, removal, or 'assert the limitation' to get green. Once decided, implement on its own branch, show a green CI run, and state in the PR body exactly which rows are excluded and why.",
-        "status": "pending"
+        "status": "complete",
+        "completedAt": "2026-10-31T17:17:49.156Z",
+        "evidence": "Resolved itself honestly, no trait and no CI filter: the instrument went green (BayReverseInTests 0.5/1.0/1.5/2.5 all pass), so `dotnet test` has no red row left and CI passes unfiltered — PR #41 and "
       },
       {
         "id": "task-7",
@@ -104,7 +101,8 @@
     "blockCompletion": false,
     "proposedAt": "2026-10-31T14:42:01.046Z"
   },
-  "currentTaskId": "task-9"
+  "stopReason": "agent",
+  "pauseReason": "Remaining defect (issue 31's tight e2e bays at 1.0/0.5 m) needs a multi-line executor change as a SET: (i) solve the tuck arcs from the pose the car actually reaches instead of psi0 = 0 in PlanReverseTuck, (ii) let the follow law lag the plan (the merged ceiling currently clamps lagging too), (iii) decouple the reverse target from the staging metres. Every single-part alternative was measured and rejected on this tree: entry gate 30 deg -> 1 bay rung red, 45 deg -> 2 red (vs 0 at 20 deg with the ceiling in place); plan-steered tuck (plan Steer[] + bounded PD) -> ladder green at a 0.50 rad corridor but another unit test red, the shimmy canary stopped working and the e2e bay got worse (not landed); stage angle allowance -> inert at 0, 0.5/1.0 red at 0.08 m/deg; run-out decoupled from staging metres -> unit 165/0 but e2e unchanged (not landed); neighbour buffer 0.25 -> 0.10 moved the end pose 9 cm; unwind length 1.2 -> 3.5 m moved it 0 cm. Owner decision also unanswered after four asks (what a surrendered park does: re-set up, drive on, or stand with hazard), which determines part of that executor design."
 }
 
 # Goal Prompt
@@ -123,11 +121,11 @@ IF BLOCKED: stop and ask the user when a gate cannot be met without weakening or
 
 ## Progress
 
-- Status: running
+- Status: blocked
 - Auto-continue: on
 - Sisyphus mode: no
-- Time spent: 1h36m54s
-- Tokens used: 972K (972,405) tokens
+- Time spent: 3h44m00s
+- Tokens used: 2.7M (2,657,004) tokens
 ## Tasks
 
 <!-- blockCompletion: false -->
@@ -135,10 +133,11 @@ IF BLOCKED: stop and ask the user when a gate cannot be met without weakening or
 - [x] task-2: Black box: named the mechanism behind the tight bays — evidence: Named by measurement, not hypothesis: the tight bays never arm a tuck. [PARKPLAN] REFUSED lines prove StartReversePark returns at |psi0|>20deg while the pull-over swerve delivers -24.7deg (1.0m) and -
 - [x] task-4: 1.0 m rung green - park into the 6.40 m gap (issue 31's bay) — evidence: BayReverseInTests(clearanceM: 1) passes after commit b4edebc (issue 31's 6.40 m gap = 1.0 m clearance each end), and 0.5 m passed with it. Root cause was a throttle deadlock 1.8 m before the staging g
 - [x] task-8: Name the heading writer: assert that produced yaw equals (v/L)tan(delta)dt — evidence: Named: the normal path's pure pursuit (part3:1993-2000), saturated at MAX_STEER. Corrected-units rows from tape_T_364_25: wheelRAD=-0.663 = wheelDeg=-38.0 = MAX_STEER, impliedYaw -8.4deg/0.5s vs measu
-- [ ] task-9: Fix the ownership: one steering source per tick in the parking executor — contract: Own branch, own PR, 'issue N' written without #. A plan armed for pose P must not keep steering a car that left P - either re-plan or follow the feedback law, never both. Gates quoted in the PR body: dotnet test with no new failure and the named rungs; scripts/run_e2e.sh --tests 24-26 --warp 4 (bays 2.5 / 1.0 / 0.5 m); full scripts/run_e2e.sh --warp 4 failure set a subset of the 2026-10-31 baseline; CI green. Measured-dead, do not retry: deleting the 20 deg entry gate alone (1 -> 3 unit failures), and any refusal/give-up rule that consumes PARK_MAX_ATTEMPTS per tick (the staging gate re-asks 60x/s).
-- [ ] task-5: Get the 1.5 m rung green and keep 0.5 / 1.0 / 2.5 green — contract: All four BayReverseInTests clearances green in one dotnet test run, zero contacts, no hazard, verdicts judging the manoeuvre's exit rather than arrival. If a rung proves geometrically impossible for that model at that road width, STOP and deliver the proof (diagonal sqrt(L^2+W^2), the yaw the steering can deliver, which constraint binds) instead of moving the bar.
+- [x] task-9: Fix the ownership: one steering source per tick in the parking executor — evidence: Landed in main 55dc36d (PR #41, CI green): at the bay mouth the job holds speed at 0 instead of falling through to lane-keeping pursuit (yaw ∝ speed, so the oncoming-lane circle is impossible by const
+- [x] task-5: Get the 1.5 m rung green and keep 0.5 / 1.0 / 2.5 green — evidence: main 9a9b68d: dotnet test Passed 165 / Failed 0 / Skipped 2; BayReverseInTests(clearanceM: 2.5/1.5/1/0.5) all Passed + ABayWithNoNeighboursIsStillParkedIn. Cause was an unreachable recovery (_parkShim
 - [ ] task-6: E2E bays green at 1.0 and 0.5 m, and park_6lane_right_lane's stop-position verdict green — contract: The three bay variants committed at 2ba2827 (flank offset_m = -2.2 -+ (3.77 + clearance)) currently give 2.5 m PASSED / 1.0 m and 0.5 m FAIL 'drove into the oncoming lane' - flip those two without weakening the lane guard. Then park_6lane_right_lane's 'nose -2.29 m off the mark': PARK_ACCEPT_DREM_M = 0.60 was measured inert, so the lead is StopMargin() and the nose-vs-rear-axle-vs-flag target convention (issue 37's frame family). Retire draft PR #33 with the passing verdict lines in the PR body.
 - [ ] task-3: Foundation work still owed by the objective: per-model wheelbase/max steer, and issue 37's single frame — contract: Two changes, each its own branch and PR. (a) ModelFor(...) supplies Wheelbase/MaxSteerRad and the planner uses the car's OWN minimum turning radius - a mixer must not be planned with a sedan's 3.46 m; unit test asserts a plan is feasible for the model it was planned for. (b) Issue 37: prediction and contact code judge the SAME rectangle (rear axle vs Car.BodyCenter()), PredictionPadM re-tuned with a stated sampling reason, full-suite failure-set diff in the PR body. Sequence after task-9, whose ownership fix may retire part of it - re-scope from that result rather than redoing it.
-- [ ] task-10: Unblock landing: keep the instrument red where it is honestly red, without making CI lie — contract: Awaiting the owner's pick; recommendation is the instrument trait plus a CI filter, so CI measures the checks while the red rows stay red and are quoted in every PR body. Do NOT reach for skip, removal, or 'assert the limitation' to get green. Once decided, implement on its own branch, show a green CI run, and state in the PR body exactly which rows are excluded and why.
+- [x] task-10: Unblock landing: keep the instrument red where it is honestly red, without making CI lie — evidence: Resolved itself honestly, no trait and no CI filter: the instrument went green (BayReverseInTests 0.5/1.0/1.5/2.5 all pass), so `dotnet test` has no red row left and CI passes unfiltered — PR #41 and 
 - [ ] task-7: Final verification and close-out — contract: One pass: dotnet test 0 failures with the four rungs named green; full e2e failure set a strict subset of the baseline with park_6lane_right_lane no longer in it; no contact verdict anywhere; `git diff main -- tests/ DrivingGame.Sim.Tests/` reviewed so no test is skipped or commented out; issues 36, 31, 37, 38, 39 carry verdict lines and measured numbers; branches deleted after merge; local main == origin/main; tree clean; no server or Godot process left running.
 
+- Agent pause reason: Remaining defect (issue 31's tight e2e bays at 1.0/0.5 m) needs a multi-line executor change as a SET: (i) solve the tuck arcs from the pose the car actually reaches instead of psi0 = 0 in PlanReverseTuck, (ii) let the follow law lag the plan (the merged ceiling currently clamps lagging too), (iii) decouple the reverse target from the staging metres. Every single-part alternative was measured and rejected on this tree: entry gate 30 deg -> 1 bay rung red, 45 deg -> 2 red (vs 0 at 20 deg with the ceiling in place); plan-steered tuck (plan Steer[] + bounded PD) -> ladder green at a 0.50 rad corridor but another unit test red, the shimmy canary stopped working and the e2e bay got worse (not landed); stage angle allowance -> inert at 0, 0.5/1.0 red at 0.08 m/deg; run-out decoupled from staging metres -> unit 165/0 but e2e unchanged (not landed); neighbour buffer 0.25 -> 0.10 moved the end pose 9 cm; unwind length 1.2 -> 3.5 m moved it 0 cm. Owner decision also unanswered after four asks (what a surrendered park does: re-set up, drive on, or stand with hazard), which determines part of that executor design.
