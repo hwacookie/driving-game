@@ -33,3 +33,9 @@ __pycache__/
 .venv
    # plain ".venv" too: a symlink named .venv is NOT matched by ".venv/" and got committed once (see git log: fix #39 entry-limit-measured)
 TestResults/
+
+# Agent session state (goal files, event ledger). It is this machine\u2019s working
+# memory, not project content: a PR must not carry a goal checkpoint, and a
+# worktree checkout must not overwrite the live session. Added after PR #51
+# shipped four .pi/goals files because scripts/fix.sh checkpoint-commits them.
+.pi/
