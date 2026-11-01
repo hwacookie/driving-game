@@ -1655,7 +1655,6 @@ public partial class MapRenderer : Node2D
         if (_flowLabel != null) _flowLabel.Visible = false;
         if (_testLabel != null) _testLabel.Visible = false;
         if (_runStatus != null) _runStatus.Visible = false;
-        if (_infoPanel != null) _infoPanel.Visible = false;
         ReviewLabels();
         ReviewHud();
         ReviewPoseCheck();
@@ -2223,6 +2222,38 @@ public partial class MapRenderer : Node2D
         return w;
     }
 
+    /// <summary>WINDOW NULL - the always-open detail window (owner decision 2026-11-01).
+    /// It opens with the client, takes the run's FOCUS car by itself (see ApplyFocus), and
+    /// rebinds to whichever car the operator left-clicks; the other detail windows keep
+    /// whatever subject they were given. Created on first use rather than at Ready(): a
+    /// window showing `#0 nobody` before the sim has a car is noise, and a run names its
+    /// focus car within the first second.</summary>
+    CarDetailWindow _winZero;
+
+    void BindWindowZero(long uid)
+    {
+        if (uid <= 0L) return;
+        if (_winZero is not null && GodotObject.IsInstanceValid(_winZero))
+        {
+            if (_winZero.Uid == uid) { _winZero.Visible = true; return; }
+            _winZero.CarTexture = CarTexture(ColorOf(uid));
+            ApplyCarSize(_winZero, ColorOf(uid));
+            _winZero.ShowCar(uid);
+            _winZero.Visible = true;
+            GD.Print($"WINDOW-0 → #{uid} ({NameOf(uid)}) · the other " +
+                     $"{_details.Count - 1} window(s) keep their subject");
+            return;
+        }
+        _winZero = OpenDetailWindow(uid);
+        if (_winZero is null) return;
+        _winZero.IsWindowZero = true;
+        _winZero.Title = "car · window 0";
+        // Its own corner, and it never moves again: a window whose subject changes
+        // must not also jump around the screen, or the operator loses it.
+        _winZero.Position = new Vector2I((int)WinGapPx, 360);
+        GD.Print($"WINDOW-0 open on #{uid} ({NameOf(uid)}) · focus car");
+    }
+
     /// <summary>Draw (or erase) the red box the map shows while the hand holds
     /// a chain id. It hangs off the CAR's own node, so it rides the car without
     /// a per-frame write and inherits the node's rotation (the body box is then
@@ -2259,6 +2290,8 @@ public partial class MapRenderer : Node2D
         bool wasFollow = w.Following;
         if (_detailHighlight != 0 && w.HighlightUid == _detailHighlight) _detailHighlight = 0L;
         _details.Remove(w);
+        if (w.IsWindowZero) _winZero = null;   // closing it is allowed; the next click or
+                                               // focus change opens a fresh window 0
         // An operator who closes a test-declared window means it: the ask does
         // not come back until a new tape (#9).
         if (_details.All(x => x.Uid != w.Uid)) _detailDismissed.Add(w.Uid);
@@ -2829,6 +2862,7 @@ public partial class MapRenderer : Node2D
         var pm = new PopupMenu();
         foreach (var w in _details)
         {
+            if (w.IsWindowZero) continue;      // window 0 is automatic, never a slot
             long shown = w.Uid;
             pm.AddItem($"#{shown} {NameOf(shown)}", acts.Count);
             acts.Add(() =>

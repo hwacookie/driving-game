@@ -35,11 +35,36 @@ The one honest asymmetry (accepted, not hidden): **a step row can seek in the
 reviewer and cannot in the viewer**, because the live client has no tape to
 jump to. There it is drawn inert (not styled as a link).
 
+## Window 0 — the window that follows the click (owner decision 2026-11-01)
+
+One detail window is **always open**: it opens with the client, takes the run's **focus car**
+by itself, and rebinds to whichever car the operator **left-clicks**. It is called *window 0*
+(`CarDetailWindow.IsWindowZero`, `MapRenderer.BindWindowZero`).
+
+- **Left click = show me that car.** The click binds window 0 and nothing else moves: every
+  other detail window keeps the subject it was given. (Before this, left click opened a menu
+  asking *where* to show the car, and a footer status panel — id, model, speed, driver class,
+  a polled decision log, a `copy` button — appeared at the bottom. The panel is **removed**:
+  it duplicated what a detail window does properly. The menu is unchanged on **right** click,
+  where picking a slot is the point, and window 0 is not offered there: it is not a slot.)
+- **Which car at the start?** The run's focus car: the `named` focus resolves to its own uid,
+  and — because a scenario may declare a *place* instead (the bay parks do) — window 0 falls
+  back to the primary car, the first one on the map, since the harness stages the subject
+  before its cast. Bound once, so a neighbour appearing later never steals the subject.
+- **Closing it is allowed** (no window should fight the operator); the next click or focus
+  change opens a fresh one.
+- **Proof without a hand:** `--test-car-click <uid>` drives the real pick path for a named
+  car. Measured output:
+
+      WINDOW-0 open on #1 (parking_car) · focus car
+      WINDOW-0 → #2 (bay_rear) · the other 0 window(s) keep their subject
+
+
 ## Opening, closing, how many
 
 | rule | decision |
 |---|---|
-| how a car is opened | **right-click the car on the map** — the ONLY gesture that opens a persistent window (2026-10-24). **Left-press on a car = the transient peek card** (§"The peek card", user decision 2026-10-24); everywhere else the left button keeps its old job: a pan drag. |
+| how a car is opened | **right-click the car on the map** — the ONLY gesture that opens a *new* persistent window (2026-10-24). A left-click also feeds **window 0** (above), which already exists and needs no opening gesture (2026-11-01). **Left-press on a car = the transient peek card** (§"The peek card", user decision 2026-10-24); everywhere else the left button keeps its old job: a pan drag. |
 | the menu | a `PopupMenu` at the cursor. **No window open yet** → one entry: `New slot`. **Windows open** → one entry per open window, labelled with the car it shows (`#65 slow_car`), then `New slot`. |
 | picking a window's entry | that window **replaces** its car with the clicked car. No swapping, no "slot" object beyond the window itself. |
 | picking `New slot` | a new window, bound to the clicked car. |
