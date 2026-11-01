@@ -21,6 +21,8 @@ bool fastMode = false;  // --fast: no pacing at all (headless / CI runs)
 bool benchMode = false; // --bench [phases]: capacity sweep, in-process (no API)
 string benchPhases = "50,100,150,200,300";
 string benchLoop = "fig8_n";  // --bench-loop: node-name prefix of the loop
+string benchParked = "";  // --bench-parked N[,N..]: PARKED cars in each phase
+                          // (the owner's question: a resting car must cost nothing)
 // NB: C# top-level `args` does NOT include the program name (unlike Python's
 // sys.argv) - start at 0.
 for (int i = 0; i < args.Length; i++)
@@ -42,6 +44,7 @@ for (int i = 0; i < args.Length; i++)
                 benchPhases = args[++i];
             break;
         case "--bench-loop": if (i + 1 < args.Length) benchLoop = args[++i]; break;
+        case "--bench-parked": if (i + 1 < args.Length) benchParked = args[++i]; break;
         case "--no-collisions": collisionsEnabled = false; break;
     }
 }
@@ -165,15 +168,38 @@ if (benchMode)
         catch (Exception) { Console.WriteLine($"--bench: ignoring bad phase '{t}'"); }
     }
 
+    static List<int> ParsePhases(string text, string flag)
+    {
+        var list = new List<int>();
+        foreach (var part in text.Split(","))
+        {
+            var t = part.Trim();
+            if (t.Length == 0) continue;
+            try { list.Add(int.Parse(t)); }
+            catch (Exception) { Console.WriteLine($"{flag}: ignoring bad phase '{t}'"); }
+        }
+        return list;
+    }
+
+    // The sweep is the CROSS PRODUCT of the two lists: `--bench 0,50
+    // --bench-parked 0,250,1000` answers "what does a moving car cost" and
+    // "what does a resting one cost" in one run, on one machine, in one process.
+    var parkPhases = ParsePhases(benchParked, "--bench-parked");
+    var plan = new List<(int Moving, int Parked)>();
+    if (parkPhases.Count == 0)
+        foreach (var m in phases) plan.Add((m, 0));
+    else
+        foreach (var m in phases) foreach (var q in parkPhases) plan.Add((m, q));
+
     Console.WriteLine($"Capacity benchmark on the '{benchLoop}' loop ({loop.Count} segments):");
     Console.WriteLine($"  phases {benchPhases}, {SpawnMps * 3.6:F0} km/h rolling start, " +
                       "throttle held, no pacing (as many 60 Hz steps as the CPU can do).");
     Console.WriteLine("  in-process: no REST API, no client - this measures the sim alone.\n");
 
-    var ceiling = 0;
-    foreach (var n in phases)
+    var ceiling = "";
+    foreach (var (n, parkedN) in plan)
     {
-        Console.WriteLine($"--- {n} cars");
+        Console.WriteLine($"--- {n} moving + {parkedN} parked");
         // A fresh engine per phase: no leftovers, and the raceline cache starts
         // cold like a real run does.
         var eng = new SimEngine(network, obstacleMgr, mapLabel) { CollisionsEnabled = collisionsEnabled };
@@ -182,8 +208,43 @@ if (benchMode)
             int seg = loop[(int)System.Math.Round(i * (double)loop.Count / n) % loop.Count];
             eng.EnqueueCommand(new TeleportCommand(null, seg, 0.5, true, SpawnMps));
         }
-        for (int k = 0; k < (int)(WarmupSimS / BenchDt); k++)
+        // PARKED bodies: spread over the whole map, off the driving line, each put
+        // into the parked state by the same command the API sends (POST /park ->
+        // ParkCommand). Queued before the warmup, so by the measured window they are
+        // resting - which is exactly the state whose cost is in question.
+        if (parkedN > 0)
+        {
+            int segs = network.Segments.Count;
+            // SPREAD, not stack: cars that spawn inside each other collide on the first
+            // substep, and the crash dumper then writes a file per pair - measured on the
+            // first attempt of this bench, 11 MB of dumps and a process that never got to
+            // the measured window. Round-robin over the segments and step the PROGRESS by
+            // the round, so 1 000 cars sit ~70 m apart on 256 segments.
+            for (int i = 0; i < parkedN; i++)
+            {
+                int seg = i % segs;
+                int round = i / segs;
+                eng.EnqueueCommand(new TeleportCommand(null, seg,
+                    0.15 + 0.25 * round, true, 0.0, LatOffsetM: 7.5));
+            }
             eng.Tick(BenchDt);
+            foreach (var uid in eng.Cars.Keys.ToList())
+                eng.EnqueueCommand(new ParkCommand(uid));
+            for (int k = 0; k < (int)(2.0 / BenchDt); k++) eng.Tick(BenchDt);
+        }
+        // Wall-capped like the measured window: a phase that has become
+        // pathologically slow must REPORT that (pace far below 1) instead of
+        // hanging the sweep in its warmup, where nothing is being measured.
+        var swWarm = Stopwatch.StartNew();
+        double warmSim = 0.0;
+        while (warmSim < WarmupSimS && swWarm.Elapsed.TotalSeconds < WallCapS)
+        {
+            eng.Tick(BenchDt);
+            warmSim += BenchDt;
+        }
+        if (warmSim < WarmupSimS)
+            Console.WriteLine($"   (warmup cut at {swWarm.Elapsed.TotalSeconds:.0f} s wall — " +
+                              $"the phase is slower than the bench can drive it)");
         foreach (var uid in eng.Cars.Keys.ToList())
             eng.SetControl(uid, new Dictionary<string, object?> { ["accelerate"] = true });
 
@@ -198,18 +259,22 @@ if (benchMode)
         double wall = swBench.Elapsed.TotalSeconds;
         double pace = wall > 0.0 ? sim / wall : 0.0;
         bool holds = pace >= RealtimeTolerance;
-        if (holds)
-            ceiling = n;
+        int parkedNow = 0;
+        foreach (var c in eng.Cars.Values) if (c.State == CarState.Parked) parkedNow++;
+        if (holds) ceiling = $"{n} moving + {parkedN} parked";
         Console.WriteLine($"   pace {pace:F3}  ({sim:.1f} s sim / {wall:.1f} s wall) -> " +
-                          $"{(holds ? "real-time" : "slow motion")}");
+                          $"{(holds ? "real-time" : "slow motion")} · " +
+                          $"{eng.Cars.Count} cars alive, {parkedNow} reporting Parked");
     }
 
     Console.WriteLine();
-    Console.WriteLine(ceiling > 0
-        ? $"REAL-TIME CEILING (pace >= {RealtimeTolerance:F2}): {ceiling} cars"
+    Console.WriteLine(ceiling.Length > 0
+        ? $"REAL-TIME CEILING (pace >= {RealtimeTolerance:F2}): {ceiling}"
         : "No phase held real time.");
-    Console.WriteLine($"NB: the sim is single-threaded - this is ONE core's speed, " +
-                      $"not the machine's ({phases[^1]} cars is where it stops holding).");
+    Console.WriteLine("NB: the sim is single-threaded - this is ONE core's speed, not the " +
+                      "machine's. `parked` in a phase means RESTING cars, and the point of " +
+                      "listing them beside the moving ones is to see whether resting costs " +
+                      "anything at all (owner question, 2026-11-01).");
     return;
 }
 
