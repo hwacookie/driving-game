@@ -954,7 +954,15 @@ public partial class MapRenderer : Node2D
         // 2^53, which is far beyond any run.
         var head = root.TryGetProperty("head_step", out var hEl) ? (long)hEl.GetDouble() : -1L;
         var firstNew = root.TryGetProperty("first_step", out var fEl) ? (long)fEl.GetDouble() : -1L;
-        if (head <= _tapeHead) return;                     // nothing new since the last hop
+        // "Nothing new" must mean "nothing we have NOT already been given", which is
+        // _deliveredStep against head - NOT _tapeHead against head. _tapeHead is the head
+        // THIS response reports, so the very first hop (24 frames of a 1 760-frame run)
+        // set it to the end of the run and every hop after it looked like nothing new: the
+        // client kept asking `since = _deliveredStep`, the host kept answering with exactly
+        // the frames that were asked for, and the client threw them away. The window never
+        // grew past one hop - `frame 24 [24/24] · SIM 0.400 s`, with nothing to play, which
+        // is what the owner saw as "it's stuck at frame 24" (2026-11-01).
+        if (_tape.Count > 0 && head <= _deliveredStep) return;
         if (_tapeHead >= 0 && firstNew > _deliveredStep + 1)
             _tipGap += firstNew - (_deliveredStep + 1);     // the readout prints it
         // The hop carries the file's OWN format line, so the generation rule
@@ -1036,7 +1044,7 @@ public partial class MapRenderer : Node2D
                          (_embeddedPort > 0 ? _embeddedPort : PortOfUrl(MapUrl)) + "/tape/tip",
                          new string[] {}, HttpClient.Method.Post,
                          JsonSerializer.Serialize(new Dictionary<string, object?>
-                             { ["since"] = _deliveredStep, ["limit"] = 24 }));
+                             { ["since"] = _deliveredStep, ["limit"] = _tapeHead - _deliveredStep > 120 ? 600 : 24 }));
     }
 
     private void OnTapeTipResponse(long id, long code, String[] headers, byte[] respBody)
