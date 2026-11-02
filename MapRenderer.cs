@@ -232,11 +232,33 @@ public partial class MapRenderer : Node2D
     private bool _busyA, _busyB;   // GodotSharp 4.7 has no status query
     private ulong _reqMsA, _reqMsB;
 
+    // Issue #66: the SAME brake #61 put on the tip pump. "A round trip takes
+    // exactly one frame" was true when HttpRequest did one socket read per
+    // frame; with UseThreads a loopback answer lands in ~4 ms, so chaining the
+    // next request in the response handler free-ran the pipeline at ~500
+    // connections/s - each close a ~30 s TIME_WAIT, ~15 000 of the 16 384
+    // ephemeral ports held at all times, and a watch run died with
+    // EADDRNOTAVAIL whenever the stock crossed the pool. The frame-pace the
+    // design always meant is now a wall-clock floor: at most one state request
+    // per 16 ms ACROSS BOTH NODES (~60/s — one sample per render frame at 60
+    // fps), which caps the TIME_WAIT stock near 1 800 instead of 15 000.
+    private const ulong StateMinIntervalMs = 16;
+    private ulong _stateNextMs;
+
     void RequestState(HttpRequest node)
     {
         bool busy = ReferenceEquals(node, _stateHttpA) ? _busyA : _busyB;
         if (busy) return;   // that node already has a request in flight
         var now = Time.GetTicksMsec();
+        if (now < _stateNextMs)
+        {
+            // Gate closed: hand the arm to a timer at the gate's opening —
+            // dropping it would end the chain with one request in flight and
+            // nobody left to re-arm (this pipeline has no per-frame pull).
+            GetTree().CreateTimer((_stateNextMs - now) / 1000.0).Timeout += () => RequestState(node);
+            return;
+        }
+        _stateNextMs = now + StateMinIntervalMs;
         if (ReferenceEquals(node, _stateHttpA)) { _busyA = true; _reqMsA = now; }
         else { _busyB = true; _reqMsB = now; }
         node.Request(StateUrl);
