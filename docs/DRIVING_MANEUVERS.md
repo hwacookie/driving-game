@@ -1162,6 +1162,19 @@ break** and the **measurements that show whether it does**.
   gate, R5's right of way). Where the centreline — and with it "the other lane" —
   does not exist, no pass may be built across.
 
+- **R39 The lane's own driver keeps its way** *(crossing of lanes)*
+  *[proposed]* — a borrower may never make the owner of the other lane give up
+  that lane: oncoming traffic has the right of way here (§8's premise: "drivable"
+  is not permission), so `r32#passive` as a **cap at 0** is the wrong shape for
+  that party — it is what keeps a car standing where nothing holds it. What the
+  owner of the lane does instead, all of it inside R1/R2/R11: it may shift to
+  **its own right** as far as the road allows (R8 — it may never leave the road,
+  `Config.KerbOffsetM` is the bound) and it brakes **gently** for the contact
+  that would otherwise occur (`ComfortBrakingMps2`, not `CAR_BRAKING`), and the
+  whole point of that is to give the would-be overtaking car the time to come
+  back into its own lane. Two parties, one question — the borrower's *intent* is
+  the fact both read; neither decides by the other's brake.
+
 ### Meta — system (not a traffic rule)
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
@@ -1234,6 +1247,25 @@ it is. So the row is one object for the whole length of the plan:
   **no attempt**, the car stays behind the train. A plan is never discovered
   too short in the middle of a borrow.
 
+**Where the far half of that window is observed from (owner decision,
+2026-11-03, an accepted cheat).** Behind a row I cannot see the oncoming lane —
+the front tractor hides it, and a real driver asks the one in front instead. The
+sim does the same thing: the observation point of the far half is **the front of
+the row**, not my own nose. "Asking t1" is not a new sensor: every car already
+scans its own surroundings in the same substep (`CarCollisions` runs
+`grid.Near(..., ceil(OvertakeScanM / CellSizeM) + 1)` with `OvertakeScanM` 60 m
+per car, and `LookAheadForSpeed(v)` is per car), so the question "is there
+oncoming traffic, and at what distance" is read from the row's front car, and
+the answer is one fact rather than one more sweep. What the cheat costs is
+stated, not hidden: a driver in the second row would not have known, and the
+sim lets it plan as if it had. With a row of one there is no cheat at all —
+the observation point is my own position, which is today's R32.
+
+The **visualization does not depend on the information.** Edging to the left
+edge of my own lane says "I am checking", it does not carry the result, and it
+looks the same whether the answer came from my own scan or from the row's front
+— which is why the two are separate rules (see the paragraph below).
+
 ### The check is a visible act (the intent's picture)
 
 A driver whose intent is set and whose plan does not fit yet does not sit flat
@@ -1258,12 +1290,42 @@ inside these bounds:
   resource it is checking for — that is R36's rule ("a manoeuvre with a
   beginning and an end") read from the other side, and the reason the
   preparation and the borrow are different acts.
+- **an aborted check is silent again.** The signal belongs to the intent, and an
+  intent that was given up is not an intent: the blinker goes off in the same
+  step the plan is dropped, and the car drives back. A left blinker that stays
+  on while the car comes back into its lane is a lie to the traffic behind.
 - **the check itself is arithmetic, the creep is what makes it legible.** The sim
   has no sight model — a grep for visibility/occlusion in `DrivingGame.Sim/`
   returns the renderer and its draw order, not a decision. What "looking down
   the oncoming lane" means today is R7's stopping distance (`LookAheadForSpeed`)
   and R32's claim over the pinch. So the creep is the *picture* of the intent,
   the test stays the arithmetic that R32/R36/R2 already run.
+
+### An aborted pass is not a stop — it is a way back
+
+The measured wrong today (`tests/tape_T_435_21_20261103_000407.txt`,
+`slow_pass_priority`, 966 frames): steps 364–702 — **5.6 s of sim** — uid 1 sits
+at `x=98.250`, exactly its nominal lane line, `bl=0` (no signal at all),
+`brake=1`, held at 2.5–8 m/s by the cap keys `r32#passive` and `avoid#2`; the
+left blinker appears only at step 711, with the commit. There is no check phase
+and no way back — when R32 drops a pass, `CarCollisions` clears the commitment,
+zeroes `OvertakeShiftM` and offers a **cap of 0**, so a car that was already at
+the edge of the centreline stands there.
+
+What must happen instead, in one order:
+
+| Moment | Signal | Motion |
+|--------|--------|--------|
+| intent set, plan not yet feasible | **left blinker on** (R17, wired for a pass for the first time) | a **lateral** approach to the left edge of my own lane, at the check's own slow speed |
+| the plan is judged feasible | stays on | the pass: R36's window opens, the shift blends in |
+| the plan is judged **not** feasible (the pass is aborted) | **off, same step** | a **driven** return to the nominal line over the same speed-dependent blend (`v · LANE_CHANGE_TIME_S`) |
+
+The return is a lane change, not a stop: nothing in the rule set asks a car to
+hold station because a plan did not start. A cap of 0 belongs to a car that must
+not move (R2's brake, R14's halt line, R3's box); an aborted plan is not one of
+those. The only thing allowed to hold the return down is R2/R7's braking — a car
+that gives up its pass drives back at normal lane-change speed and the next car
+of the queue can use its turn.
 
 ### Why the intent has to be a flag
 
@@ -1377,6 +1439,11 @@ this rule — the same sentence §1c writes for its bay row.
   exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, the same half-span the
   12 m junction easing of §4/§7 already uses), the map fact does not: `overtaking=no`
   is read nowhere in the importer, so R38 is geometry-only first.
+- **nothing signals before a pass.** `[R17] signal left before lane change` fires
+  only with the commit (`CarCollisions` gives the car a cap and the nav answers
+  with `LaneChangeSignal`), so the waiting phase is unsignalled (measured: `bl=0`
+  through the whole 5.6 s of it) — and there is no abort path at all: the blocked
+  branch caps 0 and clears the shift, it never says "give up", it says "wait".
 - **no scenario stages a queue.** 17/18/19 put one obstruction and one passing
   car on `straight_n→straight_m`; case A would be the first queue the suite has
   and would need the map's stretch long enough for ten cars to hold their turn

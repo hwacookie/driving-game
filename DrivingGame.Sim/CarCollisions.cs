@@ -994,6 +994,9 @@ public static class CarCollisions
         // the stretch around the obstruction is a single-file resource, so
         // the claim (R26) decides who may enter and the other waits behind.
         const double OvertakeScanM = 60.0;   // how far ahead a car looks
+        // Why a car is not committing right now, per car, so the reason is
+        // logged ONCE per change of reason and not once per substep (R20).
+        var why32 = new Dictionary<long, string>();
         foreach (var c in carList)
         {
             if (net is null) continue;
@@ -1005,8 +1008,24 @@ public static class CarCollisions
             double wantM = 0.0;
             bool blocked = false;
             int byUid32 = -1;
+            // R37 (docs §9): the queue leader - the nearest car ahead of me IN MY
+            // LANE, whatever it is doing. Whether I may start is that car's flag,
+            // not my arithmetic; a driver that does not want to pass (the tractor
+            // behind a tractor) leaves it clear and the car behind it is free.
+            double leadAlongM = 1e9;
+            int leaderUid32 = -1;
+            bool leadHolds32 = false;
+            // R32's target is the car I follow; the WINDOW is measured past the
+            // front of the row (docs §9 "The obstruction is a train"), so the
+            // auction is asked for the longer stretch and the far half of the
+            // window is observed from there (the accepted observation cheat).
             int passUid32 = -1; double passProg32 = -1.0; double passLen32 = 0.0;
             double passX32 = 0.0, passY32 = 0.0;
+            double frontLen32 = 0.0, frontX32 = 0.0, frontY32 = 0.0, frontAlongM = 0.0;
+            // R39: a car that is in my lane BECAUSE it is passing is not an
+            // obstruction to me - I own this lane and my duty is room to my own
+            // right plus a gentle brake, never a stop that makes it give up.
+            int borrowerUid32 = -1; double borrowerNeedM = 0.0, borrowerAlongM = 1e9;
             foreach (var o in grid.Near(c.X, c.Y, (int)Math.Ceiling(OvertakeScanM / CellSizeM) + 1))
             {
                 if (o.Uid == c.Uid) continue;
@@ -1026,6 +1045,22 @@ public static class CarCollisions
                 bool sameDir = hdiff < 45.0;
                 if (!sameDir)
                     continue;
+                double needM = touchM + SideClearM(c.Speed) - Math.Abs(lat);
+                // R37: whoever is ahead of me in my lane is my queue leader, even
+                // when passing it would never be worth it.
+                if (Math.Abs(lat) <= touchM && along < leadAlongM)
+                {
+                    leadAlongM = along;
+                    leaderUid32 = o.Uid;
+                    leadHolds32 = o.OvertakeIntent || o.PassUid >= 0;
+                }
+                // R39: a guest in my lane (it is passing) - not an obstruction.
+                if (o.OvertakeIntent || o.OvertakeShiftM > 0.05 || o.PassUid >= 0)
+                {
+                    if (needM > borrowerNeedM) { borrowerNeedM = needM; borrowerUid32 = o.Uid; }
+                    if (along < borrowerAlongM) borrowerAlongM = along;
+                    continue;
+                }
                 // An obstruction: stopped, or crawling far below my speed.
                 if (o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0))
                     continue;
@@ -1039,17 +1074,22 @@ public static class CarCollisions
                 // game - a tractor, a bus that cannot turn.
                 if (o.Speed <= 0.5 && o.BicycleNav?.Parked != true)
                     continue;
-                // How far LEFT must I sit to clear it?
                 // How far LEFT must I sit to clear it? The margin is the speed
                 // curve, so the demand and the pass speed below speak the same
                 // relation - two constants set to the same value (demand 0.5,
                 // veto 0.5) can never both hold when the delivery is off by
                 // centimetres, which is what pinned the car at 0.46 m.
-                double needM = touchM + SideClearM(c.Speed) - Math.Abs(lat);
                 if (needM > wantM)
                 {
                     wantM = needM; passUid32 = o.Uid; passProg32 = o.Progress;
                     passLen32 = o.LengthM; passX32 = o.X; passY32 = o.Y;
+                }
+                // The window is measured past the FRONT of the row, whatever car
+                // of it is furthest along (docs §9).
+                if (along > frontAlongM)
+                {
+                    frontAlongM = along; frontLen32 = o.LengthM;
+                    frontX32 = o.X; frontY32 = o.Y;
                 }
                 // The pinch: the stretch from here to just beyond the
                 // obstruction. Anything already coming through it from the
@@ -1070,8 +1110,12 @@ public static class CarCollisions
                     // committed to the same lane (measured: the primary and the
                     // oncoming car of park_block_priority contacted head-on at
                     // t=11.47 s, both inside the shared lane).
+                    // With a row of slow vehicles the zone reaches past its
+                    // FRONT, not just past the near one (docs §9): the pass has
+                    // more to clear, so it needs more time and more road.
                     if (along2 < -6.0 ||
-                        along2 > along + c.LengthM + LookAheadForSpeed(o2.Speed)) continue;
+                        along2 > Math.Max(along, frontAlongM) + c.LengthM +
+                                  LookAheadForSpeed(o2.Speed)) continue;
                     double lat2 = dx2 * rxC32 + dy2 * ryC32;
                     // Only a car that would actually use the lane I need.
                     if (lat2 < -touchM - SideClearM(c.Speed)) continue;
@@ -1091,9 +1135,22 @@ public static class CarCollisions
                     double alP = Math.Max(Math.Hypot(axP, ayP), 1e-9);
                     double uCP = ((c.X - segC32.X1) * axP + (c.Y - segC32.Y1) * ayP) / alP;
                     double uOP = ((o2.X - segC32.X1) * axP + (o2.Y - segC32.Y1) * ayP) / alP;
+                    // Same resource, same auction: the stretch is asked for PAST
+                    // THE FRONT of the row (docs §9). An oncoming car the row's
+                    // leader reports 70 m ahead is 70 m plus the row plus my own
+                    // run-out away from where I will be when the pass ends - and
+                    // that arithmetic IS the length of the resource, whose cost in
+                    // the auction (Negotiation.CostOfWaiting: pinchM / clearMps)
+                    // is the time. A longer row costs more time to clear.
+                    double uEndP = uCP;
+                    if (frontAlongM > 0.0)
+                        uEndP = Math.Max(uCP,
+                                         ((frontX32 - segC32.X1) * axP +
+                                          (frontY32 - segC32.Y1) * ayP) / alP +
+                                         0.5 * (frontLen32 + c.LengthM) + SideClearM(c.Speed));
                     var resP = new Negotiation.Res(c.SegIdx,
                                                    Math.Min(uCP, uOP) - 4.0,
-                                                   Math.Max(uCP, uOP) + 4.0);
+                                                   Math.Max(uOP, uEndP) + 4.0);
                     liveKeys.Add(resP.Key);
                     var candsP = new List<Car> { c, o2 };
                     if (Negotiation.Holds(resP.Key, c.Uid, candsP, waitedS,
@@ -1105,13 +1162,33 @@ public static class CarCollisions
                 }
                 if (blocked) break;
             }
+            // --- R37: the intent, decided ONCE per approach (docs §9) -----
+            // "I want to pass the car I am sitting behind" is this driver's own
+            // judgement, asked once while that one is still my leader; the car
+            // behind reads the flag instead of asking me again. A driver who does
+            // not want to pass leaves it clear, and the car behind IT is free.
+            if (leaderUid32 < 0)
+            {
+                c.OvertakeIntent = false; c.IntentWithUid = -1;
+            }
+            else if (c.IntentWithUid != leaderUid32)
+            {
+                c.OvertakeIntent = wantM > 0.0;
+                c.IntentWithUid = leaderUid32;
+                if (c.OvertakeIntent)
+                    c.RecordDecision(simTime,
+                        $"[R37] intent: I want to pass car {leaderUid32} ahead");
+            }
+            // My turn is the leader's: it may not have taken its own yet.
+            bool myTurn32 = !leadHolds32;
+
             // --- the commitment (R32) ------------------------------------
             // wantM exists only while the obstruction is still in my line; the
-            // PASS is not over at that moment, so the intent is held by an
-            // object that names WHICH car I am passing and stays alive while
-            // that one is ahead of me. Read by the corridor bound, by v1 and
-            // by R33 - one object, three consumers.
-            if (wantM > 0.0 && !blocked && passUid32 >= 0)
+            // PASS is not over at that moment, so the object names WHICH car I am
+            // passing (my target, the near one) while the WINDOW is measured past
+            // the front of its row (§9 "The obstruction is a train"). Read by the
+            // corridor bound, by v1 and by R33 - one object, three consumers.
+            if (wantM > 0.0 && !blocked && myTurn32 && passUid32 >= 0)
             {
                 c.PassUid = passUid32;
                 c.PassSegIdx = c.SegIdx;
@@ -1128,18 +1205,61 @@ public static class CarCollisions
                 c.PassLengthM = 0.0;
                 c.PassShiftM = 0.0;
             }
-            if (blocked)
+            // The lateral frame of the segment, shared by R39's room and by the
+            // shift's own bounds: signed metres from the centreline
+            // (positive = my own half).
+            double ax32 = segC32.X2 - segC32.X1, ay32 = segC32.Y2 - segC32.Y1;
+            double al32 = Math.Max(Math.Hypot(ax32, ay32), 1e-9);
+            double sgn32 = c.Forward ? 1.0 : -1.0;
+            double tx32 = ax32 / al32 * sgn32, ty32 = ay32 / al32 * sgn32;
+            double off32 = (c.X - segC32.X1) * ty32 + (c.Y - segC32.Y1) * -tx32;
+            // --- R39: a guest in my lane, and I own it -------------------
+            // A car that is in my lane BECAUSE it is passing is not an
+            // obstruction to me: oncoming traffic has the right of way here (§8's
+            // premise - "drivable" is not permission), so a borrower may never
+            // make the owner of a lane give it up. My duty is room to my OWN
+            // right (never leaving the road, the nav clamps to KerbOffsetM again)
+            // and the gentle brake R7/R11 already run; what R39 forbids is R32's
+            // cap of 0 for this party - that is a car standing where nothing
+            // holds it, and it takes the other car's lane.
+            if (borrowerUid32 >= 0)
             {
-                // The shared lane belongs to the other car: wait behind the
-                // obstruction until it has come through (R26's claim).
+                c.YieldRightM = Math.Max(c.YieldRightM,
+                                         Math.Min(borrowerNeedM,
+                                                  Math.Max(0.0, segC32.Width / 2.0 -
+                                                            off32 - c.WidthM / 2.0)));
+                if (why32.GetValueOrDefault(c.Uid, "") != $"r39:{borrowerUid32}")
+                {
+                    why32[c.Uid] = $"r39:{borrowerUid32}";
+                    c.RecordDecision(simTime,
+                        $"[R39] car {borrowerUid32} is passing in my lane - I own it: " +
+                        "room on the right, the following rule's brake");
+                }
+            }
+            // --- not my turn / the pinch is owned: the check, NOT a stop ---
+            // docs §9: a plan that does not fit is a wait, never a half-started
+            // pass, and never a standstill either. No cap belongs here - only
+            // R2/R7's brake may hold the car down, and it keeps its place behind
+            // the obstruction while edging to the edge of its OWN lane (below).
+            string reason32 = blocked ? $"r32:{byUid32}"
+                                      : (!myTurn32 && wantM > 0.0 ? $"r37:{leaderUid32}" : "");
+            if (blocked || (!myTurn32 && wantM > 0.0))
+            {
                 c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
                 c.PassLengthM = 0.0;
                 c.PassShiftM = 0.0;
-                c.OvertakeShiftM = 0.0;
-                OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
-                         $"[R32] lane blocked by car {byUid32} ahead - " +
-                         "waiting behind the obstruction", byUid32);
-                continue;
+            }
+            if (reason32 != why32.GetValueOrDefault(c.Uid, ""))
+            {
+                why32[c.Uid] = reason32;
+                if (reason32 == $"r32:{byUid32}")
+                    c.RecordDecision(simTime,
+                        $"[R32] the pinch belongs to car {byUid32} - " +
+                        "checking, not committed");
+                else if (reason32 == $"r37:{leaderUid32}")
+                    c.RecordDecision(simTime,
+                        $"[R37] car {leaderUid32} ahead has the turn - " +
+                        "waiting for it, not for a gap");
             }
             // Outside the window the car belongs to its own lane: the shift is
             // RELEASED, not decayed. The nav re-solves the line when the pass
@@ -1147,21 +1267,29 @@ public static class CarCollisions
             // solve reading the OLD shift - measured: the car parked itself on
             // the centreline (offR +0.01) for 90 m after the pass and the guard
             // called it wrong-side, because the line it followed was still
-            // built from a 2.2 m borrow that never got released.
+            // built from a 2.2 m borrow that never got released. The same flip
+            // is what returns a car that gave up a plan: the line is the nominal
+            // one and the car DRIVES back, it is not put to rest in the middle.
             if (!PassCommitted(c, net))
             {
-                c.OvertakeShiftM = 0.0;
+                // The check (docs §9, "The check is a visible act"): at most to
+                // the LEFT EDGE of my own lane, never across the centreline -
+                // crossing it IS the commitment, and a commitment belongs to a
+                // plan that was judged feasible. R36 counts metres LEFT of the
+                // centreline, so a shift that stays right of it is no borrow it
+                // could charge, and R33 asks for a side change - this is not one.
+                double checkM = 0.0;
+                if (c.OvertakeIntent && wantM > 0.0)
+                    checkM = Math.Min(wantM,
+                                     Math.Max(0.0, off32 -
+                                               (c.WidthM / 2.0 + Config.LANE_CENTRE_MARGIN_M)));
+                c.OvertakeShiftM = checkM;   // 0 -> the nominal line: the way back
                 continue;
             }
             if (wantM <= 0.0) wantM = c.PassShiftM;   // held inside the window
             // Room to the LEFT inside the same carriageway: the shift may
             // never put the car off the road (the nav clamps again against
             // the narrowest segment on the route, this is the local bound).
-            double ax32 = segC32.X2 - segC32.X1, ay32 = segC32.Y2 - segC32.Y1;
-            double al32 = Math.Max(Math.Hypot(ax32, ay32), 1e-9);
-            double sgn32 = c.Forward ? 1.0 : -1.0;
-            double tx32 = ax32 / al32 * sgn32, ty32 = ay32 / al32 * sgn32;
-            double off32 = (c.X - segC32.X1) * ty32 + (c.Y - segC32.Y1) * -tx32;
             double roomLeftM = off32 + segC32.Width / 2.0 - c.WidthM / 2.0;
             // The bound is the carriageway's KERB-TO-KERB travel, not the room
             // that happens to be left at the car's CURRENT lateral position.
@@ -1175,18 +1303,6 @@ public static class CarCollisions
             // line against the road edge, so the shift cannot leave the road.
             double kerbRoomM = segC32.Width - c.WidthM;
             wantM = Math.Min(wantM, Math.Max(0.0, Math.Max(roomLeftM, kerbRoomM)));
-            if (blocked)
-            {
-                // The shared lane belongs to the other car: wait behind the
-                // obstruction until it has come through (R26's claim).
-                c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
-                c.PassShiftM = 0.0;
-                c.OvertakeShiftM = 0.0;
-                OfferCap(c.Uid, 0.0, $"r32#{byUid32}",
-                         $"[R32] lane blocked by car {byUid32} ahead - " +
-                         "waiting behind the obstruction", byUid32);
-                continue;
-            }
             double prevShift32 = c.OvertakeShiftM;
             c.OvertakeShiftM = wantM;
             if (wantM > prevShift32 + 0.05)
