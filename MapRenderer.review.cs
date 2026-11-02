@@ -940,6 +940,20 @@ public partial class MapRenderer : Node2D
     // TIME_WAIT stock at 240 × 10 = 2 400 - three orders of magnitude of head-room.
     private const ulong TipHopIntervalMs = 100;
     private ulong _tipNextHopMs;    // 0 = the very first hop may fire immediately
+
+    // Issue #68: the BUFFER the play clock rides behind the head. The tip
+    // arrives in bursts (one hop per TipHopIntervalMs), and a clock allowed to
+    // run up to the head (the reviewer's "wait at the head, never extrapolate")
+    // waits there on every delivery jitter: measured 6 % dead frames, freeze
+    // runs up to 115 ms - the "jumpy cars" the owner saw on 2026-11-02. Two hop
+    // intervals (200 ms = 12 substeps) of tape-in-hand turn a late hop into a
+    // shorter buffer instead of a freeze; the hold only happens when the buffer
+    // is genuinely empty (a data stall), which is what "never extrapolate" was
+    // always meant to cover. The price is a constant ~200 ms display lag - the
+    // cursor owns only the PICTURE, the run drives on.
+    private const double TipBufferSec = 2 * TipHopIntervalMs / 1000.0;
+    private int LiveBufferFrames()
+        => (int)Math.Ceiling(TipBufferSec / Math.Max(_tapeDt, 1e-9));
     private int _tipDbg, _tipGapDbg;
     private long _tipGap;   // substeps the client's window rolled past (a seek behind them is a source question)
 
@@ -1645,10 +1659,16 @@ public partial class MapRenderer : Node2D
             // the cursor sat at frame 1 of 35904 for a whole minute).
             _playPos += delta * _playRate / _tapeDt;
             int whole = (int)Math.Floor(_playPos);
+            // Issue #68: a LIVE clock waits TipBufferSec BEHIND the head, not
+            // at it: the substeps it is lerping between then exist in hand
+            // even when a hop lands one interval late. A FILE review keeps the
+            // old rule (the last substep IS the end of the data - wait there).
+            int cap = _tape.Count - 1;
+            if (_tapeLive) cap = Math.Max(0, cap - LiveBufferFrames());
             if (whole > _cursor)
             {
                 int before = _cursor;
-                _cursor = Math.Min(_tape.Count - 1, whole);
+                _cursor = Math.Min(cap, whole);
                 if (_playDbg < 6)
                 {
                     _playDbg++;
@@ -1657,8 +1677,9 @@ public partial class MapRenderer : Node2D
             }
             // The last substep is the END of the data: the clock waits there
             // rather than running ahead into frames that do not exist — never
-            // extrapolate, never jump (user decision 2026-10-25).
-            if (_cursor >= _tape.Count - 1) _playPos = _cursor;
+            // extrapolate, never jump (user decision 2026-10-25). In a live
+            // window "the end" is the top of the buffer, not the head.
+            if (_cursor >= cap) _playPos = _cursor;
         }
         if (_scrubDir != 0.0)
         {
