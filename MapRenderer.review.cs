@@ -83,14 +83,48 @@ public partial class MapRenderer : Node2D
     private const int ReadoutFontPx = 28;   // the two-line readout
     private const int AxisFontPx = 20;      // the bar's time scale
     private const int ButtonFontPx = 32;    // the transport row
-    private const int PickerFontPx = 23;    // the "open a tape" list
+    private const int DialogFontPx = 24;   // the "open a tape" table (#71). 17
+                                         // was unreadable in the modal on a 2x
+                                         // display - the operator said so, so the
+                                         // type goes to the size the card needs
+    private const int TapeHeadFontPx = 26;   // the table's column headers: they
+                                         // are the loudest text on the card,
+                                         // because pressing one sorts the table
+    private const int PickerFontPx = 23;   // the slot menu's type (unchanged since #71)
     private const int SlotFontPx = 26;      // the detail windows and their row
     private const int StripPx = 125;        // the instrument strip (half the old 250)
     private const int RowInsetPx = 8;       // dark margin above the button row
     private const int RowHpx = 58;          // the one row of buttons (66 x 58 boxes)
     private float _hudLabelBottom = 96.0f;   // where the readout ends, slots start below
     private int _playDbg;
-    private Panel _tapePanel;      // the "open a tape" dialog (modal)
+    private AcceptDialog _tapeDialog;      // the "open a tape" MODAL (#71)
+    private ScrollContainer _tapeScroll;   // its scrollbars
+    private Panel _tapeFrame;              // the frame around the table
+    private GridContainer _tapeGrid;       // its table
+    private Label _tapeDesc;              // the description, inside the band
+    private Panel _tapeHeader;            // the FIXED band it sits in
+    private string _pendingTape = "";      // the row the operator selected
+    private List<string> _rowNames = new List<string>();   // the rows AS DRAWN,
+                                            // so a selection finds its cells by
+                                            // lookup, not by rebuilding the table
+    private StyleBoxFlat _hlSb;            // the highlight of the selected row
+    private Dictionary<string, int> _lastPress = new Dictionary<string, int>();
+    private const int TapeDoubleMs = 300;  // two presses of one row this close
+                                          // apart ARE a double click; the window
+                                          // is ours because what two clicks mean
+                                          // in this dialog is our decision
+    private Button _okBtn;                 // "Open": enabled only when something
+                                          // is selected
+    private int _laidCardW = -1;           // the card the table was measured for
+    private int _laidCardH = -1;           // - a resize of the dialog itself is
+                                          // noticed here, not by a signal
+    private Vector2 _dialogBuiltAtVp = new Vector2(-1, -1);   // the window the
+                                              // card was derived for
+    private float _titlebarBefore = -1.0f;   // the title bar height the theme
+                                            // carries BEFORE the override - the
+                                            // witness that the doubling worked
+    private int _sortCol = 1;              // the column the table is ordered by
+    private bool _sortDesc = true;         // and its direction (newest first)
     private Label _axisLabel;      // the bar's time scale
     private double _curveMaxF = 0.1;   // the curve's vertical scale
     /// <summary>Per-uid index of the tape, built ONCE after the tape loads:
@@ -295,6 +329,135 @@ public partial class MapRenderer : Node2D
         return "";
     }
 
+    // #71 the tape table: four NAMED columns, and the names are buttons - the
+    // operator asked for a sortable table, so a column name is also the sort key.
+    private const int TapeCols = 4;                        // name · date · size · frames
+    private static readonly int[] TapeColWpx = { 460, 250, 150, 190 };
+    // columns are NOT equal: a tape name is 32 characters, the rest are short,
+    // and at the font above an equal column would clip the name it identifies.
+    private const int TapeColGapPx = 10;                   // the table's gutters
+    private const int TapeRowPx = 34;                      // one row of the table
+    private const int TapeRowGapPx = 6;
+    private const int TapeMinRows = 10;     // the FLOOR: rows the table always
+                                             // shows. More rows come from the
+                                             // window, not from here - the middle
+                                             // band stretches (see below)
+    private const int TapePreferredRows = 24;   // the table asks for this many
+                                             // rows and takes whatever the window
+                                             // actually left: a file-open dialog
+                                             // fills the space it is given, and
+                                             // sizing the card to the bands' sum
+                                             // left the stretch flags nothing to
+                                             // use, so a resize changed nothing
+    private const int TapeHeaderBandPx = 64;   // the FIXED band above the table:
+                                             // it holds one short line; the band
+                                             // is fixed so the text's length can
+                                             // never push the table around
+    private const int TapeTitlebarPx = 64;     // the strip the title sits in - 4.7's
+                                             // `titlebar_height`. The dialog had
+                                             // none (measured: the constant read
+                                             // 0 before any override), which is
+                                             // why the title read as a hairline
+    private const int TapeTitleFontPx = 30;    // the type of "Open a tape" itself:
+                                             // the operator asked for the bar,
+                                             // and the bar's height is the text's
+                                             // height plus the padding below
+    private const int TapeTitlePadPx = 14;     // the padding inside the bar's own
+                                             // stylebox, so the text is not glued
+                                             // to the strip's edges
+    private const int TapeFooterPx = 120;      // the FIXED band below it: the
+                                             // dialog's own button row
+    private const int TapeButtonFontPx = 26;   // the type on Open/Cancel: the
+                                             // dialog's default is smaller than
+                                             // the table's own text, which read
+                                             // as a caption under the list
+    private const int TapeDescFontPx = 22;    // the description inside that band
+    private const int TapeDescCols = 96;      // wrapped so the band's text stays
+    private const string TapeDialogHelp = "Pick a recorded tape.";
+    // The three bands the operator asked for - a fixed header, a table that
+    // takes whatever the window has left, a fixed footer - are 4.7's stretch
+    // flags on the middle child; the enum's members are not bound in this SDK
+    // (measured: STRETCH/Stretch/SIZE_FLAG_STRETCH/SizeFlagStretch are all
+    // absent), so the documented value is cast once, here, and named.
+    // The scroll modes, as measured facts about this SDK: the properties are
+    // bound (`horizontal_scroll_mode`, `vertical_scroll_mode`) but the enum's
+    // members are NOT - all four spellings of DISABLED/AUTO are absent, and
+    // assigning an int names the type as `ScrollContainer.ScrollMode`. So the
+    // documented values are cast once, and named here, instead of a bare 0/1 in
+    // the middle of the layout. The class reference gives SCROLL_MODE_DISABLED =
+    // 0 and SCROLL_MODE_AUTO = 1, and says the default of BOTH axes is 1 -
+    // which is why a table only a little wider than its window grew a
+    // horizontal bar under its vertical one.
+    private const Godot.ScrollContainer.ScrollMode ScrollOff = (Godot.ScrollContainer.ScrollMode)0;
+    private const Godot.ScrollContainer.ScrollMode ScrollAuto = (Godot.ScrollContainer.ScrollMode)1;
+    private const Control.SizeFlags SizeFlagStretch = (Control.SizeFlags)4;
+    private static int TapeTableWpx()
+    {
+        var w = (TapeCols - 1) * TapeColGapPx;
+        foreach (var col in TapeColWpx) w += col;
+        return w;
+    }
+    private const int TapeFramePadPx = 10;    // inside the frame: the gap between
+                                            // its border and the table's cells,
+                                            // so the rule does not cut into a row
+    private const int TapeFrameBorderPx = 2;  // the frame's own rule
+    private static int TapeScrollBoxPx() => (TapeRowPx + TapeRowGapPx) * TapeMinRows;
+    /// <summary>The card's fixed furniture: title bar, header band, the frame's
+    /// padding, the button row. ONE sum, used by the card's floor AND by the
+    /// table's height - a table measured against a smaller sum leaves the window
+    /// too small for its own content, and Godot grows a Window to fit, which
+    /// turned into a 18 px-per-frame fight between the two (measured: a card of
+    /// 602 → 620 → 638 → 656 px, re-measured at every step).</summary>
+    private int TapeBandsPx() => TapeTitlebarPx + TapeHeaderBandPx + TapeFooterPx
+                                    + 2 * TapeFramePadPx;
+
+    // The column widths AS LAID OUT: TapeColWpx is the FLOOR (a tape name is
+    // 32 characters, the rest are short, an equal column would clip the name it
+    // identifies), and a table that fills the card scales them up in the same
+    // proportions. Godot's stretch flags do not do it: measured at two window
+    // sizes, the table stayed 1080x400 with a 460 px first column in a card of
+    // 1320 AND in a card of 2520 - so the widths are computed from the card and
+    // DECLARED, like the container's box is declared, not hoped for.
+    private int _tableWNow = 0;
+    private int[] _colWNow = { };
+    /// <summary>The table's measure, read from the FRAME's laid-out rect rather
+    /// than computed from the card: the frame follows the window by anchors, so
+    /// the window - grown or SHRUNK - is the truth, and asking the card for a
+    /// number of pixels is what pinned the content's minimum size to the box and
+    /// left the dialog growable in one direction only (measured: 1246 → 1375 →
+    /// 1438 → 1470 px of card, re-measured every frame, and no direction back).
+    /// The columns keep their floor, so a small window still shows a full name.
+    private void TapeMeasureNow()
+    {
+        var inside = (int)_tapeFrame.Size.X - 2 * TapeFramePadPx;
+        if (inside < TapeTableWpx()) inside = TapeTableWpx();
+        _tableWNow = inside;
+        var scale = (float)inside / TapeTableWpx();
+        _colWNow = new int[TapeCols];
+        for (int col = 0; col < TapeCols; col++)
+            _colWNow[col] = (int)(TapeColWpx[col] * scale);
+    }
+
+    /// <summary>The whole table at whatever the window is now: the frame's rect
+    /// measured, the rows rebuilt to it, the selection moved onto the new cells.
+    /// One entry point, used when the dialog opens AND when it is resized - a
+    /// dialog that keeps its old numbers after a resize is the defect here.</summary>
+    private void ReflowTable(string why)
+    {
+        TapeMeasureNow();
+        RefreshTapeRows();
+        HighlightSelected();
+        if (why.Length == 0) return;
+        GD.Print($"REVIEW-REFLOW {why}: columns {_colWNow[0]}/{_colWNow[1]}/{_colWNow[2]}/{_colWNow[3]} " +
+                 $"(floors {TapeColWpx[0]}/{TapeColWpx[1]}/{TapeColWpx[2]}/{TapeColWpx[3]}), " +
+                 $"table {_tableWNow}px wide, frame {_tapeFrame.Size.X:F0}x{_tapeFrame.Size.Y:F0}");
+    }
+
+    /// <summary>One row of the table, as data (not as text): size and frames
+    /// sort as NUMBERS - a text sort would put 9 kB after 100 kB, which is the
+    /// wrong answer about a real file.</summary>
+    private struct TapeRow { public string name; public string date; public long bytes; public long frames; }
+
     private static string NewestTape()
     {
         var d = DirAccess.Open("res://tests");
@@ -312,82 +475,585 @@ public partial class MapRenderer : Node2D
 
     private static string TapeNameOf(string path) => path.Split("/")[^1];
 
-    // The six newest runs, oldest first - a dead host still has its history
-    // on disk, so the picker reads the directory rather than /tape/list.
-    private static List<string> ListRuns()
-    {
-        var runs = new List<string>();
-        var d = DirAccess.Open("res://tests");
-        if (d == null) return runs;
-        foreach (var n in d.GetFiles())
-        {
-            if (!n.StartsWith("tape_") || !n.EndsWith(".txt")) continue;
-            runs.Add(TapeDir() + "/" + n);
-        }
-        runs.Sort();
-        if (runs.Count > 6) runs = runs.Slice(runs.Count - 6, 6);   // Slice is (begin, LENGTH)
-        return runs;
-    }
+    // #71: `ListRuns` (the six newest, a name each) is gone - the table lists
+    // every tape and the scrollbar carries the rest. It stays only as the note
+    // of what its path shape used to break:
+    //   The same wrong shape in ListRuns made every entry of the run picker a
+    //   click that loaded nothing - DirAccess hands res:// names, File wants
+    //   globalized ones, and one entry was asked for in both shapes.
 
+    /// <summary>#71: the picker is a MODAL DIALOG - Godot's own `AcceptDialog`
+    /// (4.7's Window: a title bar, a line of purpose, a button row), over a
+    /// `ScrollContainer` (the scrollbars) over a `GridContainer` (the table).
+    /// The old shape - a Panel of name-buttons at a hard-coded offset - read as
+    /// tape names floating on the map and hid everything except six names.</summary>
     private void BuildRunPicker()
     {
-        // The dialog is a Control panel, NOT a Window: an embedded Window
-        // ignores the absolute positions asked of it (the slot windows came
-        // out scattered), and its children landed outside the frame - the
-        // window opened empty. A Panel positions exactly where asked.
-        _tapePanel = new Panel();
+        // Why this class, measured against the 4.7.1 bindings and the class
+        // reference: `WindowDialog` is not in the bindings, and `PopupPanel` is
+        // the bare borderless card - no header, no description, no buttons -
+        // which is exactly what the operator asked to leave behind. `AcceptDialog`
+        // IS the dialog: `Title` is the window header, `DialogText` what the
+        // dialog is for, `OkButtonText` labels the OK button (`GetOkButton()`
+        // reaches it) and `AddCancelButton` adds its counterpart.
+        _tapeDialog = new AcceptDialog();
+        _tapeDialog.Title = "Open a tape";
+        // The dialog's OWN text field stays empty on purpose. Its label sits at
+        // the top of the client area and the window is meant to wrap child
+        // controls around that label - and the operator's screenshot showed the
+        // table painted OVER that text, so the wrapping is not something to
+        // rely on. The layout is mine instead: one VBoxContainer, description
+        // first, table second - a container guarantees that stack.
+        _tapeDialog.OkButtonText = "Open";
+        // The card's bands are ANCHORED children of the Window, not a VBox whose
+        // children ask for pixels. A Window places anchored controls inside its
+        // client area, so the bands follow the window in BOTH directions - and a
+        // stack of declared sizes can only be grown, because Godot grows a Window
+        // to fit its content and never shrinks it below the content's minimum
+        // size. That is exactly the one-way resize the operator reported: bigger
+        // worked, smaller did not.
+        _tapeHeader = new Panel();
+        _tapeHeader.AnchorLeft = 0; _tapeHeader.AnchorRight = 1;
+        _tapeHeader.AnchorTop = 0; _tapeHeader.AnchorBottom = 0;
+        _tapeHeader.OffsetLeft = 22;
+        _tapeHeader.OffsetRight = -22;
+        _tapeHeader.OffsetTop = TapeTitlebarPx;
+        _tapeHeader.OffsetBottom = TapeTitlebarPx + TapeHeaderBandPx;
+        _tapeDesc = new Label();
+        _tapeDesc.Text = WrapLines(TapeDialogHelp, TapeDescCols);
+        _tapeDesc.AddThemeFontSizeOverride("font_size", TapeDescFontPx);
+        _tapeDesc.Position = new Vector2(0, 6);
+        _tapeHeader.AddChild(_tapeDesc);
+        _tapeDialog.AddChild(_tapeHeader);
+        // The table's FRAME: a Panel draws its `panel` stylebox behind its
+        // children, so a filled stylebox with a rule is a border around the
+        // table that never paints over a cell and never covers the scrollbars.
+        _tapeFrame = new Panel();
+        // The frame is anchored to the whole client area between the bands, so
+        // its rect IS what the window has left: grow it and the table grows,
+        // shrink it and the table shrinks - the columns are measured from this
+        // rect in TapeMeasureNow, never from a remembered card size.
+        _tapeFrame.AnchorLeft = 0; _tapeFrame.AnchorRight = 1;
+        _tapeFrame.AnchorTop = 0; _tapeFrame.AnchorBottom = 1;
+        _tapeFrame.OffsetLeft = 22;
+        _tapeFrame.OffsetRight = -22;
+        _tapeFrame.OffsetTop = TapeTitlebarPx + TapeHeaderBandPx;
+        _tapeFrame.OffsetBottom = -(TapeFooterPx + 8);
+        _tapeFrame.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        {
+            BgColor = new Color(0.06f, 0.06f, 0.09f, 1.0f),
+            BorderWidthLeft = TapeFrameBorderPx, BorderWidthTop = TapeFrameBorderPx,
+            BorderWidthRight = TapeFrameBorderPx, BorderWidthBottom = TapeFrameBorderPx,
+            BorderColor = new Color(0.62f, 0.66f, 0.74f, 1.0f),
+            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
+            CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
+            ContentMarginLeft = TapeFramePadPx, ContentMarginTop = TapeFramePadPx,
+            ContentMarginRight = TapeFramePadPx, ContentMarginBottom = TapeFramePadPx,
+        });
+        _tapeDialog.AddChild(_tapeFrame);
+        _tapeScroll = new ScrollContainer();
+        // The table's window. Anchored to the frame, so it is the frame's inside
+        // in both directions; its minimum size stays a FLOOR (ten rows) so a
+        // small dialog still shows them, which is all a ScrollContainer needs to
+        // know - a ScrollContainer's own minimum size is 0, and the stack that
+        // relied on that showed an empty black field while the log counted 496
+        // cells.
+        _tapeScroll.AnchorLeft = 0; _tapeScroll.AnchorRight = 1;
+        _tapeScroll.AnchorTop = 0; _tapeScroll.AnchorBottom = 1;
+        _tapeScroll.OffsetLeft = TapeFramePadPx;
+        _tapeScroll.OffsetRight = -TapeFramePadPx;
+        _tapeScroll.OffsetTop = TapeFramePadPx;
+        _tapeScroll.OffsetBottom = -TapeFramePadPx;
+        _tapeScroll.CustomMinimumSize = new Vector2(TapeTableWpx(), TapeScrollBoxPx());
+        // One direction only: down the list. The horizontal bar is switched off
+        // by mode, not by making the content narrow - the class reference says a
+        // scrollbar is drawn "at the right (for vertical) or bottom (for
+        // horizontal)" whenever the mode allows it, and the mode is the switch.
+        _tapeScroll.VerticalScrollMode = ScrollAuto;
+        _tapeScroll.HorizontalScrollMode = ScrollOff;
+        _tapeFrame.AddChild(_tapeScroll);
+        _tapeGrid = new GridContainer();
+        _tapeGrid.Columns = TapeCols;         // name · date · size · frames
+        _tapeGrid.SizeFlagsHorizontal = SizeFlagStretch;   // fill the band width
+        _tapeScroll.AddChild(_tapeGrid);
+        _hudLayer.AddChild(_tapeDialog);
+        _tapeDialog.Hide();                   // modal: only while asked for
+        // The title bar the operator called too thin. `titlebar_height` is 4.7's
+        // Window theme constant, and the bar's own rect is not bound on AcceptDialog
+        // in this SDK, so the value is read back rather than assumed. Two
+        // constants are needed, not one: `titlebar_height` says how tall the
+        // strip is, while `title_font_size` says how big the "Open a tape" text
+        // inside it is - and the strip the operator showed was neither, because
+        // 96 px of titlebar with 15 px of title text in it is not a title bar.
+        _titlebarBefore = _tapeDialog.GetThemeConstant("titlebar_height");
+        _tapeDialog.AddThemeConstantOverride("titlebar_height", TapeTitlebarPx);
+        _tapeDialog.AddThemeFontSizeOverride("title_font_size", TapeTitleFontPx);
+        // The bar's own stylebox, so the text has a band of its own instead of
+        // sitting on the strip's edge.
+        _tapeDialog.AddThemeStyleboxOverride("window_titlebar", new StyleBoxFlat
+        {
+            BgColor = new Color(0.10f, 0.10f, 0.14f, 1.0f),
+            ContentMarginLeft = 12, ContentMarginTop = TapeTitlePadPx,
+            ContentMarginRight = 12, ContentMarginBottom = TapeTitlePadPx,
+        });
+        // The card stays the HUD's dark panel, so the map never shows through
+        // the gaps between cells (`panel` is the Window's own theme stylebox).
+        // The CONTENT margins are the inset everything is laid out inside - the
+        // operator's complaint was that the buttons sat on the frame's bottom
+        // edge, and this margin is what puts the button row off it.
         var tpSb = new StyleBoxFlat
         {
             BgColor = new Color(16 / 255f, 16 / 255f, 22 / 255f, 235f / 255f),
             BorderWidthLeft = 1, BorderWidthTop = 1,
             BorderWidthRight = 1, BorderWidthBottom = 1,
             BorderColor = new Color(0.4f, 0.4f, 0.45f, 0.9f),
+            ContentMarginLeft = 22, ContentMarginTop = 18,
+            ContentMarginRight = 22, ContentMarginBottom = 26,
         };
-        _tapePanel.AddThemeStyleboxOverride("normal", tpSb);
-        _hudLayer.AddChild(_tapePanel);
-        var runs = ListRuns();
-        GD.Print($"REVIEW-RUNS found {runs.Count} tapes in {TapeDir()}");
-        // Bottom-right, above the scrub bar: the slots own the top-left and
-        // the minimap owns the top-right, so the run list goes where neither
-        // instrument lives.
-        var vp = GetViewport().GetVisibleRect();
-        // Under the minimap: the top-left is the slots, the bottom strip is
-        // the scrub bar, so the run list hangs off the map inset.
-        // The picker shares the window width, so a long tape name still fits.
-        float x = (float)vp.Size.X - Mathf.Max(360.0f, (float)vp.Size.X * 0.34f);
-        float y = 350.0f;
-        foreach (var path in runs)
+        _tapeDialog.AddThemeStyleboxOverride("panel", tpSb);
+        // A button row that reads like a system dialog's: two real buttons with
+        // body, not captions glued to the bottom edge. The class reference names
+        // these theme constants for exactly this (`buttons_min_height` says the
+        // reason: "to make buttons with short texts easier to click/tap"), and
+        // `buttons_separation` is the space between the content and the row.
+        _tapeDialog.AddThemeConstantOverride("buttons_min_height", 44);
+        _tapeDialog.AddThemeConstantOverride("buttons_min_width", 170);
+        _tapeDialog.AddThemeConstantOverride("buttons_separation", 26);
+        // 4.7's GridContainer has no `cell_size` (measured against the class
+        // reference and the bindings): the cells ARE the children's minimum
+        // sizes, declared per column in AddGridCell, and these are the gutters.
+        _tapeGrid.AddThemeConstantOverride("h_separation", TapeColGapPx);
+        _tapeGrid.AddThemeConstantOverride("v_separation", TapeRowGapPx);
+        // A 4.7 Window does NOT close itself when asked (the class reference
+        // says so): a click outside the modal only emits `close_requested`, so
+        // the modal is wired to that signal.
+        _tapeDialog.CloseRequested += () => _tapeDialog.Hide();
+        // And a Window is a NATIVE system window unless the main viewport
+        // embeds subwindows; a review overlay belongs inside the game window,
+        // because the tape list is asked about the map it is reviewing. `GetTree().Root`
+        // is how the main viewport is reached (a bare `Root` is not in the
+        // bindings, measured).
+        GetTree().Root.GuiEmbedSubwindows = true;
+        // The choice is CONFIRMED on the dialog's own button row: a row click
+        // selects, "Open" loads that selection, "Cancel" closes without loading.
+        _hlSb = new StyleBoxFlat
         {
-            var btn = new Button { Text = TapeNameOf(path) };
-            btn.AddThemeFontSizeOverride("font_size", PickerFontPx);
-            btn.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
-            btn.OffsetLeft = x; btn.OffsetTop = y;
-            btn.OffsetRight = x + 340.0f; btn.OffsetBottom = y + 30.0f;
-            var p = path;
-            btn.Pressed += () => ReviewRunSelect(p);
-            _tapePanel.AddChild(btn);
-            y += 34.0f;
-        }
-        _tapePanel.OffsetLeft = 12.0f;
-        _tapePanel.OffsetTop = _hudLabelBottom + 10.0f;
-        _tapePanel.OffsetRight = 12.0f + 380.0f;
-        _tapePanel.OffsetBottom = _hudLabelBottom + 10.0f + y;
-        _tapePanel.Visible = false;      // modal: only while asked for
+            BgColor = new Color(0.22f, 0.30f, 0.46f, 1.0f),
+            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6,
+            CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6,
+            ContentMarginLeft = 8, ContentMarginRight = 8,
+        };
+        _okBtn = _tapeDialog.GetOkButton();
+        // The dialog's buttons draw in the dialog's default type, which the
+        // operator called too small - the font goes on the buttons themselves,
+        // the same override the table cells and the transport row use.
+        _okBtn.AddThemeFontSizeOverride("font_size", TapeButtonFontPx);
+        // "Open" answers the dialog's question, so it is enabled only once the
+        // operator has selected an entry - with nothing selected it is greyed,
+        // not a silent no-op. `disabled` is true when there is nothing to answer.
+        _okBtn.Disabled = _pendingTape.Length == 0;
+        _okBtn.Pressed += () =>
+        {
+            if (_pendingTape.Length == 0) return;
+            ReviewRunSelect(_pendingTape);
+        };
+        var cancelBtn = _tapeDialog.AddCancelButton("Cancel");
+        cancelBtn.AddThemeFontSizeOverride("font_size", TapeButtonFontPx);
+        cancelBtn.Pressed += () =>
+        {
+            _pendingTape = "";
+            _okBtn.Disabled = true;   // the question has no answer any more
+            _tapeDialog.Hide();
+        };
     }
 
-    /// <summary>The dialog is MODAL: it appears on the button, and the
-    /// choice that was made closes it - a list that stays open after the
-    /// selection covers the map for the rest of the review.</summary>
+    /// <summary>The table's rows, (re)built in the order the operator asked for.
+    /// The six-newest picker is gone: every tape on disk is listed, and a name
+    /// alone cannot tell two runs a day apart (#71). Rows are rebuilt on every
+    /// open AND on every header press, so a run that just finished shows up
+    /// straight away and the sort that was asked for is the sort that is drawn.</summary>
+    private int RefreshTapeRows()
+    {
+        foreach (Node c in _tapeGrid.GetChildren())
+        {
+            _tapeGrid.RemoveChild(c);
+            c.QueueFree();      // these are per-open cells, not kept nodes
+        }
+        AddGridHeader("Name", 0);
+        AddGridHeader("Date", 1);
+        AddGridHeader("Size", 2);
+        AddGridHeader("Frames", 3);
+        var d = DirAccess.Open("res://tests");
+        if (d == null) return 0;
+        _rowNames.Clear();   // the rows AS DRAWN, rebuilt with the cells
+        var rows = new List<TapeRow>();
+        foreach (var n in d.GetFiles())
+        {
+            if (!n.StartsWith("tape_") || !n.EndsWith(".txt")) continue;
+            var r = new TapeRow();
+            r.name = n;
+            r.date = RunStampOf(n);
+            // Per-file size and mtime are gone from 4.7's DirAccess (its method
+            // list is names only, measured against the class reference); they
+            // live on FileAccess as statics over the absolute path shape.
+            r.bytes = Godot.FileAccess.GetSize("res://tests/" + n);
+            r.frames = StepsOf(TapeDir() + "/" + n);
+            rows.Add(r);
+        }
+        // An insertion sort: n is the number of tapes on disk (~120 measured),
+        // and the order is the operator's, not the program's convenience - so
+        // there is no argument to hand to a library comparator here.
+        for (var i = 1; i < rows.Count; i++)
+        {
+            var key = rows[i];
+            var j = i - 1;
+            while (j >= 0 && CompareRows(rows[j], key) > 0)
+            {
+                rows[j + 1] = rows[j];
+                j--;
+            }
+            rows[j + 1] = key;
+        }
+        foreach (var r in rows)
+        {
+            // The order the table was drawn in, remembered: a selection names a
+            // row, and finding its cells is a lookup in this list, not a rebuild.
+            _rowNames.Add(r.name);
+            var hot = r.name == SelectedTapeName();   // the selected row keeps
+            // its highlight through a re-sort, because the highlight is applied
+            // here, where the cells are made.
+            AddGridCell(r.name, 0, true, hot);
+            AddGridCell(r.date, 1, false, hot);
+            AddGridCell(FileSizeText(r.bytes), 2, false, hot);
+            AddGridCell(r.frames < 0 ? "unknown" : $"{r.frames} frames", 3, false, hot);
+        }
+        return rows.Count;
+    }
+
+    /// <summary>The order a header press asked for. Name and date compare as text
+    /// - the date IS the file name's stamp, so it is ISO-ordered already; size
+    /// and frames compare as NUMBERS, because a text sort would call 9 kB bigger
+    /// than 100 kB.</summary>
+    private int CompareRows(TapeRow a, TapeRow b)
+    {
+        var c = 0;
+        if (_sortCol == 0)
+            c = a.name.CompareTo(b.name);
+        else if (_sortCol == 1)
+            c = a.date.CompareTo(b.date);
+        else if (_sortCol == 2)
+            c = a.bytes < b.bytes ? -1 : (a.bytes > b.bytes ? 1 : 0);
+        else
+            c = a.frames < b.frames ? -1 : (a.frames > b.frames ? 1 : 0);
+        return _sortDesc ? -c : c;
+    }
+
+    private void SortByColumn(int col)
+    {
+        if (col == _sortCol)
+            _sortDesc = !_sortDesc;   // the same header again = the other way
+        else
+        {
+            _sortCol = col;
+            _sortDesc = col != 0;     // names read up, numbers read down
+        }
+        RefreshTapeRows();
+        GD.Print($"REVIEW-PICK sorted by col={_sortCol} desc={_sortDesc}");
+    }
+
+    /// <summary>A column name the operator can press: the header IS the sort key.
+    /// It is the loudest text on the card on purpose - "pressing this sorts by
+    /// this" has to be obvious, not a hover trick on 17 px type.</summary>
+    private void AddGridHeader(string text, int col)
+    {
+        var b = new Button { Text = text };
+        b.Pressed += () => SortByColumn(col);
+        b.CustomMinimumSize = new Vector2(_colWNow[col], TapeRowPx);
+        b.SizeFlagsHorizontal = SizeFlagStretch;   // the column widens with the
+        b.AddThemeFontSizeOverride("font_size", TapeHeadFontPx);
+        b.AddThemeColorOverride("text_color", new Color(1f, 0.92f, 0.65f));
+        _tapeGrid.AddChild(b);
+    }
+
+    /// <summary>ONE cell shape for the whole table: a Label for a value, or the
+    /// Button that selects a run. `GridContainer` lays children out in column
+    /// order, so the order of these calls IS the table.</summary>
+    private void AddGridCell(string text, int col, bool selectable, bool highlight)
+    {
+        Control cell;
+        if (selectable)
+        {
+            var b = new Button { Text = text };
+            var tape = TapeDir() + "/" + text;
+            b.Pressed += () => PickRow(tape, b);
+            cell = b;
+        }
+        else
+            cell = new Label { Text = text };
+        cell.CustomMinimumSize = new Vector2(_colWNow[col], TapeRowPx);
+        cell.SizeFlagsHorizontal = SizeFlagStretch;   // the column widens with the
+        cell.AddThemeFontSizeOverride("font_size", DialogFontPx);
+        if (highlight) ApplyHighlight(cell, true);
+        _tapeGrid.AddChild(cell);
+    }
+
+    /// <summary>A press SELECTS the row; a second press of the SAME row inside
+    /// TapeDoubleMs loads it and closes the dialog. Godot's own double-click is
+    /// an input-layer event that reaches a `Button` as two presses rather than a
+    /// signal to listen to, and what two clicks MEAN in this dialog is ours - so
+    /// the window is measured here. The selection is loud: the row is painted and
+    /// "Open" becomes enabled. The tape loaded is logged by the review path, so
+    /// the row that was picked appears in the log without a guess about which
+    /// cell was hit.</summary>
+    private void PickRow(string tape, Button cell)
+    {
+        var now = (int)Time.GetTicksMsec();
+        var prev = _lastPress.ContainsKey(tape) ? _lastPress[tape] : -1000;
+        _lastPress[tape] = now;
+        if (now - prev <= TapeDoubleMs)
+        {
+            _lastPress[tape] = -1000;   // the double click is spent
+            _pendingTape = tape;
+            GD.Print($"REVIEW-PICK double-click on {tape}: opened");
+            _tapeDialog.Hide();
+            ReviewRunSelect(tape);
+            return;
+        }
+        _pendingTape = tape;
+        _okBtn.Disabled = false;
+        HighlightSelected();
+        GD.Print($"REVIEW-PICK selected {tape} (Open enabled)");
+    }
+
+    /// <summary>The name the table shows for the selection. `_pendingTape`
+    /// carries the directory because that is the shape the review path loads a
+    /// tape with, and the table shows names without it - comparing the two
+    /// shapes is what made the highlight never appear.</summary>
+    private string SelectedTapeName()
+    {
+        if (_pendingTape.Length == 0) return "";
+        var sep = _pendingTape.LastIndexOf('/');
+        return sep < 0 ? _pendingTape : _pendingTape.Substring(sep + 1);
+    }
+
+    /// <summary>The highlight of the selected row, by name: the four cells the
+    /// table drew for it. A Button and a Label both draw a `normal` stylebox
+    /// behind their text, so the SAME override paints a value cell and a name
+    /// cell - "this row is the one" is a fact on screen, not a state question
+    /// asked of the code. Exactly one row carries the paint: the pass clears the
+    /// others on the way, so a re-sort cannot leave two highlights behind.</summary>
+    private void HighlightSelected()
+    {
+        var sel = SelectedTapeName();
+        var painted = 0;
+        for (var i = 0; i < _rowNames.Count; i++)
+        {
+            var hot = _rowNames[i] == sel;
+            for (var col = 0; col < TapeCols; col++)
+            {
+                var at = TapeCols + i * TapeCols + col;   // the header row comes
+                // first in the GridContainer, then four cells per row
+                if (at >= _tapeGrid.GetChildCount()) continue;
+                if (ApplyHighlight(_tapeGrid.GetChild(at) as Control, hot) && hot)
+                    painted++;
+            }
+        }
+        // The count is the witness for the selection matching the table: a
+        // selection that paints 0 cells is the shape bug the operator saw -
+        // the dialog keeps a path and the table shows names, and comparing the
+        // two shapes leaves every row unmarked.
+        if (sel.Length > 0)
+            GD.Print($"REVIEW-HIGHLIGHT sel={sel} cells={painted}/{TapeCols} " +
+                     $"(a row is four cells; 0 means the selection does not name " +
+                     $"a row the table drew)");
+    }
+
+    private bool ApplyHighlight(Control cell, bool on)
+    {
+        if (on)
+        {
+            cell.AddThemeStyleboxOverride("normal", _hlSb);
+            cell.AddThemeColorOverride("text_color", new Color(1f, 0.95f, 0.75f));
+        }
+        else
+            cell.RemoveThemeStyleboxOverride("normal");
+        return on;
+    }
+
+    /// <summary>The run stamp the FILE NAME carries (tape_T_432_0_20261102_181100
+    /// → "2026-11-02 18:11"). The name, not the file's mtime: a tape saved
+    /// again keeps its run, and the run is the moment being reviewed.</summary>
+    static string RunStampOf(string name)
+    {
+        for (var i = 0; i + 15 <= name.Length; i++)
+        {
+            if (!FourDigits(name, i) || !FourDigits(name, i + 4) || name[i + 8] != '_'
+                || !FourDigits(name, i + 9) || !FourDigits(name, i + 13))
+                continue;
+            return name.Substring(i, 4) + "-" + name.Substring(i + 4, 2) + "-"
+                   + name.Substring(i + 6, 2) + " " + name.Substring(i + 9, 2) + ":"
+                   + name.Substring(i + 11, 2);
+        }
+        return "";
+    }
+
+    private static bool FourDigits(string s, int at)
+    {
+        for (var i = at; i < at + 4; i++)
+            if (i >= s.Length || s[i] < '0' || s[i] > '9')
+                return false;
+        return true;
+    }
+
+    private static string FileSizeText(long bytes)
+    {
+        double v = bytes;
+        var units = new[] { "B", "kB", "MB", "GB" };
+        var u = 0;
+        while (v >= 1024.0 && u + 1 < units.Length) { v /= 1024.0; u++; }
+        return u == 0 ? $"{(int)v} {units[u]}" : $"{v:F1} {units[u]}";
+    }
+
+    /// <summary>The `steps=` token of a tape header — the substep count the
+    /// recording itself claims. Read from the HEADER only: these files reach
+    /// 12 MB, and counting their lines to learn a number the header already
+    /// carries is what made opening the table a several-second hitch.</summary>
+    private static long StepsOf(string path)
+    {
+        try
+        {
+            foreach (var line in File.ReadLines(path).Take(4))
+            {
+                if (!line.StartsWith("#")) continue;
+                var at = line.IndexOf("steps=", StringComparison.Ordinal);
+                if (at < 0) continue;
+                var rest = line.Substring(at + 6);
+                var sp = rest.IndexOf(' ');
+                return long.Parse((sp > 0 ? rest.Substring(0, sp) : rest).Trim());
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    /// <summary>The dialog is MODAL: it appears on the ask, Godot centres it, and
+    /// the confirmed choice closes it - a list that stays open covers the map for
+    /// the rest of the review.</summary>
+    /// <summary>The card the dialog should be: a third of the window (the size
+    /// the operator set), never below the bands plus ten rows. One formula, used
+    /// by the open AND by a window resize - two copies of the rule drift the
+    /// moment one of them is changed.</summary>
+    private Vector2I DialogCardFor(float vpW, float vpH)
+    {
+        var floorH = TapeBandsPx() + TapeScrollBoxPx();
+        return new Vector2I(
+            (int)Math.Max(TapeTableWpx() + 2 * TapeFramePadPx + 140.0f, vpW / 3.0f),
+            (int)Math.Max(floorH, vpH / 3.0f));
+    }
+
     private void ShowTapeDialog()
     {
-        _tapePanel.Visible = true;
-        GD.Print($"REVIEW-DIALOG open (tapes listed: {_tapePanel.GetChildCount()})");
+        if (_tapeDialog == null) return;
+        // The standing order the description promises: newest run first.
+        _sortCol = 1;
+        _sortDesc = true;
+        _pendingTape = "";
+        _lastPress.Clear();
+        if (_okBtn != null) _okBtn.Disabled = true;   // a fresh question, no answer
+        var vp = GetViewport().GetVisibleRect().Size;
+        // The card does NOT fill the window: the operator set the size at a
+        // THIRD of the window each way, and they can resize the window when
+        // they want more. Filling the whole window is what made a maximized
+        // review window a 3640x2654 card. The floor is still the three bands,
+        // so a small window keeps the header, ten rows and the button row.
+        var card = DialogCardFor(vp.X, vp.Y);   // the one formula, not a copy
+        _tapeDialog.Size = card;
+        _laidCardW = card.X;
+        _laidCardH = card.Y;
+        ReflowTable("");                       // the table, measured to the card
+        int rows = _rowNames.Count;
+        _tapeDialog.PopupCentered();   // Godot owns the placement and the frame
+        _tapeDialog.Show();
+        // The honest witness that the table SCROLLS instead of clipping: the box
+        // the rows need versus the box the modal got. Bigger content than the box
+        // is exactly when 4.7's default SCROLL_MODE_AUTO draws a scrollbar.
+        var needH = (TapeRowPx + TapeRowGapPx) * (rows + 1);
+        var needW = _tableWNow;
+        var scrolls = needH > _tapeScroll.CustomMinimumSize.Y;
+        // The laid-out box, not the intended one: `get_size()` is bound, so
+        // "how many rows can the window actually show" is a number in this line
+        // rather than an inference - a zero-height container showed itself as an
+        // empty black field, and a resize that changes nothing shows up here.
+        var laidRows = _tapeScroll.GetSize().Y / (TapeRowPx + TapeRowGapPx);
+        var titlebarAfter = _tapeDialog.GetThemeConstant("titlebar_height");
+        GD.Print($"REVIEW-DIALOG open (tapes listed: {rows}, table cells: " +
+                 $"{_tapeGrid.GetChildCount()}, bands: header {TapeHeaderBandPx} + " +
+                 $"table {TapeScrollBoxPx()} + footer {TapeFooterPx}, " +
+                 $"embedded: {_tapeDialog.IsEmbedded()}, " +
+                 $"box: {_tapeDialog.Size.X}x{_tapeDialog.Size.Y} px, " +
+                 $"frame laid out: {_tapeFrame.GetSize().X:F0}x{_tapeFrame.GetSize().Y:F0}, " +
+                 $"table laid out: {_tapeScroll.GetSize().X:F0}x{_tapeScroll.GetSize().Y:F0} " +
+                 $"= {laidRows:F0} visible rows, " +
+                 $"content needs: {needW}px x {needH}px -> " +
+                 $"{(scrolls ? "scrolls" : "fits")}, " +
+                 $"title bar: was {_titlebarBefore:F0} -> {titlebarAfter:F0}px " +
+                 $"(asked {TapeTitlebarPx}, header band {TapeHeaderBandPx}px))");
+        // The box above is the box as ASKED. Whether the stretch flags did their
+        // job - more rows in a taller window, wider columns in a wider one - is
+        // only knowable after a frame has laid the dialog out, so the geometry
+        // is read again one frame later. Sampling it before that is what made
+        // two windows of different sizes report identical table numbers.
+        var askedH = _tapeScroll.Size.Y;
+        GetTree().CreateTimer(1.0).Timeout += () =>
+        {
+            var laid = _tapeScroll.GetSize();
+            var rowsNow = laid.Y / (TapeRowPx + TapeRowGapPx);
+            GD.Print($"REVIEW-LAYOUT after a frame: scroll box {laid.X:F0}x{laid.Y:F0} " +
+                     $"= {rowsNow:F0} visible rows (asked {askedH:F0}), " +
+                     $"first column {((_tapeGrid.GetChild(0) as Control).GetSize().X):F0}px " +
+                     $"(floor {TapeColWpx[0]}), card {_tapeDialog.Size.X}x{_tapeDialog.Size.Y}");
+            // The selection, tested the way a hand clicks it: the row's own
+            // Button is pressed, so the highlight path and the "Open becomes
+            // enabled" path run exactly as the operator's click runs them.
+            if (_testPicker && _rowNames.Count > 1 && _tapeGrid.GetChildCount() > TapeCols * 2)
+            {
+                var cell = (_tapeGrid.GetChild(TapeCols + TapeCols) as Button);
+                PickRow(TapeDir() + "/" + _rowNames[1], cell);
+            }
+        };
+    }
+
+    /// <summary>Greedy wrap on word boundaries at `cols` characters. The width is
+    /// in CHARACTERS, not pixels: a Label that wraps itself reports a minimum
+    /// size, and a Window sizes itself to its content - so self-wrapping is how
+    /// one long description turned into a 2690 px card instead of the table's
+    /// 1080 px.</summary>
+    private static string WrapLines(string s, int cols)
+    {
+        var lines = new List<string>();
+        var line = "";
+        foreach (var word in s.Split(" "))
+        {
+            if (line.Length == 0) { line = word; continue; }
+            if (line.Length + 1 + word.Length > cols)
+            {
+                lines.Add(line);
+                line = word;
+            }
+            else
+                line += " " + word;
+        }
+        if (line.Length > 0) lines.Add(line);
+        return String.Join("\n", lines);
     }
 
     private void ReviewRunSelect(string path)
     {
         GD.Print($"REVIEW-RUN selected {path}");
-        _tapePanel.Visible = false;   // the choice closes the dialog
+        _tapeDialog.Hide();            // the confirmed choice closes the modal
+        _pendingTape = "";             // and the selection is spent
+        _lastPress.Clear();
+        if (_okBtn != null) _okBtn.Disabled = true;
         // A new run is a new tape: reload, rewind, and re-point the camera.
         // The window itself survives - it is long-lived, the run is not.
         // On a LIVE window this is also the source switch: from now on the
@@ -1605,6 +2271,41 @@ public partial class MapRenderer : Node2D
         // scale), and a stale one left the marker lane floating over the map.
         if (_hudLayer != null && GetViewport().GetVisibleRect().Size != _hudBuiltAt)
             RebuildReviewHud();
+        // The DIALOG can be resized on its own (Godot's Window edge drag), and
+        // a window is allowed to change what it shows: the table is measured
+        // from the card, so a new card size is a new layout - the columns spread
+        // or shrink evenly and the middle band grows. Nothing about a Window's
+        // resize is bound in this SDK (measured: no `window_resize` signal, no
+        // handle-bar helper, no border-size accessor on the C# side), so the
+        // card's size is watched here - the same shape as the viewport check
+        // above, which is how a resized game window rebuilds the HUD.
+        if (_tapeDialog != null && _tapeDialog.IsVisible()
+            && (_tapeDialog.Size.X != _laidCardW || _tapeDialog.Size.Y != _laidCardH))
+        {
+            // The operator dragged the dialog's own edge: Godot moved the window,
+            // the table has to follow it.
+            GD.Print($"REVIEW-RESIZE dialog to {_tapeDialog.Size.X}x{_tapeDialog.Size.Y}: " +
+                     $"re-measured");
+            var dragged = _tapeDialog.Size;
+            _laidCardW = dragged.X;
+            _laidCardH = dragged.Y;
+            ReflowTable("dialog dragged");
+        }
+        if (_tapeDialog != null && _tapeDialog.IsVisible()
+            && GetViewport().GetVisibleRect().Size != _dialogBuiltAtVp)
+        {
+            // The GAME window was resized while the dialog was open: the card is
+            // a third of the window, so it is re-derived - this is the same rule
+            // the open path uses, through DialogCardFor.
+            var vp = GetViewport().GetVisibleRect().Size;
+            _dialogBuiltAtVp = vp;
+            var card = DialogCardFor(vp.X, vp.Y);
+            GD.Print($"REVIEW-RESIZE window to {vp.X:F0}x{vp.Y:F0}: card {card.X}x{card.Y}");
+            _tapeDialog.Size = card;
+            _laidCardW = card.X;
+            _laidCardH = card.Y;
+            ReflowTable("game window resized");
+        }
         // The instrument fades away while the pointer rests (see BarIdle) -
         // asked for every frame, before the early return below, because a
         // faded bar must come back even when no tape is loaded.
