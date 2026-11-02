@@ -311,6 +311,29 @@ public class Car
     /// that one is still ahead of me on the same segment - no timer, no magic
     /// distance. PassUid = -1 means no commitment.</summary>
     public int PassUid { get; internal set; } = -1;
+    /// <summary>docs/DRIVING_MANEUVERS.md §9, R37 - the driver's own intent:
+    /// "I want to pass the car I am sitting behind". Set ONCE per approach by
+    /// this car's own driver model (as §1b's DecideParkStyle decides once) and
+    /// cleared when this car's own pass completed. It is a driver decision, not
+    /// a measurement: the tractor behind a tractor may physically be able to
+    /// pass and states nothing, and the car behind IT is free (§9 Case B).
+    /// The car behind reads this one boolean instead of re-deriving the whole
+    /// queue - that is the point of the flag (R20: one decision per car), and
+    /// it is distinct from PassUid (the commitment, during) and OvertakeShiftM
+    /// (the metres): intent (before) → commitment (during) → request (metres).</summary>
+    public bool OvertakeIntent { get; internal set; }
+    /// <summary>The queue leader (nearest car ahead of me IN MY LANE) this intent
+    /// was decided for, so the decision is not made twice while that one is
+    /// still my leader - a new leader is a new approach. -1 = no intent held.</summary>
+    public int IntentWithUid { get; internal set; } = -1;
+    /// <summary>The intent as it was last RECORDED. R20: one decision per car,
+    /// so the log carries the decision when it CHANGES - a driver who reads the
+    /// same leader again at the next tick does not get to say "I want to pass"
+    /// sixty times a second, and a driver who decides NOT to pass says that once
+    /// too, so a queue can be graded on both halves of the decision (F1 of
+    /// tests/overtake_order_check.py cannot tell a silent car from a declining
+    /// one).</summary>
+    public bool OvertakeIntentLog { get; internal set; }
     public int PassSegIdx { get; internal set; } = -1;
     public double PassProgress { get; internal set; } = -1.0;   // 0..1 along PassSegIdx
     public double PassShiftM { get; internal set; } = 0.0;      // metres borrowed
