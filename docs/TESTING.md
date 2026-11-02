@@ -903,12 +903,25 @@ Consequences of putting them there, all deliberate:
 - **C# unit tests** (`DrivingGame.Sim.Tests/`, headless xunit - run these
   first after a change):
   ```bash
-  dotnet test DrivingGame.Sim.Tests/                    # 91 pass / 2 skip
+  dotnet test DrivingGame.Sim.Tests/                    # 171 pass / 2 skip (measured 2026-11-02)
   dotnet test DrivingGame.Sim.Tests/ --filter FullyQualifiedName~CollisionTests
   dotnet test DrivingGame.Sim.Tests/ --filter "FullyQualifiedName~CrossingStress"
+  dotnet test DrivingGame.Sim.Tests/ --logger "console;verbosity=normal" \
+        --filter "FullyQualifiedName~BayChoiceTests."     # names the tests that ran
   ```
+  A test method needs a marker — `[Fact]` on a plain one, `[Theory]` plus one
+  `[InlineData(value)]` per case for a parameterised one (C# 14's built-in
+  testing attributes; `[Test]` is not one of them and trips a compile error,
+  which is why the compiler is the oracle here). **Without the marker the
+  method compiles and contributes nothing**: the suite total does not move and
+  a targeted run answers `No test matches the given testcase filter`, which
+  reads like a wrong filter. `FullyQualifiedName~ClassOrMethod` is the filter
+  syntax — a bare class name (`--filter BayChoiceTests`) finds nothing even
+  when the class is present, so a miss is never evidence about the test.
   Suites: `RacelineReferenceTests` (the banded solver + corridor against the
   golden fixture `data/raceline_reference/basic.json`), `BicycleNavTests`
+  (straight/corner/dead-end park/flag park/U-turn driven at 60 Hz),
+  `BayChoiceTests` (§1c tier 1 — which bay a car may use, by its own box),
   (straight/corner/dead-end park/flag park/U-turn driven at 60 Hz),
   `SafetySystemsTests` (obstacle placement + alignment, contact stop,
   layout save/load, LaneGuard, PhysicsValidator), `CollisionTests`

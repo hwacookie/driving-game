@@ -64,6 +64,19 @@ public sealed partial class BicycleNav
     /// the centimetres a driver leaves to a wing mirror when threading between two
     /// cars that are not going to move.</summary>
     internal const double PARK_NEIGHBOUR_CLEAR_M = 0.25;
+    /// <summary>§1c tier 1 (owner decision, 2026-11-02): the free space along the
+    /// road — gap length minus THIS car's own length — that makes a gap a bay.
+    /// A SUM: the split fore/aft is free, 0.30/0.70 is as good as 0.50/0.50.
+    /// This is not PARK_NEIGHBOUR_CLEAR_M and must not be merged with it: that
+    /// one pads a box while planning and executing, this one decides whether a
+    /// bay exists at all, and the rest pose keeps a third number (0.20 m at
+    /// each end). One constant for all three is what makes a legal shuffle look
+    /// impossible to a plan while the executor would allow it.</summary>
+    internal const double PARK_BAY_MIN_FREE_M = 1.00;
+    /// <summary>The comparison tolerance, not a comfort margin: the graded case
+    /// sits EXACTLY on the rule (a 5.40 m bay, a 4.40 m body, free = 1.00 m),
+    /// so a bare `>=` turns an accepted bay into a refusal by float noise.</summary>
+    internal const double PARK_BAY_FREE_EPS_M = 1e-6;
 
     private double _parkStallT;
     private double _pkTravelM;
@@ -170,6 +183,40 @@ public sealed partial class BicycleNav
             }
         }
         return true;
+    }
+
+    /// <summary>§1c tier 1 — which bay a car may use (owner decision, 2026-11-02).
+    ///
+    /// A bay is a gap between two parked cars, and it is a bay FOR THIS CAR when
+    /// the free space along the road — the gap minus this car's own length —
+    /// reaches PARK_BAY_MIN_FREE_M. The free space is a SUM: the split fore/aft
+    /// is free (0.30/0.70 is as good as 0.50/0.50), because what the manoeuvre
+    /// needs is length to swing in and it can spend that length on either side.
+    /// What decides is the car's OWN box, so two models disagree about the same
+    /// gap — that disagreement is the point of the rule, and a test whose answer
+    /// does not move with the vehicle is not testing it.
+    ///
+    /// The row is scanned in driving order and the FIRST gap that fits wins: a
+    /// driver sits slow alongside the row and takes the first opening his own
+    /// car fits. `flanks` must already be the cars standing on OUR side of the
+    /// road — this function knows centres and lengths along the driving
+    /// direction only, no road. The open kerb past the end of the row is not a
+    /// gap between two cars, so it is the caller's decision, not this one.</summary>
+    public static (double RearU, double FrontU, double FreeM)? PickKerbBay(
+        double carLengthM, List<(double CentreU, double LengthM)> flanks)
+    {
+        if (flanks is null || flanks.Count < 2) return null;
+        var by = new List<(double CentreU, double LengthM)>(flanks);
+        by.Sort((a, b) => a.CentreU.CompareTo(b.CentreU));
+        for (int i = 0; i + 1 < by.Count; i++)
+        {
+            double rearEnd = by[i].CentreU + by[i].LengthM / 2.0;
+            double frontEnd = by[i + 1].CentreU - by[i + 1].LengthM / 2.0;
+            double free = frontEnd - rearEnd - carLengthM;
+            if (free + PARK_BAY_FREE_EPS_M >= PARK_BAY_MIN_FREE_M)
+                return (rearEnd, frontEnd, free);
+        }
+        return null;
     }
 
     /// <summary>The parked cars beside the bay, expressed in the tuck's OWN road frame
