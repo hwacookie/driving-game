@@ -326,6 +326,14 @@ public class Car
     /// was decided for, so the decision is not made twice while that one is
     /// still my leader - a new leader is a new approach. -1 = no intent held.</summary>
     public int IntentWithUid { get; internal set; } = -1;
+    /// <summary>The intent as it was last RECORDED. R20: one decision per car,
+    /// so the log carries the decision when it CHANGES - a driver who reads the
+    /// same leader again at the next tick does not get to say "I want to pass"
+    /// sixty times a second, and a driver who decides NOT to pass says that once
+    /// too, so a queue can be graded on both halves of the decision (F1 of
+    /// tests/overtake_order_check.py cannot tell a silent car from a declining
+    /// one).</summary>
+    public bool OvertakeIntentLog { get; internal set; }
     public int PassSegIdx { get; internal set; } = -1;
     public double PassProgress { get; internal set; } = -1.0;   // 0..1 along PassSegIdx
     public double PassShiftM { get; internal set; } = 0.0;      // metres borrowed

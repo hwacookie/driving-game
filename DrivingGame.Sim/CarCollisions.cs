@@ -1047,8 +1047,13 @@ public static class CarCollisions
                     continue;
                 double needM = touchM + SideClearM(c.Speed) - Math.Abs(lat);
                 // R37: whoever is ahead of me in my lane is my queue leader, even
-                // when passing it would never be worth it.
-                if (Math.Abs(lat) <= touchM && along < leadAlongM)
+                // when passing it would never be worth it. The band is the
+                // CARRIAGEWAY, not my own half: a car that is mid-pass has left
+                // my line, and it is still the car I sit behind - its side drift
+                // is part of the one manoeuvre (docs §9, "the obstruction is a
+                // train"). What I actually pass is decided below, not here.
+                double bandM = Math.Max(segC32.Width * 0.5, touchM);
+                if (Math.Abs(lat) <= bandM && along < leadAlongM)
                 {
                     leadAlongM = along;
                     leaderUid32 = o.Uid;
@@ -1170,14 +1175,23 @@ public static class CarCollisions
             if (leaderUid32 < 0)
             {
                 c.OvertakeIntent = false; c.IntentWithUid = -1;
+                c.OvertakeIntentLog = false;
             }
             else if (c.IntentWithUid != leaderUid32)
             {
-                c.OvertakeIntent = wantM > 0.0;
+                bool intent = wantM > 0.0;
+                c.OvertakeIntent = intent;
                 c.IntentWithUid = leaderUid32;
-                if (c.OvertakeIntent)
-                    c.RecordDecision(simTime,
-                        $"[R37] intent: I want to pass car {leaderUid32} ahead");
+                // R20: the decision is recorded when it CHANGES, both ways -
+                // a car that declines is not a silent car, and a queue check
+                // has to tell "not asked" from "asked and declined". The
+                // surrounding branch already runs once per new leader, so this
+                // is one line per approach, not one per tick.
+                c.OvertakeIntentLog = intent;
+                c.RecordDecision(simTime,
+                    (intent ? "[R37] intent: I want to pass "
+                            : "[R37] intent: no pass wanted from ")
+                    + $"car {leaderUid32} ahead");
             }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;

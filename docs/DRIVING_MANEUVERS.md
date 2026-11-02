@@ -15,6 +15,14 @@
 > **R38** (a pass may not begin or continue at a crossing). Both are
 > *[proposed]*, live only here, and [§9](#9-overtaking-a-slow-vehicle-a-queue-behind-an-obstruction)
 > is their specification.
+>
+> **Changed 2026-11-03 (issue #73, branch `fix-73-over-taking-order`):** **R37**
+> and **R39** are in the code now - their entries carry no status tag, and
+> §9's "What exists now (#73)" paragraph names the fields, the log lines and
+> the measured numbers. **R38** is still *[proposed]*: the one rule of the three
+> with no code. The **intent decision itself** is still fed by R32's obstruction
+> test, so §9 Case B (two tractors, the rear one not wanting to pass) is NOT
+> honoured yet - §9's open list says exactly which part that is.
 
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
@@ -1134,8 +1142,7 @@ break** and the **measurements that show whether it does**.
   planned line and not a lateral impulse. Scenarios #17 `park_block_overtake`
   and #19 `slow_pass_overtake`; design + measurements:
   [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md) §5, §7d-§7i.
-- **R37 Overtake order — a queue passes front-first** *(maneuver)*
-  *[proposed]* — when several cars sit behind one slow vehicle, **only the one
+- **R37 Overtake order — a queue passes front-first** *(maneuver)* — when several cars sit behind one slow vehicle, **only the one
   nearest to it may begin its pass**; a car further back does not start its own
   pass while the car it follows has an overtake intent that is not finished yet.
   Binding owner decision (2026-11-02): the order is **strict** — one car passes
@@ -1162,8 +1169,7 @@ break** and the **measurements that show whether it does**.
   gate, R5's right of way). Where the centreline — and with it "the other lane" —
   does not exist, no pass may be built across.
 
-- **R39 The lane's own driver keeps its way** *(crossing of lanes)*
-  *[proposed]* — a borrower may never make the owner of the other lane give up
+- **R39 The lane's own driver keeps its way** *(crossing of lanes)* — a borrower may never make the owner of the other lane give up
   that lane: oncoming traffic has the right of way here (§8's premise: "drivable"
   is not permission), so `r32#passive` as a **cap at 0** is the wrong shape for
   that party — it is what keeps a car standing where nothing holds it. What the
@@ -1408,43 +1414,74 @@ every pose and every decision line, as §1c's grading paragraph says):
 A test whose expected record does not change between A and B is not testing
 this rule — the same sentence §1c writes for its bay row.
 
-### Not in the code today
+### What exists now (#73, 2026-11-03)
 
-- **no intent exists.** `Car.cs` has the request (`OvertakeShiftM`) and the
-  commitment (`PassUid` … `PassY`); there is nothing before them. R37's flag is
-  the new field, and it belongs to the car, not to the queue — no queue object
-  is introduced anywhere in the sim, and R26's claim is per car for the same
-  reason.
-- **a same-direction pair is not contested at all.** R32's pinch loop asks only
-  about oncoming cars (`if (h2 < 150.0) continue;  // not oncoming`), so today
-  all ten cars of case A would ask for the same borrow in the same substep and
-  the corridor (`CarCollisions` v1) is the only thing keeping them apart —
-  which is a brake, not an order. Nothing would record the order case A states.
-- **the window follows one car, not the row.** `PassUid`, `PassX`, `PassY`,
-  `PassLengthM` name a single obstruction, and `CarCollisions` picks it by
-  largest lateral need (`if (needM > wantM)`) — not by position, so for a
-  same-width pair the pick is whatever the broadphase grid hands first. `PassPending`
-  measures `PassAlongM(c) > PassOutM(c)` and R32's pinch zone reaches
-  `along + c.LengthM + LookAheadForSpeed(o2.Speed)` from that one car. So case C
-  is wrong against today's code **twice**: no order (above) and a window that
-  ends mid-row.
-- **the mirror of the obstruction test does not exist.** What the code has is
-  "*may* I pass this" — `o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0)`
-  and its parked case. "*Do I want to* pass my queue leader" is the same two
-  speeds and one different question, whose answer is a driver preference, not a
-  measurement. Where that preference comes from (a speed gain, a wait cost like
-  R16's patience, a minimum absolute gain in m/s) is a decision of its own and
-  must not be guessed here — it belongs in its own issue.
-- **nothing forbids a pass at a crossing** (R38). The paint model for the zone
+Branch `fix-73-over-taking-order`, `DrivingGame.Sim/Car.cs` + `CarCollisions.cs`:
+
+- **the intent flag exists.** `Car.OvertakeIntent`, `Car.IntentWithUid` (the
+  leader that decision was made for, so the decision runs once per approach,
+  not per tick) and `Car.OvertakeIntentLog` (a *declined* pass is a record,
+  not silence). The log lines are `[R37] intent: I want to pass car N ahead` /
+  `[R37] intent: no pass wanted from car N ahead`, and the order gate answers
+  `[R37] car N ahead has the turn - waiting for it, not for a gap`.
+- **the queue leader is the nearest same-direction car ahead in this
+  carriageway, whatever it is doing.** The band for "who is my leader" is the
+  carriageway half-width, not my own half: a leader that is mid-borrow is still
+  the car I sit behind — §9's "the obstruction is a train" applies to my leader
+  as well as to my target. The band for what I actually *pass* is unchanged.
+- **the window is measured past the front of the row.** `frontAlongM`,
+  `frontX32/frontY32`, `frontLen32` and the negotiation resource reach past the
+  front car, so the pinch is asked for the whole row and the far half of the
+  window is observed from there — the accepted observation cheat of §9, at the
+  cost §9 states for it.
+- **the check is visible.** While an intent is held and the plan is not
+  feasible the car creeps toward the left edge of its **own** lane (the request
+  is capped by the room in my own lane: `LANE_CENTRE_MARGIN_M` + half width off
+  the centreline) and the left blinker is on before any commitment. Measured on
+  scenario 21: `[R17] signal left before lane change` at step 125 while the car
+  still sits at x = 98.250 (its nominal line); `[R32] obstruction ahead -
+  borrowing` at step 366 — 4.0 s of signalled check, where the old code had
+  `bl=0` through all 5.6 s of a standstill.
+- **an aborted pass is driven, not stood.** The blocked branch no longer caps
+  the car at 0. `r32#passive` survives only as the kerb clamp of "R32 creep"
+  (`CarCollisions` v1: `if (vPass < 1.0) vPass = 1.0;  // a creep, never a hold`).
+  Measured on the queue check below: the longest standstill any queue member
+  had was 0.2 s, and the only cap near 0 is `avoid#N` — R7 holding a car behind
+  the crawler, which is a crawl, not a wait.
+- **R39's owner path exists.** `[R39] car N is passing in my lane - I own it:
+  room on the right, the following rule's brake`: a guest in my lane is not an
+  obstruction to me, my duty is room on my own side plus the ordinary following
+  brake — no cap of 0 is put on the owner of a lane because a car is passing.
+
+Measured on `tests/overtake_order_check.py` — a tractor at 10 km/h and four
+cars at 80 km/h behind it at 18 m gaps on `straight_m→straight_s`, 45 s of
+sim, the script grades the four facts §9 states for case A:
+
+    F1 every queue car states a decision:     ok  4/4
+    F2 pass starts in queue order:            ok  3 of 4 started, order 2 -> 3 -> 5
+    F3 never two cars in the other lane:      ok  worst 1, deepest 1.41 m past the centreline
+    F4 no queue car stands longer than 2 s:   ok  worst 0.2 s
+
+The script is a QA check in the shape of `tests/car_line_check.py` (it drives
+the live host over the REST API and grades from `/car/{uid}/decisions`), not a
+numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
+18 m is what fits.
+
+### Still not in the code
+
+- **R38 — nothing forbids a pass at a crossing.** The paint model for the zone
   exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, the same half-span the
-  12 m junction easing of §4/§7 already uses), the map fact does not: `overtaking=no`
-  is read nowhere in the importer, so R38 is geometry-only first.
-- **nothing signals before a pass.** `[R17] signal left before lane change` fires
-  only with the commit (`CarCollisions` gives the car a cap and the nav answers
-  with `LaneChangeSignal`), so the waiting phase is unsignalled (measured: `bl=0`
-  through the whole 5.6 s of it) — and there is no abort path at all: the blocked
-  branch caps 0 and clears the shift, it never says "give up", it says "wait".
-- **no scenario stages a queue.** 17/18/19 put one obstruction and one passing
-  car on `straight_n→straight_m`; case A would be the first queue the suite has
-  and would need the map's stretch long enough for ten cars to hold their turn
-  without hitting the node at either end.
+  12 m junction easing of §4/§7 already uses), the map fact does not:
+  `overtaking=no` is read nowhere in the importer, so R38 is geometry-only first.
+- **the intent *decision* is R32's obstruction test, not a driver preference.**
+  `intent = wantM > 0.0` — "the car ahead of me in my lane is stopped or
+  crawling" (`o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0)` and its
+  parked case) is what sets the flag today. What the code has is *may* I pass
+  this; *do I want to* is a driver preference, not a measurement, so **§9 Case B
+  (a tractor behind a tractor that does not want to pass) is not honoured**:
+  today that tractor would set the flag and the car behind it would never get
+  its turn. Where the preference comes from (a speed gain, a wait cost like
+  R16's patience, a minimum absolute gain in m/s) is a decision of its own;
+  the flag is what carries it, and it belongs in its own issue.
+- **no queue scenario in the numbered suite** — the QA script above is the
+  check today; 17/18/19/21 still stage one obstruction and one passing car.
