@@ -114,6 +114,7 @@ public partial class MapRenderer : Node2D
     private bool _testPan;
     private bool _testJog;           // --test-jog: hold '.' and watch the jog, then let go
     private bool _testPlay;          // --test-play: press ▶, let the motion log time it
+    private bool _testPicker;        // --test-picker: open the tape modal, shoot it
     /// <summary>A/B switch for the 2026-10-25 stutter measurement:
     /// --no-play-lerp paints the raw recorded substep while still advancing
     /// the clock, i.e. exactly what ▶ play did before the continuous cursor.
@@ -773,6 +774,8 @@ public partial class MapRenderer : Node2D
                 _ignoreMapHash = true;
             else if (args[i] == "--test-play")
                 _testPlay = true;
+            else if (args[i] == "--test-picker")
+                _testPicker = true;
             else if (args[i] == "--no-play-lerp")
                 _noPlayLerp = true;
             else if (args[i] == "--test-minimap-pan" && i + 2 < args.Length)
@@ -1186,6 +1189,20 @@ public partial class MapRenderer : Node2D
                     GD.Print($"TEST-JOG +2.0s after release cursor={_cursor}");
                     if (_screenshotPath != null) SaveShot(_screenshotPath);
                 };
+            };
+        }
+
+        if (_testPicker)
+        {
+            // Dev hook (same family as --test-play and --test-jog): open the
+            // "open a tape" modal a moment after start and shoot it, so the
+            // table's shape - rows listed, whether the box actually needed a
+            // scrollbar, and where the modal landed - is a line in the log plus
+            // a PNG, not an eye on a window someone has to click in.
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                ShowTapeDialog();
+                if (_screenshotPath != null) SaveShot(_screenshotPath);
             };
         }
 
