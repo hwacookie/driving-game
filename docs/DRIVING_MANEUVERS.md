@@ -9,6 +9,12 @@
 > a number attached, not a behaviour". Status tags were re-checked against
 > `DrivingGame.Sim/` on 2026-10-23; a tag is a claim about the code, so change
 > it together with the code, not afterwards.
+>
+> **Added 2026-11-02:** the over-taking rules the owner decision of that date
+> started - **R37** (a queue passes front-first, one intent flag per car) and
+> **R38** (a pass may not begin or continue at a crossing). Both are
+> *[proposed]*, live only here, and [§9](#9-overtaking-a-slow-vehicle-a-queue-behind-an-obstruction)
+> is their specification.
 
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
@@ -948,6 +954,11 @@ break** and the **measurements that show whether it does**.
     — the same one R17 uses for a merge, not a new constant.
   - **out** at `obstruction + (own length + obstruction length)/2 + clearance`,
     the first point where the car's body has actually cleared it.
+    *(extended 2026-11-02, owner decision: when my lane holds a row of slow
+    vehicles, `obstruction` is the **front** of the row the plan clears, not its
+    nearest car — [§9](#9-overtaking-a-slow-vehicle-a-queue-behind-an-obstruction)
+    "The obstruction is a train". Today's code follows one car, chosen by largest
+    lateral need rather than by position, so a pass over a row ends mid-row.)*
   Outside that window the car belongs to its own lane, and the nav must **blend
   the shift in and out over the window** rather than lay it down from wherever
   the request first fired. The lane guard counts **metres driven left of the
@@ -1037,6 +1048,10 @@ break** and the **measurements that show whether it does**.
   out **and** before re-merging; keep adequate lateral distance (≥ 1.5 m
   inner / 2 m outer); re-merge right as soon as possible; do not impede the
   overtaken car. The **overtaken** car must not increase its speed.
+  This paragraph names two things it never made decidable — **where** a pass
+  is forbidden, and **which car** of a queue may start one. Those are R38 and
+  R37 and live in [§9](#9-overtaking-a-slow-vehicle-a-queue-behind-an-obstruction);
+  R22 stays the StVO summary.
 - **R8 Lateral avoidance** *(last resort)* *[partial]* — steer slightly to
   the side to get around a blocker, instead of requiring the other car to
   move first.
@@ -1119,6 +1134,34 @@ break** and the **measurements that show whether it does**.
   planned line and not a lateral impulse. Scenarios #17 `park_block_overtake`
   and #19 `slow_pass_overtake`; design + measurements:
   [RIGHT_OF_WAY_NEGOTIATION.md](RIGHT_OF_WAY_NEGOTIATION.md) §5, §7d-§7i.
+- **R37 Overtake order — a queue passes front-first** *(maneuver)*
+  *[proposed]* — when several cars sit behind one slow vehicle, **only the one
+  nearest to it may begin its pass**; a car further back does not start its own
+  pass while the car it follows has an overtake intent that is not finished yet.
+  Binding owner decision (2026-11-02): the order is **strict** — one car passes
+  at a time, front-first, never "overtaking from behind". The rule is **not**
+  a geometric test ("the car ahead of me is slow"): a driver who does not want
+  to pass (the tractor behind a tractor, §9 Case B) sets nothing and the car
+  behind it is free. So the rule needs **per-car driver intent** — one boolean,
+  `Car.OvertakeIntent`, set **once per approach** by that car's own driver model
+  (as §1b's `DecideParkStyle` is decided once) and cleared when that car's own
+  pass completed. A follower **reads** the flag of the single car it follows:
+  the queue costs one read per car per step, no car reasons about a driver two
+  places ahead, and the decision is never made twice (R20's determinism and the
+  O(pairs) cost of `CarCollisions` both argue against re-deriving it).
+  The intent is not only a state, it has a **visible act**: while it is set and
+  the plan is still not feasible the car may come to the left edge of its **own**
+  lane and look down the oncoming one — bounded, right of the centreline, lateral
+  never forward (§9, "The check is a visible act"). A plan over a row of slow
+  vehicles is one object: its window ends past the **front** car of the row and
+  feasibility of that whole is judged before the car starts (§9).
+- **R38 A pass is not a crossing maneuver** *(crossing)* *[proposed]* — the
+  borrow may **not begin and not continue inside a crossing**: R36's window (its
+  `in` and `out` points) must lie wholly outside the box and outside the
+  approach whose lane another rule already decides (R3's commitment, R14's entry
+  gate, R5's right of way). Where the centreline — and with it "the other lane" —
+  does not exist, no pass may be built across.
+
 ### Meta — system (not a traffic rule)
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
@@ -1137,3 +1180,204 @@ break** and the **measurements that show whether it does**.
   cap key (`passage#N`, `r32#N`) on the conceding car. Deterministic tie-breaks are uid-based (no wall-clock or run
   randomness); per-car jitter (e.g. `ReleaseHoldTicks`) is a pure function of
   the uid, so a replay stays reproducible.
+
+---
+
+## 9. Overtaking a Slow Vehicle (a Queue Behind an Obstruction)
+
+**Trigger:** a car is in my lane ahead of me and much slower than my own route
+wants (a crawler — a tractor, a bus that cannot turn). §6 and R32 already own
+*whether* I may go around it and R36 the *length* of the borrow; this chapter
+owns the one thing they do not decide: **which car of a queue behind that
+vehicle gets to go when**, and where no car may go at all.
+
+**Status 2026-11-02 (binding owner decision):** the order is **strict** — the
+car nearest the obstruction passes first, one at a time, and every car behind it
+waits for its turn. The *chained* order (the next car starts while the one
+ahead is still mid-pass — what a convoy behind a tractor does on a country road)
+is **not** chosen today; the flag described below would carry it and only R37's
+release condition would move.
+
+### The three ingredients
+
+| # | Ingredient | Who decides it | Status |
+|---|-----------|----------------|--------|
+| **1. Intent** | "I want to pass the car I am sitting behind" | that car's own driver model, **once per approach** — a decision of the driver, not of the geometry | new: the flag R37 reads |
+| **2. Order** | whose turn it is (R37) | the queue, by reading one flag | new, strict |
+| **3. Feasibility** | the pinch is clear, the line fits, the borrow minimal | R32 (the claim against oncoming traffic), R36 (the window), R1/R13 | already in the code |
+
+An intent that is not feasible is a **wait**, never a half-started pass: the
+flag says what the driver wants, R32/R36 say whether the road allows it, and
+neither borrows the other's word. That order is the one §8 states for R34
+("feasibility is judged BEFORE the award, so a role can never buy an
+impossible maneuver"), and Tier 0 (R1) stays the post-filter over both.
+
+### The obstruction is a train, not one car
+
+An overtake has one **target** — the car it sits behind, the one whose flag
+R37 reads. It does not have one **obstruction**. When my lane holds a row of
+slow vehicles (`t1` ← `t2` ← me), a plan that passes only the near one and
+returns between the two is legal, and so is one that clears the whole row in
+one move. What is forbidden is choosing **during** the pass which of the two
+it is. So the row is one object for the whole length of the plan:
+
+- the lateral need is the **max** over every car of the row the plan passes
+  (R32 already takes a max over what is in my line);
+- R36's `out` point is measured **past the front car the plan clears** — its
+  `obstruction` is the front of the row. The plan is long, and a long plan has
+  to be seen before it is made;
+- the obligation to keep the borrowed lane clear (R32's claim, R2's brake, R7's
+  look-ahead) spans the **whole** window, not the near car's share of it;
+- feasibility of the whole is judged **before** the car starts it — §8 states
+  that order for R34 ("feasibility is judged BEFORE the award"), and here it is
+  the whole point: if the row plus the oncoming traffic does not fit, there is
+  **no attempt**, the car stays behind the train. A plan is never discovered
+  too short in the middle of a borrow.
+
+### The check is a visible act (the intent's picture)
+
+A driver whose intent is set and whose plan does not fit yet does not sit flat
+in its lane and wait — it comes **toward** the overtaking lane, slowly, so it
+can look down the oncoming lane and see whether the plan would fit. That is the
+picture of "I want to pass, but I have to look first", and it is legal only
+inside these bounds:
+
+- **right of the centreline.** Bounded by the centreline less half my width,
+  with the same margin §4 asks of its corridor (`Config.LANE_CENTRE_MARGIN_M`
+  0.5 m). Crossing the line **is** the commitment, and a commitment belongs to
+  a plan that was judged feasible.
+- **clean by construction:** R36 counts **metres driven left of the centreline**
+  outside an open window, so a shift that stays right of it is not a borrow it
+  could be charged for; R33 asks for a reason on a **side** change and this is
+  not one. The creep needs no exception and creates no error.
+- **lateral, never forward.** R9 forbids creeping forward ambiguously — forward
+  creep toward a train reads "maybe I will pass, maybe not", exactly what R9
+  says other road users must be able to tell apart. Sitting at the left edge of
+  its lane and asking the question is legible; easing off the brake is not.
+- **it may not test the lane by entering it.** The check must not spend the
+  resource it is checking for — that is R36's rule ("a manoeuvre with a
+  beginning and an end") read from the other side, and the reason the
+  preparation and the borrow are different acts.
+- **the check itself is arithmetic, the creep is what makes it legible.** The sim
+  has no sight model — a grep for visibility/occlusion in `DrivingGame.Sim/`
+  returns the renderer and its draw order, not a decision. What "looking down
+  the oncoming lane" means today is R7's stopping distance (`LookAheadForSpeed`)
+  and R32's claim over the pinch. So the creep is the *picture* of the intent,
+  the test stays the arithmetic that R32/R36/R2 already run.
+
+### Why the intent has to be a flag
+
+The owner's rule (2026-11-02) — *a driver anticipates that the car in front of it
+probably wants to pass too, and does not start its own pass then* — is not a
+prediction
+in the sim. It is a fact the leader already owns, read by the follower. Three
+consequences:
+
+- **one decision per car, not per pair.** Ten cars behind a tractor ask their
+  own intent once and each reads one boolean. Without the flag, the same question
+  is re-derived for every pair of the queue, which is what R20 (determinism,
+  one decision per car) and the cost model of `CarCollisions` argue against.
+- **the chain stops at a driver that does not want to pass.** The flag is
+  *intent*, so a car whose leader has none is free — and a geometric test
+  ("the car ahead of me is slow") would block it wrongly. Case B below is the
+  proof that the two questions differ.
+- **the flag never means "I am passing".** That already exists and must not be
+  duplicated. Three objects, three moments:
+  `Car.OvertakeIntent` (before — the driver wants it) → `Car.PassUid` with
+  `PassSegIdx`, `PassProgress`, `PassShiftM`, `PassLengthM`, `PassX`, `PassY`
+  (during — the commitment) → `Car.OvertakeShiftM` (the metres). R37 reads the
+  first, R32 the other two; no consumer may substitute one for the next, the
+  same sentence §1c writes about its three clearances.
+
+### Lifecycle of the flag
+
+| Moment | Flag | Effect on the car behind |
+|--------|------|------------------------|
+| the driver decides to pass its leader | set | that car may **not** start its own pass |
+| waiting for the pinch — oncoming traffic owns it, R32's `r32#N` cap | still set | the follower stays blocked: a car that has not started still holds its turn |
+| the pass runs (R36's window open) | set | blocked |
+| the pass completed — back in own lane at R36's `out` point | **cleared** | the follower may start |
+
+The flag is cleared at exactly the moment the commitment already dies (`PassUid`
+→ -1), so the rule adds no timer and no distance of its own: R36's window
+ending **is** the pass ending.
+
+### Worked cases
+
+**A. A tractor and ten cars.** `t` at 10 km/h, `c1 … c10` behind it, all
+wanting 80 km/h. Every car sets its intent — each one's leader is slow, and
+that judgement belongs to it alone. Only **c1** may start: c2's leader is c1,
+intent set; c3's leader is c2, same, down the chain. Release: c2 starts when
+**c1's** pass completed, c3 when c2's did. The expected record is one sentence:
+*the order of the `[R37]` pass-start events equals the queue order, front-first.*
+No car "chooses" another one and no decision depends on a reason two cars ahead.
+
+**B. Two tractors and one car.** `t1` at 10 km/h ← `t2` at 12 km/h ← `c3`.
+`t2`'s driver does **not** want to pass `t1` (2 km/h more is not a pass, and
+that is R22's "at clearly higher speed"). `t2` sets nothing → `c3`'s leader has
+no intent → **`c3` may pass `t2`**, under R32/R36 unchanged. The pair in front
+stays in its lane and at its speed.
+
+**C. Same shape, intent present.** `t1` ← `t2` at 45 km/h (its driver wants to
+pass) ← `c3`. `t2` sets the flag, so `c3` waits until `t2` finished its pass of
+`t1`. `c3`'s own plan **may** cover both tractors — one row, one move — and
+then its window is measured past `t1`, the front of the row, and the obligation
+to keep the borrowed lane clear covers that whole length, judged **before** `c3`
+starts (and if it does not fit, `c3` does not start). It may equally plan to
+return between the two. What it must not do is start without a plan and find
+out mid-borrow which of the two it is getting past — that is the difference the
+two paragraphs above make decidable, not a note on style.
+
+### What a test states
+
+Five facts and one expected record, all readable from one run (the tape holds
+every pose and every decision line, as §1c's grading paragraph says):
+
+1. the **order** of `[R37]` pass-start events equals the queue order (case A);
+2. no car starts while its leader's intent is unfinished — measured as metres
+   driven left of the centreline outside an open R36 window, R36's own metric,
+   no new measurement invented;
+3. `t2` never leaves its lane and never changes speed (case B);
+4. `c3` passes `t2` (case B);
+5. a pass over the row returns **past its front car** (case C) — read with R36's
+   own metres-left-of-centreline, where a return crossing level with a tractor
+   is the mid-row bug this rule forbids. Still no new measurement.
+
+A test whose expected record does not change between A and B is not testing
+this rule — the same sentence §1c writes for its bay row.
+
+### Not in the code today
+
+- **no intent exists.** `Car.cs` has the request (`OvertakeShiftM`) and the
+  commitment (`PassUid` … `PassY`); there is nothing before them. R37's flag is
+  the new field, and it belongs to the car, not to the queue — no queue object
+  is introduced anywhere in the sim, and R26's claim is per car for the same
+  reason.
+- **a same-direction pair is not contested at all.** R32's pinch loop asks only
+  about oncoming cars (`if (h2 < 150.0) continue;  // not oncoming`), so today
+  all ten cars of case A would ask for the same borrow in the same substep and
+  the corridor (`CarCollisions` v1) is the only thing keeping them apart —
+  which is a brake, not an order. Nothing would record the order case A states.
+- **the window follows one car, not the row.** `PassUid`, `PassX`, `PassY`,
+  `PassLengthM` name a single obstruction, and `CarCollisions` picks it by
+  largest lateral need (`if (needM > wantM)`) — not by position, so for a
+  same-width pair the pick is whatever the broadphase grid hands first. `PassPending`
+  measures `PassAlongM(c) > PassOutM(c)` and R32's pinch zone reaches
+  `along + c.LengthM + LookAheadForSpeed(o2.Speed)` from that one car. So case C
+  is wrong against today's code **twice**: no order (above) and a window that
+  ends mid-row.
+- **the mirror of the obstruction test does not exist.** What the code has is
+  "*may* I pass this" — `o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0)`
+  and its parked case. "*Do I want to* pass my queue leader" is the same two
+  speeds and one different question, whose answer is a driver preference, not a
+  measurement. Where that preference comes from (a speed gain, a wait cost like
+  R16's patience, a minimum absolute gain in m/s) is a decision of its own and
+  must not be guessed here — it belongs in its own issue.
+- **nothing forbids a pass at a crossing** (R38). The paint model for the zone
+  exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, the same half-span the
+  12 m junction easing of §4/§7 already uses), the map fact does not: `overtaking=no`
+  is read nowhere in the importer, so R38 is geometry-only first.
+- **no scenario stages a queue.** 17/18/19 put one obstruction and one passing
+  car on `straight_n→straight_m`; case A would be the first queue the suite has
+  and would need the map's stretch long enough for ten cars to hold their turn
+  without hitting the node at either end.
