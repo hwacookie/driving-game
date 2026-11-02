@@ -1,4 +1,17 @@
 
+## The bay rule (owner decision, 2026-11-02)
+
+The rule for parking between other cars is §1c of
+[DRIVING_MANEUVERS.md](DRIVING_MANEUVERS.md) — three tiers over three
+moments: a bay exists when `free = gap − body length ≥ 1.00 m` (a SUM, the
+split over the ends is free), the moving car is bounded by **contact only**,
+and a finished park needs `each end ≥ 0.20 m` at rest. One clearance constant
+cannot carry that split, and `PARK_NEIGHBOUR_CLEAR_M` (0.25 m) as one box for
+plan and acceptance is what the sections below keep running into.
+
+Everything below is measurement history from 2026-10-31 — it predates that
+rule, and where it disagrees with it, §1c is the current text.
+
 ## Bay geometry and the accepted pose (measured 2026-10-31)
 
 Accepted end pose of a park: `|psi| <= PARK_ACCEPT_PSI_DEG` (7 deg) and

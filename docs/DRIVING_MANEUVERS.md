@@ -123,6 +123,77 @@ the curvature solver `min_curvature_offsets` must be SKIPPED (it minimises
 the second derivative of the offset profile and stretched a 35 m blend to
 ~180 m — a straight line is already optimal).
 
+### 1c. Parking in a bay — the three clearances (owner decision, 2026-11-02)
+
+Which bays exist and what a finished park is, held down BEFORE the execution
+is worked on. The shuffle through a tight row (§1b's back-in between two
+parked cars) is deliberately not built yet; this rule decides the bays and the
+finished pose, and it is written as three tiers because the three numbers live
+on three different moments. A single clearance constant is one box for all
+three — that is the grinding-contact symptom §1b describes, seen from the
+other side.
+
+| Tier | Over which moments | Rule |
+|------|--------------------|------|
+| **Bay capacity** — choosing a bay | before the manoeuvre, per candidate bay | `free = (gap − body length) ≥ 1.00 m`. A **sum**: the split over the two ends is free, 0.50/0.50, 0.30/0.70 and 0.70/0.30 are the same bay. |
+| **During the manoeuvre** — the moving car | every step | **contact only.** The body box may come to 0.05 m of a neighbour's box and may pass between them. It may not intersect them. A near miss is expected and legal — edging past a flank is what a shuffle is. |
+| **At rest** — the finished park | the final pose only | each end `≥ 0.20 m` **and** `free ≥ 1.00 m`. A car resting 0.10 m off a flank is not parked, however well the bay fit. |
+
+All three speak the two quantities the verdicts already print — the
+`bay_clearances_m` rear/front pair against the flanks' real boxes — so nothing
+new is measured to grade any of them.
+
+**Why three numbers.** `1.00 m` is the manoeuvre's room: the car needs length
+to swing in, and it can spend it on either side, so capacity is a sum and not
+a per-end bound. `0.20 m` at rest is a contact rule: a box may not be brought
+close enough to a neighbour to read as touching. `0.05 m` during the manoeuvre
+is the physical pass-by; refusing it is what makes a legal shuffle look
+impossible to a planner while the executor would allow it. §1b's note that
+"plan and envelope must speak ONE box" (`PARK_NEIGHBOUR_CLEAR_M`) keeps the
+plan and the veto agreeing with each other; it must not be extended to the
+acceptance — the rest pose keeps its own `0.20 m`, and a plan and a veto that
+share that number are both applying the wrong rule.
+
+**Comparison convention.** Capacity is `free + ε ≥ 1.00` with an explicit ε,
+not a bare `>=`: the graded case sits exactly on the rule (a 5.40 m bay, a
+4.40 m body → free = 1.00), and a float comparison without ε turns that
+accepted bay into a refusal.
+
+**Placement.** The finished car is **centred** in the bay. Centring is stated
+because the rule above does not determine a pose — any split of a legal sum is
+legal — and a test that accepts "any pose inside the band" cannot tell a car
+that parked nose-to-the-flank on purpose from one that drifted there. With
+the rule stated as centring, `each end ≥ 0.20 m` cannot fail on bay
+selection; it can only fail on a **pose** — which is what makes an off-centre
+park a graded failure instead of an invisible one.
+
+**Worked numbers** (the model this rule was designed against). Bodies: `mercedes_c220`
+4.40 × 1.80, `fiat_500` 3.14 × 1.71 (`Config.MODELS`). A row `p1 … p5` with
+bays built from the sedan plus slack 2.5 / 0.2 / 1.0 / 0.5 m, i.e. bays of
+**6.90, 4.60, 5.40, 4.90 m**:
+
+| bay | c220 (needs ≥ 5.40) | fiat (needs ≥ 4.14) |
+|-----|---------------------|----------------------|
+| 6.90 | ✓ (free 2.50) | ✓ |
+| 4.60 | ✗ (free 0.20) | ✓ (free 1.46) |
+| 5.40 | ✓ (free 1.00 — the rule's edge) | ✓ |
+| 4.90 | ✗ (free 0.50) | ✓ (free 0.76) |
+
+Five cars taking bays one at a time (a new car only appears once the previous
+one rests), pm1/pm2/pm4/pm5 c220, pm3 the Fiat, first bay that fits:
+
+`p1, pm1, p2, pm3, p3, pm2, p4, p5, pm4, pm5`
+
+The Fiat takes the 4.60 m bay the sedan had to refuse — the decision follows
+the car's own box, not a bay rule. With five identical sedans the last two
+bays are refused and the expected row is different; a test whose expected
+layout does not move with the vehicle is not testing this rule.
+
+**Grading.** All three tiers are readable from one run, because the tape
+records every pose: minimum clearance over the manoeuvre and contact count
+(tier 2), final clearances (tier 3), which bays were accepted at all (tier 1).
+A test states four facts and one expected row.
+
 ### Variant: Dead-end / route end
 
 Same maneuver as parking, without a target flag: the route ends at a real dead
