@@ -219,6 +219,44 @@ public sealed partial class BicycleNav
         return null;
     }
 
+    /// <summary>§1d (2026-11-03, owner decision) — the bay THIS CAR is claiming,
+    /// from where it stands. A gap is claimable only from beside it: the car's
+    /// own body must lie inside the mouth — its rear end past the front of the
+    /// parked car before it, its front end before the rear of the parked car
+    /// after it — so the centre window is [rearEnd + L/2, frontEnd − L/2]. That
+    /// window exists at all only when the gap fits the car, and its width is
+    /// exactly tier 1's `free` number: the claim is tier 1 evaluated at the one
+    /// position where it is legal to evaluate it, which is why this function is
+    /// not PickKerbBay with a filter bolted on — a car that is not beside a
+    /// mouth claims nothing, whatever would fit further along the row.
+    ///
+    /// The first mouth in driving order wins, as in tier 1: the first car past
+    /// the mouth takes it, and the order is the lane order, not a booking. The
+    /// boundary is inclusive under the same ε convention tier 1 states, so a
+    /// car exactly at the edge of a window is beside it. `flanks` is the same
+    /// list tier 1 takes: cars standing on this car's side, as centres and
+    /// lengths along the driving direction.</summary>
+    public static (double RearU, double FrontU, double FreeM)? ClaimBayBeside(
+        double carCentreU, double carLengthM, List<(double CentreU, double LengthM)> flanks)
+    {
+        if (flanks is null || flanks.Count < 2) return null;
+        var by = new List<(double CentreU, double LengthM)>(flanks);
+        by.Sort((a, b) => a.CentreU.CompareTo(b.CentreU));
+        for (int i = 0; i + 1 < by.Count; i++)
+        {
+            double rearEnd = by[i].CentreU + by[i].LengthM / 2.0;
+            double frontEnd = by[i + 1].CentreU - by[i + 1].LengthM / 2.0;
+            double free = frontEnd - rearEnd - carLengthM;
+            if (free + PARK_BAY_FREE_EPS_M < PARK_BAY_MIN_FREE_M) continue;
+            double hereRear = carCentreU - carLengthM / 2.0;
+            double hereFront = carCentreU + carLengthM / 2.0;
+            if (hereRear + PARK_BAY_FREE_EPS_M < rearEnd) continue;
+            if (hereFront - PARK_BAY_FREE_EPS_M > frontEnd) continue;
+            return (rearEnd, frontEnd, free);
+        }
+        return null;
+    }
+
     /// <summary>The parked cars beside the bay, expressed in the tuck's OWN road frame
     /// (U along from this car's rear axle, V lateral, Psi yaw relative to the road).
     /// null when the neighbourhood is unknown or empty.</summary>

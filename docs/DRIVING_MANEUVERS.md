@@ -243,6 +243,52 @@ records every pose: minimum clearance over the manoeuvre and contact count
 (tier 2), final clearances (tier 3), which bays were accepted at all (tier 1).
 A test states four facts and one expected row.
 
+### 1d. Which car may claim a bay (owner decision, 2026-11-03)
+
+§1c decides **which gaps are bays**. It does not decide which car gets one,
+and five cars driving at one row make that matter. The owner's rule: **a bay
+is claimable only from beside it, and the first car past the mouth takes it**
+— the claim is a position, not a booking.
+
+- **The claim window.** A car may claim the mouth between two parked cars only
+  while its own body lies inside that mouth: its rear end past the front of the
+  car before it, its front end before the rear of the car after it —
+  `rear ≥ mouth_rear && front ≤ mouth_front`. For a 4.40 m car at the 6.90 m
+  bay (mouth 121.57 … 128.47) that is the centre window u ∈ 123.77 … 126.27:
+  a 2.50 m window, **exactly tier 1's `free`**. The window and the capacity
+  rule are one number — a car can only stand inside a mouth when the gap fits
+  it — so a claim is tier 1 evaluated at the one position where it is legal to
+  evaluate it. A car outside every window claims nothing, and that is what the
+  measured row showed: pm1 stopped with centre u=133.0, 6.7 m past the nearest
+  window, and named no bay.
+- **Order is the lane order, so nothing is reserved for choosing.** In one lane
+  a car behind cannot reach a mouth a car ahead is working in; the run showed
+  the queue doing it by itself — `held_by` named the car ahead from the first
+  second (`pm2 held_by=pm1`, `pm4 held_by=pm3`, `pm5 held_by=pm4`). "First one
+  past the mouth takes it" is not a rule to implement, it is what the lane
+  already is.
+- **The claim is a property of the car, and the car publishes it.** When a car
+  claims, it names that mouth **as its `park_target`** — `behind_uid`/`ahead_uid`
+  already say which two parked cars define a box, so claiming extends that
+  object from the moment of the manoeuvre to the moment of the decision. A
+  following car then has the two facts it needs: that mouth is not mine, so
+  pick the next; and leave the leader room for its staging and its reverse
+  envelope — the envelope is not a new number, the plan already states it
+  (`staging 9.89 m past the flag`). A signal carried by the motion instead
+  (the leader crawling past with reverse lights on) was considered and
+  rejected: intent belongs in state, and a lamp is not a contract.
+- **One claimant per mouth** is the one invariant a reservation-free rule gives
+  up, so it is asserted rather than assumed — see `DrivingGame.Sim.Tests/BayClaimTests.cs`.
+  If two cars ever name the same mouth it must be visible in `/state`, not
+  absorbed; a bug that hides in a field is a bug nobody can grade.
+- **Why the claim is written now, before the execution exists**: the car working
+  a bay is not `CarState.Parked`, so the flanks list `CarCollisions` builds
+  today (`c.state == CarState.Parked`) cannot see a car mid-reverse, and the
+  follower's cap comes from predicting the leader's path — a reversing leader
+  has no predicted path. The claim is what the follower reads instead of that
+  prediction. The shuffle itself (§1b, known-red in
+  `BayReverseInTests.cs`) stays postponed; nothing here makes it green.
+
 ### Variant: Dead-end / route end
 
 Same maneuver as parking, without a target flag: the route ends at a real dead

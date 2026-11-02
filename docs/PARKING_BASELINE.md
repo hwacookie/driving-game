@@ -9,6 +9,14 @@ and a finished park needs `each end ≥ 0.20 m` at rest. One clearance constant
 cannot carry that split, and `PARK_NEIGHBOUR_CLEAR_M` (0.25 m) as one box for
 plan and acceptance is what the sections below keep running into.
 
+Which car gets a bay is §1d of the same section (owner decision, 2026-11-03):
+a bay is claimable **only from beside it** — the claim window is the mouth minus
+this car's own length, which is tier 1's `free` number again — the first car
+past the mouth takes it, the order is the lane order, and **nothing is reserved
+for choosing**. The claim is published as the car's own `park_target`
+(`behind_uid`/`ahead_uid` name the mouth), and the one invariant kept testable is
+one claimant per mouth.
+
 Everything below is measurement history from 2026-10-31 — it predates that
 rule, and where it disagrees with it, §1c is the current text.
 
