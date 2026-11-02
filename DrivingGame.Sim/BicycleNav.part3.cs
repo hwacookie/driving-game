@@ -245,6 +245,49 @@ public sealed partial class BicycleNav
         return list;
     }
 
+    /// <summary>§1c tier 1 (2026-11-02): the bay this car would take, as the point
+    /// its centre has to end at. The bays are the gaps between the cars ALREADY
+    /// standing in the parking lane at the destination; PickKerbBay answers which
+    /// of those gaps this car's OWN box fits, in driving order. null when no row
+    /// stands there or no gap fits — that is the case that leaves the asked spot
+    /// alone, so an open kerb keeps its old meaning. The lateral coordinate is not
+    /// what this answers (the reverse-in takes its depth from the kerb), so the
+    /// point comes back on the segment's axis.</summary>
+    private (double X, double Y)? ChosenBayCentre()
+    {
+        var seg = DestSegment();
+        if (_dest is null) { Console.WriteLine("[BAYNO] no _dest at all"); return null; }
+        if (seg is null) { Console.WriteLine("[BAYNO] destination not on a segment"); return null; }
+        var near = _car.ParkingNeighbours;
+        _bayNeighboursRaw = near?.Count ?? -1;
+        if (near is null || near.Count == 0) return null;
+        double tx, ty;
+        if (_car.Forward) { tx = seg.X2 - seg.X1; ty = seg.Y2 - seg.Y1; }
+        else { tx = seg.X1 - seg.X2; ty = seg.Y1 - seg.Y2; }
+        double tl = Math.Hypot(tx, ty);
+        if (tl < 1e-6) return null;
+        tx /= tl; ty /= tl;
+        var rx = ty; var ry = -tx;
+        var flanks = new List<(double CentreU, double LengthM)>();
+        foreach (var o in near)
+        {
+            // Only the cars that are parked beside the kerb bound a bay. A car
+            // driving past on the other side of the road is not a flank.
+            if (o.State != CarState.Parked) continue;
+            double u = (o.X - seg.X1) * tx + (o.Y - seg.Y1) * ty;
+            double v = (o.X - seg.X1) * rx + (o.Y - seg.Y1) * ry;
+            if (v > 0.0) _bayVPositive++;
+            if (v <= 0.0) continue;
+            flanks.Add((u, o.LengthM));
+        }
+        _bayFlanks = flanks.Count;
+        if (PickKerbBay(_car.LengthM, flanks) is not (double rearEndM, double frontEndM,
+                                                       double freeM))
+            return null;
+        double mid = (rearEndM + frontEndM) / 2.0;
+        return (seg.X1 + tx * mid, seg.Y1 + ty * mid);
+    }
+
     /// <summary>Does the planned tuck clear every body beside the bay, at every sample
     /// of the path? (#36, the owner's rule: Pm's rectangle may never intersect P1's or
     /// P2's while it gets in between them.)

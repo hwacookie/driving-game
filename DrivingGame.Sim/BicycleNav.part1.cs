@@ -332,6 +332,33 @@ public sealed partial class BicycleNav
     // drives and the run-out the arming search may use.
     private double _parkStageExtM;
     private int _parkStageTries;
+    /// <summary>§1c tier 1 (2026-11-02): how far AROUND THE DESTINATION the parked
+    /// cars beside a bay are looked for, for a car that has a parking job. The car
+    /// itself is still tens of metres away when the style is decided, so a query
+    /// around the car would not see the row at all — and the row is what the
+    /// decision is about. 20 m covers a kerb row of five cars (five bodies plus
+    /// their bays span under 30 m, half of that is 15 m around the middle of the
+    /// row); it is used only while a park job is active, which is the scope the
+    /// query already has.</summary>
+    public static readonly double PARK_BAY_ROW_SCAN_M = 20.0;
+    /// <summary>Where a car with a parking job wants its neighbours from: the spot it
+    /// has been asked to park at. §1c makes that spot a question about the row of
+    /// parked cars standing there, so the question has to be asked there.</summary>
+    internal (double X, double Y)? ParkQueryCentre() => _dest;
+    /// <summary>§1c tier 1: how far the parking spot was moved to a gap between the
+    /// parked cars standing there, in metres (0 = no row was in range, or the mark
+    /// already stood in the middle of the gap). Readable from the tests because
+    /// "the anchor is a no-op where the mark was centred in the bay" is a fact the
+    /// rule has to keep, not something to infer from behaviour.</summary>
+    public double ParkBayShiftM() => _parkBayShiftM;
+    /// <summary>What ChosenBayCentre last saw: the raw neighbour count (-1 = none
+    /// known), how many of them sit on the positive-v side (the kerb side of the
+    /// frame), and how many became flanks. Debug observables for the anchor, in
+    /// the same way ParkStyle is readable — a silent zero is not a fact.</summary>
+    public bool ParkBayAnchored() => _parkBayAnchored;
+    public int ParkBayNeighboursRaw() => _bayNeighboursRaw;
+    public int ParkBayVPositive() => _bayVPositive;
+    public int ParkBayFlanks() => _bayFlanks;
     /// How far a straight backup (no arc) may drive before handing the manoeuvre back for
     /// a re-solve. The comment at the fallback in part3 promises "backs up a metre to try
     /// again"; without a cap the same code reverses the whole staging distance (~10 m).
@@ -342,6 +369,15 @@ public sealed partial class BicycleNav
     public static readonly int PARK_STAGE_EXTRA_TRIES = int.TryParse(
         Environment.GetEnvironmentVariable("PARK_STAGE_EXTRA_TRIES"), out var _pst) ? _pst : 2;
     private bool _parkStageShort;
+    /// <summary>§1c tier 1: the parking spot has been moved from the mark to a real
+    /// gap between the parked cars standing there (ChosenBayCentre, part3). Once
+    /// per destination — the anchor is a decision, not something to re-ask while
+    /// the manoeuvre is running.</summary>
+    private bool _parkBayAnchored;
+    private double _parkBayShiftM;
+    private int _bayNeighboursRaw = -2;
+    private int _bayVPositive;
+    private int _bayFlanks;
     private ReverseParkState? _reversePark;   // active manoeuvre state, or null
     /// <summary>Standing at the destination.</summary>
     public bool Parked { get; private set; }
@@ -425,6 +461,8 @@ public sealed partial class BicycleNav
     {
         _dest = (x, y);
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
+        _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
+        _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
         _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
@@ -442,6 +480,8 @@ public sealed partial class BicycleNav
     {
         _dest = null;
         _routeKey = null;
+        _parkBayAnchored = false;
+        _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
         _parkAttempts = 0;   // a NEW destination: the attempt budget starts over
@@ -635,6 +675,26 @@ public sealed partial class BicycleNav
     {
         if (Parked || _reversePark is not null) return;
         if (_parkStyleLocked) return;
+        // §1c tier 1 (2026-11-02): WHERE a car parks is a question about the row of
+        // cars standing at the spot, not about the mark it was given. The mark says
+        // "park here"; the flanks say where the gaps are, and the car takes the
+        // first gap its own box fits (docs/DRIVING_MANEUVERS.md §1c). Moving the
+        // destination to that gap is the whole change: staging, running past and
+        // reversing back all follow the spot, they were never asked about the mark
+        // itself. A row that is out of range yet is not a verdict — the next
+        // decision asks again.
+        if (!_parkBayAnchored)
+        {
+            var bay = ChosenBayCentre();
+            if (bay is (double bx, double by) && _dest is (double dx, double dy))
+            {
+                _parkBayShiftM = Math.Max(_parkBayShiftM, Math.Hypot(bx - dx, by - dy));
+                _dest = (bx, by);
+                _parkBayAnchored = true;
+                _routeKey = null;      // the line must be re-cut to the new spot
+            }
+        }
+
         if (_dest is null || _ref is null)
         {
             if (ParkStyle != "forward")

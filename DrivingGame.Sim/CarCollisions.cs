@@ -1227,9 +1227,19 @@ public static class CarCollisions
                 c.ParkingNeighbours = null;
                 continue;
             }
+            // §1c tier 1 (2026-11-02): a car that has a parking job asks about the
+            // ROW standing at its spot, not about what is beside it. The style is
+            // decided tens of metres upstream, where the row is outside any window
+            // around the car — and the row is what the decision is about, because
+            // the bays are the gaps between those cars (docs/DRIVING_MANEUVERS.md
+            // §1c). The window is still only opened for cars with a park job, the
+            // scope the comment above keeps.
+            var (qx, qy) = c.BicycleNav.ParkQueryCentre() ?? (c.X, c.Y);
+            double qr = c.BicycleNav.ParkQueryCentre() is null
+                ? 14.0 : BicycleNav.PARK_BAY_ROW_SCAN_M;
             var near = new List<Car>();
-            foreach (var o in grid.Near(c.X, c.Y, (int)Math.Ceiling(14.0 / CellSizeM) + 1))
-                if (o.Uid != c.Uid && Math.Hypot(o.X - c.X, o.Y - c.Y) <= 14.0)
+            foreach (var o in grid.Near(qx, qy, (int)Math.Ceiling(qr / CellSizeM) + 1))
+                if (o.Uid != c.Uid && Math.Hypot(o.X - qx, o.Y - qy) <= qr)
                     near.Add(o);
             c.ParkingNeighbours = near;
         }
