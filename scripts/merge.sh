@@ -57,15 +57,21 @@ else
   echo "!! --force: merging without waiting for CI"
 fi
 
-gh pr merge "$BR" --merge --delete-branch
-echo "==> merged $BR, branch deleted on origin"
 # A landed issue leaves no directory behind: the fix worktree was the fix's
-# home, the fix is now in main.
+# home, the fix is now in main. The worktree has to be found BEFORE the merge:
+# gh's --delete-branch deletes the branch first, and a worktree whose branch is
+# gone no longer answers that lookup (measured: the removal line never printed,
+# the directory survived only because git happened to prune it itself).
 WT=$(git worktree list --porcelain |
     awk -v br="$BR" '/^worktree /{w=substr($0,10)} /^branch /{if (substr($0,19)==br) print w}' |
     head -1)
-if [ -n "$WT" ]; then
-  git worktree remove "$WT" && echo "==> removed the fix worktree $WT"
+gh pr merge "$BR" --merge --delete-branch
+echo "==> merged $BR, branch deleted on origin"
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  git worktree remove --force "$WT" && echo "==> removed the fix worktree $WT" ||
+    echo "!! worktree $WT is still there - remove it by hand: git worktree remove $WT"
+elif [ -n "$WT" ]; then
+  echo "==> the fix worktree $WT is gone (gh's branch delete pruned it)"
 fi
 git branch -D "$BR" 2>/dev/null || true
 git switch -q main
