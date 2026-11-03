@@ -54,7 +54,7 @@ public class Car
     /// who passes at any gain. One number, because one thing separates the
     /// personalities - the gain a driver accepts. Read by R37's intent only; the
     /// route, the signal, the check and the return are the same for every driver.</summary>
-    public double DriverEagerness = 0.5;   // an ordinary driver
+    public double DriverEagerness = 1.0;   // the standing driver: passes what is in its way
 
     /// <summary>The two per-car VIEW options a scenario can declare at staging
     /// (issue #9): does this car get a detail window, does it draw its own tyre

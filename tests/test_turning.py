@@ -563,9 +563,6 @@ SCENARIO_FOCUS = {
     # because the box must hold the whole squeeze (20).
     'park_block_overtake': {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.5},
     'slow_pass_priority':  {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.70},
-    # The row is the subject - the camera holds both tractors and the lane
-    # beside them, so the check, the borrow and the return are in one frame.
-    'chain_row_priority': {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.62},
     # A CAR is the subject, but NOT the primary one: the camera stays on the
     # obstruction / on the crawler the primary has to squeeze past.
     'park_block_priority': {"kind": "named", "name": "parked_car"},
@@ -838,29 +835,29 @@ DETERMINISTIC_TESTS = [
     # RED today, and that is the point of the scenario: nothing decides a
     # driver's preference (R37's intent is still R32's obstruction test), so
     # the rear tractor takes the turn and the car behind never gets one.
-    ('slow_pass_priority', 'straight', 50, 'straight_n→straight_m', 60.0,  # chain-row twin: same named start, one more tractor in the row
-     "Row of two slow vehicles ahead + oncoming traffic: the rear one keeps its "
-     "lane, the car behind passes the whole row (R37 order, R32 row window, R36, R39)",
-     0.15, False, 0.85, False,
-     [{'segment': 'straight_n→straight_m', 'progress': 0.70,
-       # the row's FRONT, at the same point scenario 21 puts its crawler (35%
-       # of the whole straight) - proven staging, one extra vehicle behind it.
+    ('crossroads_from_north', 'straight', 50, 'cross_center→cross_s', 90.0,  # chain-row twin on the crossroads tile (a 180 m approach, a 7 m carriageway, and a real crossing)
+     "Row of two slow vehicles on the approach to a crossing: the rear one keeps "
+     "its lane, the car behind passes the whole row (R37 order, R32 row window, "
+     "R36, R38's no-overtake zone at the crossing)",
+     0.12, False, 0.55, False,
+     [{'segment': 'cross_n→cross_center', 'progress': 0.85,
+       # the row's FRONT, ~27 m before the crossing node (750,720): a pass over
+       # the row runs THROUGH the crossing, the extra "no over-take here" this
+       # tile gives and the plain straight does not (R38 is not in the code yet,
+       # so the run shows what actually happens at the crossing - the solid
+       # centreline before a junction, CENTERLINE_SOLID_BEFORE_JUNCTION_M, is).
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        'model': 'tractor', 'name': 'row_front_tractor'},
-      {'segment': 'straight_n→straight_m', 'progress': 0.55,
-       # 22.5 m behind its front, i.e. between the front and the approaching
-       # car: in the queue this is the leader. Case B says this driver does NOT
-       # want to pass, so it must keep its lane and leave its turn to the car
-       # behind it. Stated as a personality (R40: "Ms. Daisy", eagerness 0) -
-       # wanting is the driver's, so a scenario that asks for the two-tractor
-       # case names who drives. The outcome does not depend on the number: at
-       # its own ceiling (cruise 10 km/h) the gain is 0 and no driver wants a
-       # pass at any eagerness - that half is physics, not disposition.
+      {'segment': 'cross_n→cross_center', 'progress': 0.72,
+       # ~23 m behind its front, same segment: in the queue this is the leader.
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       # "Ms. Daisy" (R40): this driver does NOT want the pass, so it must keep
+       # its lane and leave its turn to the car behind it. The default (1.0,
+       # "passes what is in its way") is today's behaviour - patience is staged,
+       # never assumed.
        'driver_eagerness': 0.0,
-       'model': 'tractor', 'name': 'row_rear_tractor'},
-      {'start_point': 'straight_reverse', 'progress': 0.15,
-       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
+       'model': 'tractor', 'name': 'row_rear_tractor'}]),
     # Hairpin, entered from the opposite end (reverse direction)
     ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
