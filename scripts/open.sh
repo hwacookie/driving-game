@@ -46,6 +46,10 @@ while [ $# -gt 0 ]; do
     --external) MODE=http; shift ;;
     --close) CLOSE_ONLY=1; shift ;;
     -h|--help) usage ;;
+    # A bare path that names a TAPE is a review of that tape (owner decision
+    # 2026-11-03, issue #82: "it does not matter in which way or for what
+    # purpose I open it") - the same window `--review` opens, same chrome.
+    *tape_*.txt) MODE=review; REVIEW="$1"; shift ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done

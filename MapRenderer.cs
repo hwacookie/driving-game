@@ -875,6 +875,18 @@ public partial class MapRenderer : Node2D
                     i += 1;
                 }
             }
+            else if (!args[i].StartsWith("-") && args[i].EndsWith(".txt") && File.Exists(args[i]))
+            {
+                // Owner decision 2026-11-03 (issue #82): "it does not matter in
+                // which way or for what purpose I open it". A bare path that names
+                // a tape on disk is that tape under review - the window that `--review`
+                // opens, with the same chrome; measuring (`--screenshot x.png`) never
+                // matches, since only a `.txt` tape can land here.
+                _review = true;
+                _reviewPath = args[i];
+                GD.Print("REVIEW-FROM-ARG: a bare tape path opened the reviewer " +
+                        $"(review of {args[i]}) - same window as --review {args[i]}");
+            }
         }
 
         // The window's opening geometry, stated ONCE, before the first frame is

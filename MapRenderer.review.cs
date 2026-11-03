@@ -2315,6 +2315,18 @@ public partial class MapRenderer : Node2D
         // and no camera claim - the opening fit owns the view until the tape
         // speaks. The readout and the bar keep painting; everything that reads
         // `_tape[_cursor]` waits for step one.
+        // Measured (2026-11-03, a headless live window — no --review, no --screenshot,
+        // with --test-seek 0.5): the window reported `tape=0 substeps`, `step=-1`,
+        // printed BAR-IDLE (so the instrument EXISTS) and never printed TEST-SEEK —
+        // the layout below this return never ran. What a live window therefore showed
+        // was the transport buttons (they are anchored to the corner) on the map,
+        // with no strip, no seek band and no curve. The owner decision of 2026-11-02
+        // ("ONE chrome for every window - no difference between live and review")
+        // and 2026-11-03 ("it does not matter in which way or for what purpose I
+        // open it", issue #82) say the instrument must be there whatever the tape
+        // did: the layout is unconditional now, only the frame-dependent painting
+        // waits for step one.
+        ReviewHud();
         if (_tape.Count == 0) return;
         // Advance the cursor: ▶ play runs at playRate x sim time; a held scrub
         // key accelerates along the ramp curve.
@@ -2425,7 +2437,6 @@ public partial class MapRenderer : Node2D
             if (_runStatus != null) _runStatus.Visible = false;
         }
         ReviewLabels();
-        ReviewHud();
         ReviewPoseCheck();
         ReviewCamera();
         UpdateDetails();
@@ -2669,7 +2680,9 @@ public partial class MapRenderer : Node2D
             pts.Add(new Vector2((float)BarXOf(last),
                         (float)(baseline - amp * (_tape[last].Fluidity / maxF))));
         _curveLine.Points = pts.ToArray();
-        // cursor + head ticks
+        // cursor + head ticks — the ticks need frames; an empty tape gets the
+        // instrument without a cursor it does not have. `cx` stays outside the
+        // guard because the marker lane below reads it.
         double cx = BarXOf(_cursor);
         // A cursor OUTSIDE a zoomed range must not pretend to be at the edge it
         // is clamped to: the tick sticks to that edge and the axis note says
@@ -2677,17 +2690,25 @@ public partial class MapRenderer : Node2D
         bool offView = cx < barX - 1.0 || cx > barX + barW + 1.0;
         _cursorOffView = offView;
         cx = Math.Clamp(cx, barX + 3.0, barX + barW - 3.0);   // never half outside
-        _cursorTick.Points = new Vector2[] {
-            new Vector2((float)cx, (float)(baseline - amp)), new Vector2((float)cx, (float)barBase) };
-        // The head of the tape sits at the tape's end: at a zoomed range it is
-        // off screen, and drawing it at the edge would claim the last recorded
-        // substep is right there.
-        double hx = BarXOf(Math.Max(0, _tape.Count - 1));
-        _headTick.Points = hx >= barX && hx <= barX + barW
-            ? new Vector2[] {
-                new Vector2((float)hx, (float)(baseline - amp)),
-                new Vector2((float)hx, (float)barBase) }
-            : new Vector2[0];
+        if (_tape.Count > 0)
+        {
+            _cursorTick.Points = new Vector2[] {
+                new Vector2((float)cx, (float)(baseline - amp)), new Vector2((float)cx, (float)barBase) };
+            // The head of the tape sits at the tape's end: at a zoomed range it is
+            // off screen, and drawing it at the edge would claim the last recorded
+            // substep is right there.
+            double hx = BarXOf(Math.Max(0, _tape.Count - 1));
+            _headTick.Points = hx >= barX && hx <= barX + barW
+                ? new Vector2[] {
+                    new Vector2((float)hx, (float)(baseline - amp)),
+                    new Vector2((float)hx, (float)barBase) }
+                : new Vector2[0];
+        }
+        else
+        {
+            _cursorTick.Points = new Vector2[0];
+            _headTick.Points = new Vector2[0];
+        }
         ReviewTestTicks(barX, barW, barBase, baseline - amp);
         // Event markers on the frame's own events (decisions). Blue/red/yellow
         // categories (wrong lane, crash, standstill) are slice B.
