@@ -690,6 +690,13 @@ public static class TestMaps
         // room and time to over-take a row of slow vehicles - and the crossing
         // sits right where such a pass has to end (R38's no-overtake zone).
         b.Start("fig8_row", "xing_n31", facing: "xing_n32");
+        // R38's REFUSAL test (docs §9, "Where a pass may live at all"): the
+        // same room and the same row, but the test's end flag stands BEFORE the
+        // crossing - so the only correct answer there is "no pass may start".
+        // It gets its own start name on purpose: a scenario's identity IS its
+        // start point (tests/test_turning.py, the anchor note), and two tests
+        // on one name would share one results slot and one role lookup.
+        b.Start("fig8_row_short", "xing_n31", facing: "xing_n32");
 
         // --- Tile (3,3): Un-signed figure-8 (real degree-4 crossing) ---
         // Same geometry as tile (2,3) but with NO signs at the crossing, so

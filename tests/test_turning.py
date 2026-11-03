@@ -368,7 +368,8 @@ def describe_failure(result: dict) -> str | None:
     # "the queue never got its turn on a row" is the named diagnosis, and the
     # generic "timed out before the flag" underneath it would hide that the
     # manoeuvre itself is missing, not the last metre.
-    if result.get("chain_expected") and not result.get("chain_borrowed_uids"):
+    if (result.get("chain_expected") and not result.get("chain_refused")
+            and not result.get("chain_borrowed_uids")):
         roles = result.get("chain_role_map") or {}
         who = lambda u: roles.get(u, f"uid {u}")
         dec = ", ".join(who(u) for u in result.get("chain_declined_uids", [])) or "nobody"
@@ -378,9 +379,20 @@ def describe_failure(result: dict) -> str | None:
                 "passed. What a row demands (§9): the lateral need and the window "
                 "are the row's, the turn order is each driver's own (R37), and a "
                 "driver that does not want to pass leaves the turn open (R40) so "
-                "the car behind takes it; where the primary of a scenario gets "
-                "its own disposition from is still open (only staged extras "
-                "carry driver_eagerness today).")
+                "the car behind takes it.")
+    if (result.get("chain_expected") and result.get("chain_refused")
+            and (result.get("chain_borrowed_uids")
+                 or not result.get("chain_r38_uids"))):
+        roles = result.get("chain_role_map") or {}
+        who = lambda u: roles.get(u, f"uid {u}")
+        bor = ", ".join(who(u) for u in result.get("chain_borrowed_uids", [])) or "nobody"
+        r38 = ", ".join(who(u) for u in result.get("chain_r38_uids", [])) or "nobody"
+        return (f"the row that stands INSIDE a crossing's margin was treated as "
+                f"passable (docs §9, R38). Measured this run: borrowed by [{bor}], "
+                f"refused by R38 for [{r38}] - a row whose front stands closer to "
+                "the mouth than the driver's own look-ahead cannot be passed at all: "
+                "the plan (blend out, the row, blend back) has to END before the "
+                "no-over-take zone, and the check act may creep but never commit.")
     if result.get("segment_changed") and not result.get("reached_expected_segment"):
         final = result.get("final_segment")
         expected = result.get("expected_end_segment")
@@ -561,6 +573,7 @@ SCENARIO_FOCUS = {
     # The row test: the camera holds the row and the crossing node xing_c in one
     # frame, so the check, the borrow and the return are all visible.
     'fig8_row':            {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
+    'fig8_row_short':      {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
     # The pass happens at the parked car / at the crawler's start spot, on the
     # two-lane straight — a place, because the subject never moves (17) or
     # because the box must hold the whole squeeze (20).
@@ -629,6 +642,7 @@ PRIMARY_CAR_ROLE = {
     ('roundabout_from_north', 'right'): 'roundabout_exit_car',
     ('park_6lane_right_lane', 'straight'): 'parking_car',
     ('fig8_row', 'straight'): 'row_passing_car',   # the car that passes a whole row
+    ('fig8_row_short', 'straight'): 'row_passing_car',  # the car that may NOT
 }
 
 # docs §9 Case B + C (issue #78): a scenario is graded on the ROW when its
@@ -636,6 +650,12 @@ PRIMARY_CAR_ROLE = {
 # (start_point, direction) key - several scenarios share one road, and the
 # question here is about the cars on it, not about which scenario string ran.
 CHAIN_ROW_ROLES = {'row_front_tractor', 'row_rear_tractor'}
+# The SAME kind of row, and the OPPOSITE demand (docs §9 "Where a pass may
+# live at all", R38): the row stands inside the margin a pass must finish in,
+# so the correct answer is that NOBODY enters the other lane and the driver
+# says why (R38's own line names the mouth). Roles carry the demand, as above
+# - not the scenario string.
+CHAIN_REFUSE_ROLES = {'row_front_tractor_no_room', 'row_rear_tractor_no_room'}
 
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
@@ -874,6 +894,32 @@ DETERMINISTIC_TESTS = [
      # that passes the whole row IS the primary, so the scenario says what
      # that driver wants instead of inheriting the fleet default. 1.0 = pushy.
      1.0),
+    # R38 (docs §9 "Where a pass may live at all - a crossing forbids one").
+    # The SAME row on the SAME tile, and the end flag BEFORE the crossing node
+    # xing_c: the row's front stands ~29 m before that mouth, while a pass at
+    # 50 km/h must be FINISHED 40 m before it (LookAheadForSpeed, the driver
+    # model's own look-ahead) and needs ~35 m of blend out, the row and ~35 m
+    # of blend back. So there is no plan, and the only right answer is a
+    # refusal: the driver states its intent (R37), may creep to the edge of its
+    # OWN lane (§9's check act), and never enters the borrowed lane. GRADED as
+    # the refusal - no car of the cast may borrow, and an [R38] line must name
+    # the mouth that refused it.
+    ('fig8_row_short', 'straight', 50, 'xing_n34→xing_n35', 90.0,
+     "Row just before a crossing: the pass cannot be finished in time, "
+     "so nobody may start one (R38's no-overtake zone, R37's order)",
+     0.1, False, 0.9, False,
+     [{'segment': 'xing_n35→xing_c', 'progress': 0.35,
+       # the row's FRONT, 15 m along a 44 m segment = ~29 m before xing_c.
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'model': 'tractor', 'name': 'row_front_tractor_no_room'},
+      {'segment': 'xing_n35→xing_c', 'progress': 0.12,
+       # ~10 m behind its front, same carriageway: this is the queue leader.
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       # "Ms. Daisy" again: the row's own rear driver does not want to pass,
+       # so it keeps its lane and leaves its turn to the car behind (#78's
+       # point) - which is the car that must refuse for the PLACE reason.
+       'driver_eagerness': 0.0,
+       'model': 'tractor', 'name': 'row_rear_tractor_no_room'}]),
     # Hairpin, entered from the opposite end (reverse direction)
     ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
@@ -1125,6 +1171,9 @@ class TurnTester:
                         m = e.get("msg", "")
                         if m.startswith("[R32] obstruction ahead - borrowing"):
                             getattr(self, '_chain_borrowed', set()).add(u)
+                        elif m.startswith("[R38]"):
+                            # R38 refused THIS car: the place, not the traffic.
+                            getattr(self, '_chain_r38', set()).add(u)
                         elif m.startswith("[R37] intent: no pass wanted"):
                             getattr(self, '_chain_declined', set()).add(u)
                         elif m.startswith("[R37] "):
@@ -3049,7 +3098,14 @@ class TurnTester:
         # §9 Case B/C (issue #78): the row facts, armed where the clock starts
         # (same reason as the state trace: the facts must cover the whole
         # manoeuvre, and the decision log is a ring that forgets the start).
-        chain_here = any((s.get('name') in CHAIN_ROW_ROLES) for s in (extra_cars or []))
+        chain_here = any((s.get('name') in CHAIN_ROW_ROLES | CHAIN_REFUSE_ROLES)
+                         for s in (extra_cars or []))
+        # Two demands a row scenario can carry, both read off the CAST's role
+        # names: a row that CAN be passed (someone must enter the other lane)
+        # and a row that CANNOT (nobody may, and R38 must say why).
+        chain_refuse = any(s.get('name') in CHAIN_REFUSE_ROLES
+                           for s in (extra_cars or []))
+        self._chain_r38 = set()
         self._chain_on = chain_here
         self._chain_poll = 0
         self._chain_borrowed, self._chain_declined, self._chain_r37 = set(), set(), set()
@@ -4003,6 +4059,23 @@ class TurnTester:
                 and (not bay_flank_uids
                      or (park_box is not None and bool(park_box.get('inside'))))
             )
+        # §9 (issues #78 / #80): a row scenario's demand is part of PASSING,
+        # not only of the diagnosis - describe_failure opens with
+        # `if result["passed"]: return None`, so it can explain a failure but
+        # never cause one. Two demands, read off the CAST's role names:
+        #  - a row that CAN be passed: some car of the cast must enter the other
+        #    lane (R32's own decision line is the fact).
+        #  - a row that CANNOT (R38's margin, issue #80): NO car may borrow, AND
+        #    the refusal must be visible as R38's own line naming the mouth -
+        #    silence alone would pass the test for the wrong reason (a car that
+        #    never got near the row also never borrowed).
+        chain_ok = True
+        if chain_here:
+            chain_ok = ((not getattr(self, '_chain_borrowed', set())
+                        and bool(getattr(self, '_chain_r38', set())))
+                        if chain_refuse else
+                        bool(getattr(self, '_chain_borrowed', set())))
+        passed = passed and chain_ok
         
         # The run is over: if the whole run never stated a mark, the fallback
         # circle WAS used the entire time - that is a fact worth saying once,
@@ -4062,8 +4135,10 @@ class TurnTester:
             'chain_expected': chain_here,
             'chain_role_map': {uid: (spec.get('name') or f'#{uid}')
                                for spec, uid in zip(extra_cars or [], extra_uids)},
+            'chain_refused': chain_refuse,
             'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
             'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
+            'chain_r38_uids': sorted(getattr(self, '_chain_r38', set())),
             'chain_msgs': {u: list(k.values()) for u, k in
                            getattr(self, '_chain_msgs', {}).items()},
             'collision_detected': collision_detected,
@@ -4078,14 +4153,10 @@ class TurnTester:
             'violation_details': violation_details,
             'positions': positions,
             'aborted': False,
-            # §9 Case B/C (issue #78): a row scenario's demand is part of PASSING,
-            # not only of the diagnosis - describe_failure returns None for a pass
-            # first, so a demand that lives only there can name a failure but can
-            # never make a run red. Passing a row means ENTERING the other lane
-            # at some point (R32's own decision line is the fact); a run that
-            # reached the flag without one never did the maneuver.
-            'passed': passed and not (chain_here and not
-                                     getattr(self, '_chain_borrowed', set()))
+            # §9 Case B/C (issue #78, and R38's refusal in #80): the demand is
+            # applied above, where `passed` is built - a demand that lived only
+            # in describe_failure could name a failure but never cause one.
+            'passed': passed
         }
         
         # Summary
@@ -4128,6 +4199,12 @@ class TurnTester:
             print(dim("   [R32] pass taken by: "
                       + (", ".join(who(u) for u in result.get('chain_borrowed_uids', []))
                          or 'nobody')))
+            print(dim("   [R38] refused by (the place, not the traffic): "
+                      + (", ".join(who(u) for u in result.get('chain_r38_uids', []))
+                         or 'nobody')))
+            if result.get('chain_refused'):
+                print(dim("   expected on this row: NO borrow, and R38 names the "
+                          "mouth (docs §9, \"Where a pass may live at all\")"))
             for u, ms in sorted((result.get('chain_msgs') or {}).items()):
                 for m in ms:
                     print(dim(f"      {who(u)}: {m[:150]}"))
