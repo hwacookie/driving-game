@@ -17,7 +17,10 @@
 # local main, which stays a mirror of origin/main. Nothing here force-pushes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MARK=".git/offline-mode"
+# A linked worktree's `.git` is a FILE, not a directory — the marker and the
+# records live in the shared git dir, so ask git where that is (docs/WORKFLOW.md,
+# worktree habit: the mode is repo-wide, not per-tree).
+MARK="$(git rev-parse --git-common-path)/offline-mode"
 REC="issues"
 
 have_net() {

@@ -4,13 +4,28 @@
 #   scripts/merge.sh [issue-number]   default: the PR of the current branch
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ -f .git/offline-mode ]; then
+HERE=$(pwd)
+# In a git worktree `.git` is a FILE, not a directory - so a marker test like
+# `[ -f .git/offline-mode ]` silently never fires in a worktree, and a fix
+# worktree would pretend the repo is online (or offline) while the primary tree
+# says the opposite. Ask git where its state lives; the marker is repo-wide, so
+# the shared git dir is the right place (docs/WORKFLOW.md, worktree habit).
+GITSTATE=$(git rev-parse --git-common-path)
+if [ -f "$GITSTATE/offline-mode" ]; then
   echo "!! offline mode is on (.git/offline-mode) - this step needs GitHub."
   echo "   Land the fix locally instead: scripts/offline.sh land  (docs/WORKFLOW.md)"
   echo "   Or scripts/offline.sh off if the network is back."
   exit 1
 fi
 BR=$(git rev-parse --abbrev-ref HEAD)
+# The landing happens in the PRIMARY worktree: this script may be run from a
+# fix worktree (the one whose PR is being landed), and `main` is not a fix
+# branch's home (docs/WORKFLOW.md, "One issue, one branch, one directory").
+PRIMARY=$(git worktree list --porcelain | awk '/^worktree /{print substr($0,10); exit}')
+if [ "$PRIMARY" != "$HERE" ]; then
+  cd "$PRIMARY"
+  echo "==> landing in the primary worktree: $PWD"
+fi
 N="${1:-$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')}"
 if [ -n "${1:-}" ]; then
   BR=$(gh pr list --state open --head "fix-$1" --json headRefName -q '.[0].headRefName // empty')
@@ -44,6 +59,15 @@ fi
 
 gh pr merge "$BR" --merge --delete-branch
 echo "==> merged $BR, branch deleted on origin"
+# A landed issue leaves no directory behind: the fix worktree was the fix's
+# home, the fix is now in main.
+WT=$(git worktree list --porcelain |
+    awk -v br="$BR" '/^worktree /{w=substr($0,10)} /^branch /{if (substr($0,19)==br) print w}' |
+    head -1)
+if [ -n "$WT" ]; then
+  git worktree remove "$WT" && echo "==> removed the fix worktree $WT"
+fi
+git branch -D "$BR" 2>/dev/null || true
 git switch -q main
 git pull -q --ff-only origin main
 echo "==> main at $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
