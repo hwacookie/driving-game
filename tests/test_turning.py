@@ -364,6 +364,17 @@ def describe_failure(result: dict) -> str | None:
         return (f"drove past the end flag at "
                 f"{result.get('passed_flag_speed_kmh', 0):.0f} km/h - the "
                 f"scenario requires a stop AT the flag")
+    # §9 Case B/C (issue #78), specific-first — the same ordering lesson as #27:
+    # "the queue never got its turn on a row" is the named diagnosis, and the
+    # generic "timed out before the flag" underneath it would hide that the
+    # manoeuvre itself is missing, not the last metre.
+    if result.get("chain_expected") and not result.get("chain_borrowed_uids"):
+        return ("never entered the other lane on a row (docs §9 Case B/C): the car behind "
+                "a row of two slow vehicles got no turn. No car of the row recorded a "
+                "declined intent either - R37's intent is still fed by R32's obstruction "
+                "test, so the row's rear vehicle claims the turn and the queue behind it "
+                "never gets one. A driver that does not want to pass must leave the turn "
+                "open; where that preference comes from is the open decision (#78).")
     if result.get("segment_changed") and not result.get("reached_expected_segment"):
         final = result.get("final_segment")
         expected = result.get("expected_end_segment")
@@ -546,6 +557,9 @@ SCENARIO_FOCUS = {
     # because the box must hold the whole squeeze (20).
     'park_block_overtake': {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.5},
     'slow_pass_priority':  {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.70},
+    # The row is the subject - the camera holds both tractors and the lane
+    # beside them, so the check, the borrow and the return are in one frame.
+    'chain_row_priority': {"kind": "loc", "segment": "straight_n\u2192straight_m", "t": 0.62},
     # A CAR is the subject, but NOT the primary one: the camera stays on the
     # obstruction / on the crawler the primary has to squeeze past.
     'park_block_priority': {"kind": "named", "name": "parked_car"},
@@ -609,6 +623,12 @@ PRIMARY_CAR_ROLE = {
     ('roundabout_from_north', 'right'): 'roundabout_exit_car',
     ('park_6lane_right_lane', 'straight'): 'parking_car',
 }
+
+# docs §9 Case B + C (issue #78): a scenario is graded on the ROW when its
+# staging names these roles. The demand is attached to the roles, not to a
+# (start_point, direction) key - several scenarios share one road, and the
+# question here is about the cars on it, not about which scenario string ran.
+CHAIN_ROW_ROLES = {'row_front_tractor', 'row_rear_tractor'}
 
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
@@ -797,6 +817,37 @@ DETERMINISTIC_TESTS = [
        # is 70% of segment 0 (user decision 2026-10-21).
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        'name': 'slow_car'},
+      {'start_point': 'straight_reverse', 'progress': 0.15,
+       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
+    # --- The row as ONE obstruction (docs §9 Case B + C, issue #78) ---------
+    # Two slow vehicles in a row, a car behind them, traffic in the other lane.
+    # What §9 demands: the row is one plan (its window ends past its FRONT),
+    # the turn order is each driver's own (a queue passes front-first), and a
+    # driver that does NOT want to pass leaves the turn open so the car behind
+    # takes it - the rear tractor keeps its lane, the passing car goes past
+    # BOTH. With an oncoming car owning the other half, the check is visible
+    # (signal before any commitment, a creep to the edge of its own lane) and
+    # an aborted plan is a driven way back, not a standstill; the lane's own
+    # drivers keep their way (R39: room to their right, a gentle brake).
+    # RED today, and that is the point of the scenario: nothing decides a
+    # driver's preference (R37's intent is still R32's obstruction test), so
+    # the rear tractor takes the turn and the car behind never gets one.
+    ('slow_pass_priority', 'straight', 50, 'straight_n→straight_m', 60.0,  # chain-row twin: same named start, one more tractor in the row
+     "Row of two slow vehicles ahead + oncoming traffic: the rear one keeps its "
+     "lane, the car behind passes the whole row (R37 order, R32 row window, R36, R39)",
+     0.15, False, 0.85, False,
+     [{'segment': 'straight_n→straight_m', 'progress': 0.70,
+       # the row's FRONT, at the same point scenario 21 puts its crawler (35%
+       # of the whole straight) - proven staging, one extra vehicle behind it.
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'model': 'tractor', 'name': 'row_front_tractor'},
+      {'segment': 'straight_n→straight_m', 'progress': 0.55,
+       # 22.5 m behind its front, i.e. between the front and the approaching
+       # car: in the queue this is the leader. Case B says this driver does NOT
+       # want to pass, so it must keep its lane and leave its turn to the car
+       # behind it.
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'model': 'tractor', 'name': 'row_rear_tractor'},
       {'start_point': 'straight_reverse', 'progress': 0.15,
        'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
     # Hairpin, entered from the opposite end (reverse direction)
@@ -1026,6 +1077,29 @@ class TurnTester:
             trace = getattr(self, '_state_trace', None)
             if st and trace is not None and (not trace or trace[-1] != st):
                 trace.append(st)
+        # §9 Case B/C (issue #78): the row facts are read from the cars' OWN
+        # rule logs, and Car.Decisions is a 100-entry ring (Car.cs) - a 60 s
+        # run pushes the row's first decisions out of it. So the facts are read
+        # while the scenario runs, from every car in the world (role names are
+        # resolved when the facts are assembled, where the staged uids are
+        # known). One request per car every ~20 polls, not one per frame.
+        if getattr(self, '_chain_on', False):
+            self._chain_poll = getattr(self, '_chain_poll', 0) + 1
+            if self._chain_poll % 20 == 1:
+                for u in getattr(self, '_chain_uids', ()):  # every car on the field
+                    try:
+                        rr = requests.get(f"{API_URL}/car/{u}/decisions", timeout=2)
+                        rows = (rr.json() or {}).get("decisions", []) if rr.ok else []
+                    except requests.exceptions.RequestException:
+                        continue
+                    for e in rows:
+                        m = e.get("msg", "")
+                        if m.startswith("[R32] obstruction ahead - borrowing"):
+                            getattr(self, '_chain_borrowed', set()).add(u)
+                        elif m.startswith("[R37] intent: no pass wanted"):
+                            getattr(self, '_chain_declined', set()).add(u)
+                        elif m.startswith("[R37] "):
+                            getattr(self, '_chain_r37', set()).add(u)
         return data
     
     def get_segment_geometry(self, idx: int) -> dict | None:
@@ -2911,6 +2985,15 @@ class TurnTester:
         # for would fail them for the wrong reason.
         self._state_trace = []
         self._state_trace_on = True
+        # §9 Case B/C (issue #78): the row facts, armed where the clock starts
+        # (same reason as the state trace: the facts must cover the whole
+        # manoeuvre, and the decision log is a ring that forgets the start).
+        chain_here = any((s.get('name') in CHAIN_ROW_ROLES) for s in (extra_cars or []))
+        self._chain_on = chain_here
+        self._chain_poll = 0
+        self._chain_borrowed, self._chain_declined, self._chain_r37 = set(), set(), set()
+        self._chain_uids = tuple(c['car_uid'] for c in self.get_state().get('cars', [])) \
+            if chain_here else ()
 
         if _aborted():
             return self._aborted_result(start_point, direction, target_speed, results)
@@ -3910,6 +3993,14 @@ class TurnTester:
                             max((state.get('time') or 0.0) - sim_at_start, 1e-9),
             'driving_cars': 1 + len(throttle_uids),
             'world_cars': 1 + len(extra_uids),
+            # §9 Case B/C (issue #78): which car said which rule line. Roles,
+            # not uids, are what the diagnosis quotes - a scenario names its
+            # cars on purpose (docs/TESTING.md, "Named cars").
+            'chain_expected': chain_here,
+            'chain_role_map': {uid: (spec.get('name') or f'#{uid}')
+                               for spec, uid in zip(extra_cars or [], extra_uids)},
+            'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
+            'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
             'collision_detected': collision_detected,
             'priority_failed': priority_failed,
             'extra_arrivals': extra_arrival,

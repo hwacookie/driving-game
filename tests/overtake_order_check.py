@@ -10,8 +10,10 @@ a test must state:
   F2  the pass STARTS happen in queue order, front-first (R37, strict);
   F3  at most one car is in the other lane at any moment - a queue does not
       all borrow at once;
-  F4  no car of the queue stands at rest for more than 2 s of sim - an
-      aborted plan is a way back, not a standstill (docs §9).
+  F4  no car of the queue stands at rest for more than 2 s of sim WHILE the
+      obstruction itself is moving - an aborted plan is a way back, not a
+      standstill (a car stopped behind a stopped tractor is traffic, R2/R7 own
+      that pair and this test does not blame it).
 
 Everything is in METRES (see docs/UNITS.md): the script resolves the segment
 axis with GET /segment/{idx} and reads every car's signed distance from the
@@ -34,9 +36,12 @@ import json
 import urllib.request
 
 API = os.environ.get("OVERTAKE_API_URL", "http://127.0.0.1:5001").rstrip("/")
-SEG = int(os.environ.get("OVERTAKE_SEGMENT", "1"))      # straight_m->straight_s
+SEG = int(os.environ.get("OVERTAKE_SEGMENT", "0"))      # straight_n->straight_m
 NQ = int(os.environ.get("OVERTAKE_CARS", "4"))
 GAP_M = 18.0          # clear gap between the queue members
+TR1_Y = 250.0       # the queue leader sits mid-road: ahead of it are the open
+                    # 200 m of both straights, not a map end (a car braking for
+                    # the pennant is a stop the test would blame on R37)
 LEAD_M = 26.0         # the gap the front car keeps behind the tractor
 TRACTOR_KMH = 10.0
 CREW_KMH = 80.0
@@ -96,6 +101,12 @@ def geom(idx):
     return g, (ay / ln, -ax / ln)
 
 
+def prog_at(g, y):
+    """The progress along the staged segment that has this y (the straights run
+    north->south, so progress grows as y falls)."""
+    return (g["y1"] - y) / g["length"]
+
+
 def lat_of(car, g, n):
     """Signed metres off the centreline; positive is the +n side."""
     return (car["x"] - g["x1"]) * n[0] + (car["y"] - g["y1"]) * n[1]
@@ -114,11 +125,12 @@ def main():
     g, n = geom(SEG)
     print(f"segment {g['name']}: length {g['length']:.1f} m, width {g['width']} m")
 
-    api("POST", "/cars", {"clear": True})          # a clean field
+    resp = api("POST", "/cars", {"action": "clear"})   # the API's spelling
+    print(f"clear field: {str(resp)[:90]}")
     for _ in range(40):                            # the clear is queued too
         if not uids():
             break
-        time.sleep(0.25)
+        time.sleep(0.5)
     left = len(uids())
     if left:
         print(f"!! {left} cars are still on the field after the clear - "
@@ -128,13 +140,12 @@ def main():
     freeze(True)                                   # stage while the clock holds
     # The tractor leads, the queue sits behind it: progress grows along the
     # direction of travel, so a smaller progress is BEHIND.
-    tractor_p = 1.0 - LEAD_M / g["length"]
-    tractor_uid = spawn_new(SEG, tractor_p, TRACTOR_KMH / 3.6, TRACTOR_KMH,
+    tractor_uid = spawn_new(SEG, prog_at(g, TR1_Y), TRACTOR_KMH / 3.6, TRACTOR_KMH,
                             "tractor", "tractor")
     order = []                       # uids in queue order, front first
     for k in range(NQ):
-        p = tractor_p - (LEAD_M + k * GAP_M) / g["length"]
-        if p >= 0.98:
+        p = prog_at(g, TR1_Y + LEAD_M + k * GAP_M)
+        if p < 0.02 or p >= 0.98:
             print(f"!! queue member {k + 1} does not fit on the segment")
             return 1
         u = spawn_new(SEG, p, CREW_KMH / 3.6, CREW_KMH, None, f"car{k + 1}")
@@ -152,9 +163,37 @@ def main():
     t0 = state()["time"]
     borrow_max, deepest_m = 0, 0.0
     stand_s, run, caps = {}, {}, {}
+    prev_t = t0
+    # Car.Decisions is a 100-entry ring (Car.cs, MaxDecisions = 100): reading the
+    # log after a 45 s run loses the queue's first decisions, which is exactly
+    # the F1 evidence - so the decisions are collected DURING the run.
+    dec, seen_steps = {}, set()
+
+    def harvest(st):
+        for c in st.get("cars", []):
+            u = c["car_uid"]
+            try:
+                rows = api("GET", f"/car/{u}/decisions").get("decisions", [])
+            except Exception:
+                continue
+            for e in rows:
+                k = (u, e.get("step"))
+                if k in seen_steps:
+                    continue
+                seen_steps.add(k)
+                dec.setdefault(u, []).append(e)
+
     while state()["time"] - t0 < RUN_S:
         st = state()
+        now = st["time"]
+        dt = max(now - prev_t, 0.0)   # stands in SIM seconds, one poll per second
+        prev_t = now
         in_borrow, deep = 0, 0.0
+        leader_moving = any(c["car_uid"] == tractor_uid and c["speed_kmh"] / 3.6 > 0.5
+                            for c in st.get("cars", []))
+        # a queue member stopped behind a STOPPED tractor is traffic (R2/R7 own
+        # that pair); a queue member stopped while the tractor crawls is a plan
+        # that was never given up - only the second one is this rule's claim.
         for c in st.get("cars", []):
             uid = c["car_uid"]
             v = c["speed_kmh"] / 3.6
@@ -165,13 +204,14 @@ def main():
                 deep = max(deep, -lat)
             if c.get("cap_key"):
                 caps[c["cap_key"]] = caps.get(c["cap_key"], 0) + 1
-            if v < 0.05:
-                run[uid] = run.get(uid, 0.0) + 1.0 / 60.0
+            if v < 0.05 and leader_moving:
+                run[uid] = run.get(uid, 0.0) + dt
                 stand_s[uid] = max(stand_s.get(uid, 0.0), run[uid])
             else:
                 run[uid] = 0.0
         borrow_max = max(borrow_max, in_borrow)
         deepest_m = max(deepest_m, deep)
+        harvest(st)
         worst = max(list(stand_s.values()) or [0.0])
         latline = " ".join(
             f"u{c['car_uid']}:{own_side(c, n) * lat_of(c, g, n):+.2f} "
@@ -181,12 +221,9 @@ def main():
               f"      {latline}", flush=True)
         time.sleep(1.0)
 
-    dec = {}
+    harvest(state())    # the tail between the last poll and the end
     for uid in order:
-        try:
-            dec[uid] = api("GET", f"/car/{uid}/decisions").get("decisions", [])
-        except Exception:
-            dec[uid] = []
+        dec.setdefault(uid, [])
     intent_at, start_at = {}, {}
     for uid in order:
         for e in dec[uid]:
@@ -212,7 +249,8 @@ def main():
           f"(worst {borrow_max}, deepest {deepest_m:.2f} m past the centreline)")
     worst_uid = max([(v, u) for u, v in stand_s.items() if u in order] or [(0.0, 0)])
     f4 = worst_uid[0] < 2.0
-    print(f"F4 no queue car stands longer than 2 s: {'✅' if f4 else '❌'} "
+    print(f"F4 no queue car stands longer than 2 s while the tractor moves: "
+          f"{'✅' if f4 else '❌'} "
           f"(worst {worst_uid[0]:.1f} s on uid {worst_uid[1]})")
     print(f"\ncaps seen over the run: {dict(sorted(caps.items()))}")
     print("=========================================")

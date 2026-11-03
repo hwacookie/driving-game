@@ -1020,6 +1020,7 @@ public static class CarCollisions
             // auction is asked for the longer stretch and the far half of the
             // window is observed from there (the accepted observation cheat).
             int passUid32 = -1; double passProg32 = -1.0; double passLen32 = 0.0;
+            double passAlong32 = 1e9;
             double passX32 = 0.0, passY32 = 0.0;
             double frontLen32 = 0.0, frontX32 = 0.0, frontY32 = 0.0, frontAlongM = 0.0;
             // R39: a car that is in my lane BECAUSE it is passing is not an
@@ -1084,9 +1085,19 @@ public static class CarCollisions
                 // relation - two constants set to the same value (demand 0.5,
                 // veto 0.5) can never both hold when the delivery is off by
                 // centimetres, which is what pinned the car at 0.46 m.
-                if (needM > wantM)
+                // TWO questions, two answers (issue #78). The LATERAL need is
+                // the max over the row - how far left I must sit to clear the
+                // widest of them (docs §9, "the obstruction is a train"). The
+                // TARGET is the car I follow: the nearest qualifying obstruction
+                // ahead. Picking by need was wrong for a row of the same width
+                // - every tractor asks for the same metres, so the pick was
+                // whatever the broadphase grid handed first, and the commitment
+                // named the far tractor while I was still behind the near one.
+                if (needM > wantM) wantM = needM;
+                if (along < passAlong32)
                 {
-                    wantM = needM; passUid32 = o.Uid; passProg32 = o.Progress;
+                    passAlong32 = along;
+                    passUid32 = o.Uid; passProg32 = o.Progress;
                     passLen32 = o.LengthM; passX32 = o.X; passY32 = o.Y;
                 }
                 // The window is measured past the FRONT of the row, whatever car
