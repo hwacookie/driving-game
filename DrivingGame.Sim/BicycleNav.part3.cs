@@ -364,8 +364,19 @@ public sealed partial class BicycleNav
             // Only the cars parked beside the kerb bound a bay. A car driving past
             // on the other side of the road is not a flank.
             if (o.State != CarState.Parked) continue;
-            double u = (o.X - seg.X1) * tx + (o.Y - seg.Y1) * ty;
-            double v = (o.X - seg.X1) * rx + (o.Y - seg.Y1) * ry;
+            // A flank bounds the bay with its BODY, not with the point the state
+            // happens to carry: `/state x,y` is the REAR AXLE (docs/UNITS.md), so
+            // projecting it and calling that the middle is the same 1.28 m
+            // (Config.REAR_AXLE_OFFSET_M) trap the #36 guard named. Measured on a
+            // live bay: this used to name the mouth 144.60..151.00 while the two
+            // parked bodies (the payload's own `body_corners`) stand at
+            // 145.88..152.28 — every acceptance box half a car toward the rear,
+            // which is what made the drawn box cover the behind car. The body
+            // middle is Car.BodyCenter(); the lateral offset is unaffected because
+            // a parked car stands aligned with the kerb.
+            var (bcx, bcy) = o.BodyCenter();
+            double u = (bcx - seg.X1) * tx + (bcy - seg.Y1) * ty;
+            double v = (bcx - seg.X1) * rx + (bcy - seg.Y1) * ry;
             if (v <= 0.0) continue;
             _bayVPositive++;
             plain.Add((u, o.LengthM));
