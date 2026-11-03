@@ -318,7 +318,7 @@ public sealed partial class BicycleNav
             // whether a fast car ever stands inside a mouth's window at all.
             if (++_bayAskTicks % 30 == 1)
                 Console.WriteLine($"[BAYASK] car #{_car.Uid} flanks={_bayFlanks} row=1 " +
-                                  $"beside=0 at u≈{_car.X:F0},{_car.Y:F0}");
+                                  $"beside=0 v={_car.Speed * 3.6:F0}km/h at u≈{_car.X:F0},{_car.Y:F0}");
         }
         else if (!_bayAsked && !_bayRowAtAsk)
         {
@@ -1919,7 +1919,19 @@ public sealed partial class BicycleNav
         (string Phase, double? VTarget)? plan = null;
         double? dStop = null;
         DecideParkStyle();
-        if (HasDestination() && !pullingOut && !_pkAwaitingClaim && _ref is not null)
+        // §1d (2026-11-03, owner decisions 1a/2b): a row of bays at the ask is
+        // DRIVEN ALONG, not braked to. The scanning speed is the plan's own creep
+        // speed V_C (PARK_SWERVE_SPEED_M) — the speed the brake model already reserves
+        // for the zone where a park is being chosen — no new constant. Measured
+        // before this: the car braked to a standstill 53 m before the row and never
+        // stood beside a window, and with the braking simply removed it flew past the
+        // flag at 52 km/h. Neither is what a driver scanning the row does.
+        if (_pkAwaitingClaim)
+        {
+            plan = ("scan", PARK_SWERVE_SPEED_M);
+            ParkPhase = "scan";
+        }
+        else if (HasDestination() && !pullingOut && !_pkAwaitingClaim && _ref is not null)
         {
             double stopS = _ref.Total - StopMargin();
             dStop = stopS - ParkS();

@@ -723,7 +723,12 @@ public sealed partial class BicycleNav
         {
             if (TryClaimBay())
             {
-                _routeKey = null;      // the line must be re-cut to the claimed spot
+                // NOT re-cutting the line here: the claimed mouth sits on the same
+                // line a few metres from the ask, and re-cutting at claim time moved
+                // the line under the car — measured as `❌ TELEPORTATION / UNEXPECTED
+                // JUMP DETECTED!` in the watch run of 24–26, i.e. physically
+                // impossible motion. The reverse-in extends the line itself when it
+                // stages past the spot.
             }
             else if (_bayRowAtAsk)
             {
