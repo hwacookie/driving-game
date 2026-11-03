@@ -720,6 +720,26 @@ public sealed partial class BicycleNav
     /// pull-over's target offset. Reversing needs three things: a real
     /// destination (a flag), road beyond it to stage the manoeuvre, and a
     /// tuck worth making.</summary>
+    /// <summary>Extend the reference line past the stage point of the claimed bay,
+    /// along the direction the claimed row runs. An EXTENSION only: the existing
+    /// points and therefore every arc position on the line are untouched, so the
+    /// car cannot be moved off its line (docs §1d, the TELEPORTATION rule). The
+    /// length mirrors part2's re-cut (`extendM: _parkStageM + _parkStageExtM`
+    /// beyond the destination), which here IS the claimed centre — measured: 147.80
+    /// (claim) + stage 9.89 + 3.47 = 161.16, the same total the next rebuild
+    /// produced, so the two paths cannot disagree.</summary>
+    private void ExtendRefPastStage(double stageM)
+    {
+        if (_ref is null || !_bayClaimed || _ref.Pts.Count == 0) return;
+        double need = _claimSOnLineM + stageM + _parkStageExtM + 0.5 - _ref.Total;
+        if (need <= 0.0) return;
+        var hd = Math.Radians(_claimHeadDeg);
+        var (lx, ly) = _ref.Pts[^1];
+        var pts = new List<(double X, double Y)>(_ref.Pts);
+        pts.Add((lx + Math.Sin(hd) * need, ly + Math.Cos(hd) * need));
+        _ref = new RefLine(pts);
+    }
+
     private void DecideParkStyle()
     {
         if (Parked || _reversePark is not null) return;
@@ -732,6 +752,16 @@ public sealed partial class BicycleNav
         // asks again on the next tick. This replaces the anchor, which moved the
         // spot to a gap without ever asking where the car stood.
         _pkAwaitingClaim = false;
+        // The boundary "a bay is claimable only from beside its mouth" (docs §1d)
+        // governs CHOOSING. Once this car HAS taken a bay the claim is ITS OWN
+        // property (§1d: "a claim is a property of the car, not a reservation list")
+        // and it persists until the manoeuvre ends — re-asking it every tick unmade
+        // it. Measured: the car crept in, claimed (rear=145.88 front=152.28), armed
+        // `armed reverse: tuck=3.74 stage=9.89 claimed=1`, then passed the window's
+        // front edge; the ask answered `beside=0`, the park plan was suppressed and
+        // the car stood in the driving lane at s=147.7 m with `phase=none`, and the
+        // 2.5 m unit case failed at prog 49.2%.
+        if (!(_bayClaimed && ParkStyle == "reverse"))
         {
             if (TryClaimBay())
             {
@@ -832,6 +862,17 @@ public sealed partial class BicycleNav
         if (!_bayClaimed || _claimSOnLineM + stage >= _ref.Total - 1e-6)
         {
             _routeKey = null;          // re-cut the line past the flag
+            // The re-cut above only happens in NEXT tick's rebuild, and the brake
+            // plan of THIS tick still sized its stop at the ask — measured: the
+            // 2.5 m case claimed (rear=145.88 front=152.28), armed reverse
+            // (tuck=3.74 stage=9.89), then `[PARKACC] phase=final dStop=-3.25`
+            // braked it to a standstill at s=147.7 m against the OLD stopS=144.26
+            // and the back-in never started (`phase=none`, state Driving, prog
+            // 49.2%). The line is therefore extended here, and only as an
+            // EXTENSION: the prefix stays, so every arc position and the car stay
+            // on the same line — a re-cut that moved the end under the car is the
+            // TELEPORTATION / UNEXPECTED JUMP measured in the watch run of 24–26.
+            ExtendRefPastStage(stage);
         }
         else if (RefLineMath.PARK_DEBUG)
         {

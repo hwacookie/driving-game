@@ -2044,6 +2044,20 @@ public sealed partial class BicycleNav
             double stopS = _ref.Total - StopMargin();
             dStop = stopS - ParkS();
             plan = ParkingPlan(dStop.Value, car.Speed);
+            if (plan is null && _bayClaimed && ParkStyle == "reverse" && dStop is not null &&
+                dStop.Value > 0.0 && car.Speed <= PARK_SWERVE_SPEED_M + 0.1)
+            {
+                // The reverse job is armed and this car is already at or below the
+                // plan's creep speed, still short of the STAGING point. Without a
+                // plan here the plain profile takes over and brakes to the
+                // destination — measured in the 2.5 m case: the car stood at the
+                // claim centre (s=147.8, v=0) while stopS=157.63, so the back-in
+                // never started (`phase=none`, state Driving, prog 49.3%). §1c's
+                // own creep speed covers the rest of the row to the staging point
+                // (no new constant); the reverse gate below then opens there.
+                plan = ("creep", PARK_SWERVE_SPEED_M);
+                ParkPhase = "staging";
+            }
             if (plan is not null)
             {
                 // Stopped at the destination: blinker off (spec §1).
