@@ -377,6 +377,18 @@ public sealed partial class BicycleNav
         if (bay0 is null)
             return false;     // no mouth here fits this car — §1c refuses the row;
         _bayRowAtAsk = true;  // the kerb past the row stays the caller's decision
+        // The far end of the row, in world coordinates: the scanning drive has to be
+        // able to come to rest clear of it (§1d — the ask is an ask, not a stop).
+        double farU = double.NegativeInfinity;
+        foreach (var (cu, cl, cv2, uid2) in flanks)
+        {
+            if (cu + cl / 2.0 > farU) farU = cu + cl / 2.0;
+        }
+        if (farU > double.NegativeInfinity / 2.0)
+        {
+            _pkRowEndX = seg.X1 + tx * farU;
+            _pkRowEndY = seg.Y1 + ty * farU;
+        }
         var (cx, cy) = _car.BodyCenter();
         double ownU = (cx - seg.X1) * tx + (cy - seg.Y1) * ty;
         if (ClaimBayBeside(ownU, _car.LengthM, plain) is not (double rearEndM,
@@ -1951,11 +1963,42 @@ public sealed partial class BicycleNav
         // flag at 52 km/h. Neither is what a driver scanning the row does.
         if (_pkAwaitingClaim)
         {
-            plan = ("scan", PARK_SWERVE_SPEED_M);
+            // §1d (2026-11-03, owner decisions 1a/2b): a row of bays at the ask is
+            // DRIVEN ALONG, not braked to. The scanning speed is the plan's own creep
+            // speed V_C (PARK_SWERVE_SPEED_M) — the speed the brake model already
+            // reserves for the zone where a park is being chosen — no new constant.
+            // The stop the scan is sized for is the FAR END of the row, not the ask:
+            // measured, sizing it at the ask left the car 0.9 m short of the first
+            // mouth's inside window (ownU 146.59 vs 147.50..152.50) and it never
+            // stood inside a mouth, so it never claimed. The roll-out is the plan's
+            // own (v = d/tau, PARK_STOP_TAU), so the easing to a standstill is the
+            // existing physics, not a new one.
+            double dRowEndM = _ref is not null && _pkRowEndX != 0.0
+                ? RefLineMath.ProjectS(_ref, _pkRowEndX, _pkRowEndY, ParkS()) - ParkS()
+                : double.PositiveInfinity;
+            if (dRowEndM <= PARK_SWERVE_SPEED_M * PARK_STOP_TAU)
+            {
+                plan = ("final", Math.Max(0.0, dRowEndM) / PARK_STOP_TAU);
+            }
+            else
+            {
+                plan = ("creep", PARK_SWERVE_SPEED_M);
+            }
             ParkPhase = "scan";
         }
         else if (HasDestination() && !pullingOut && !_pkAwaitingClaim && _ref is not null)
         {
+            // The stop the car is chasing, and whether that stop is stable: the
+            // record shows a car creeping at V_C forever (creep dStop=+5.97 after
+            // final dStop=-1.99 — the stop jumped 8 m ahead of it). The line's end
+            // and the destination are the only things that can move it, so they go
+            // into the record next to the demand.
+            var (dbgDx, dbgDy) = _dest ?? (0.0, 0.0);
+            if (_car.SimStep % 30 == 0)
+                _car.RecordDecision(_navTime, $"[PARKSTOP] refTotal={_ref.Total:F2} " +
+                                          $"stopS={_ref.Total - StopMargin():F2} " +
+                                          $"dest={dbgDx:F2},{dbgDy:F2} " +
+                                          $"stage={_parkStageM:F2}");
             double stopS = _ref.Total - StopMargin();
             dStop = stopS - ParkS();
             plan = ParkingPlan(dStop.Value, car.Speed);

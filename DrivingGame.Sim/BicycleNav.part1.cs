@@ -389,6 +389,12 @@ public sealed partial class BicycleNav
     /// it never stands beside a window (measured in the three bay scenarios).
     private bool _pkAwaitingClaim;
     private double _claimSOnLineM;
+    // §1d: the far end of the row of bays — the last parked car's front end. The
+    // scanning drive must be able to come to rest PAST the row, never at the ask:
+    // measured, sizing the stop at the ask left the car 0.9 m short of the first
+    // mouth's inside window (ownU 146.59 against 147.50..152.50), and a car that
+    // never stands inside a mouth never claims one.
+    private double _pkRowEndX, _pkRowEndY;
     private bool _bayAsked;      // one witness line per destination, not per tick
     private int _bayAskTicks;    // the asks WHILE unclaimed, every ~0.5 s
     /// A row of bays this car fits stands at the ask while this car is not beside
@@ -494,6 +500,7 @@ public sealed partial class BicycleNav
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
         _bayClaimed = false; _bayRowAtAsk = false;   // a fresh ask claims nothing
+        _pkRowEndX = _pkRowEndY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
         _parkBayShiftM = 0.0;
@@ -516,6 +523,7 @@ public sealed partial class BicycleNav
         _routeKey = null;
         _parkBayAnchored = false;
         _bayClaimed = false; _bayRowAtAsk = false;   // nothing is asked, nothing claimed
+        _pkRowEndX = _pkRowEndY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
         _parkBayShiftM = 0.0;
@@ -733,8 +741,7 @@ public sealed partial class BicycleNav
                 _claimSOnLineM = _ref is not null
                     ? RefLineMath.ProjectS(_ref, _claimX, _claimY, ParkS())
                     : 0.0;
-            }
-            else if (_bayRowAtAsk)
+            }            else if (_bayRowAtAsk)
             {
                 // The ask is not a stop point until a mouth is claimed: measured,
                 // the scenario car braked to a standstill 53 m before the row and
@@ -797,12 +804,22 @@ public sealed partial class BicycleNav
         // classic back-in.
         double oFwd = oLane;
         var plan = PlanReverseTuck(width, oFwd);
-        if (plan is null) return;
+        if (plan is null)
+        {
+            // The ask's own answer: reversing buys nothing on this road, so the
+            // car will park forwards. Readable from inside the test.
+            _car.RecordDecision(_navTime, $"[PARKPLAN] refused: reverse buys nothing " +
+                                      $"(width={width:F2} oFwd={oFwd:F2} dStop={dStop:F1})");
+            return;
+        }
         (double tuck, double stage) = plan.Value;
         ParkStyle = "reverse";
         _parkTuck = tuck;
         _parkStageM = stage;
         _parkStageShort = false;
+        _car.RecordDecision(_navTime, $"[PARKPLAN] armed reverse: tuck={tuck:F2} " +
+                                  $"stage={stage:F2} claimed={(_bayClaimed ? 1 : 0)} " +
+                                  $"dStop={dStop:F1} claimS={_claimSOnLineM:F1}");
         // The line may only be re-cut when that is a pure EXTENSION: the stage point
         // (claimed mouth + stage) must not fall short of the end the car is already
         // driving on, or the re-cut would move the end behind the car and put the
