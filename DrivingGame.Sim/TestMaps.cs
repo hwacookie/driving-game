@@ -683,6 +683,13 @@ public static class TestMaps
         (ox, oy) = Origin(2, 3);
         AddPlanarFig8(b, "xing_", "fig8_xing", rightOfWay: true,
                       px: ox + 250, py: oy + 250);
+        // A start for the ROW test (docs/DRIVING_MANEUVERS.md §9, issue #78).
+        // The tile's own name ("fig8_xing") belongs to the 50-car right-of-way
+        // cast, which is not what a row test wants: this start sits on the
+        // priority diagonal ~190 m BEFORE the crossing node xing_c, so there is
+        // room and time to over-take a row of slow vehicles - and the crossing
+        // sits right where such a pass has to end (R38's no-overtake zone).
+        b.Start("fig8_row", "xing_n31", facing: "xing_n32");
 
         // --- Tile (3,3): Un-signed figure-8 (real degree-4 crossing) ---
         // Same geometry as tile (2,3) but with NO signs at the crossing, so

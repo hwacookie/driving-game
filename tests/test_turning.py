@@ -558,6 +558,9 @@ SCENARIO_FOCUS = {
     # Both crossings: 50 cars through one degree-4 box.
     'fig8_xing':           {"kind": "loc", "node_prefix": "xing_"},
     'fig8_xing_plain':     {"kind": "loc", "node_prefix": "xingp_"},
+    # The row test: the camera holds the row and the crossing node xing_c in one
+    # frame, so the check, the borrow and the return are all visible.
+    'fig8_row':            {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
     # The pass happens at the parked car / at the crawler's start spot, on the
     # two-lane straight — a place, because the subject never moves (17) or
     # because the box must hold the whole squeeze (20).
@@ -625,6 +628,7 @@ PRIMARY_CAR_ROLE = {
     ('slow_pass_priority', 'straight'): 'overtaking_car',  # after waiting
     ('roundabout_from_north', 'right'): 'roundabout_exit_car',
     ('park_6lane_right_lane', 'straight'): 'parking_car',
+    ('fig8_row', 'straight'): 'row_passing_car',   # the car that passes a whole row
 }
 
 # docs §9 Case B + C (issue #78): a scenario is graded on the ROW when its
@@ -835,22 +839,24 @@ DETERMINISTIC_TESTS = [
     # RED today, and that is the point of the scenario: nothing decides a
     # driver's preference (R37's intent is still R32's obstruction test), so
     # the rear tractor takes the turn and the car behind never gets one.
-    ('crossroads_from_north', 'straight', 50, 'cross_center→cross_s', 90.0,  # chain-row twin on the crossroads tile (a 180 m approach, a 7 m carriageway, and a real crossing)
-     "Row of two slow vehicles on the approach to a crossing: the rear one keeps "
-     "its lane, the car behind passes the whole row (R37 order, R32 row window, "
-     "R36, R38's no-overtake zone at the crossing)",
-     0.12, False, 0.55, False,
-     [{'segment': 'cross_n→cross_center', 'progress': 0.85,
-       # the row's FRONT, ~27 m before the crossing node (750,720): a pass over
-       # the row runs THROUGH the crossing, the extra "no over-take here" this
-       # tile gives and the plain straight does not (R38 is not in the code yet,
-       # so the run shows what actually happens at the crossing - the solid
-       # centreline before a junction, CENTERLINE_SOLID_BEFORE_JUNCTION_M, is).
+    ('fig8_row', 'straight', 50, 'xing_c→xing_n37', 90.0,
+     "Row of two slow vehicles on the figure-8's priority diagonal: the rear one "
+     "keeps its lane, the car behind passes the whole row, and the pass has to "
+     "end at a REAL crossing (R37 order, R32 row window, R36, R38's no-overtake "
+     "zone)",
+     0.1, False, 0.5, False,
+     [{'segment': 'xing_n35→xing_c', 'progress': 0.35,
+       # the row's FRONT, 15 m along a 44 m segment: ~29 m before the crossing
+       # node xing_c (1250,1750), the degree-4 self-crossing of this tile. The
+       # room: the start sits ~140 m back along the priority diagonal, so the
+       # passing car has time to do the check, the borrow and the return - and
+       # the crossing is where an honest pass over the row must end (R38 says a
+       # pass may not begin or continue here; it is not in the code yet, so the
+       # run shows what happens).
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        'model': 'tractor', 'name': 'row_front_tractor'},
-      {'segment': 'cross_n→cross_center', 'progress': 0.72,
-       # ~23 m behind its front, same segment: in the queue this is the leader.
-       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+      {'segment': 'xing_n34→xing_n35', 'progress': 0.9,
+       # ~19 m behind its front, one node back: in the queue this is the leader.
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        # "Ms. Daisy" (R40): this driver does NOT want the pass, so it must keep
        # its lane and leave its turn to the car behind it. The default (1.0,
