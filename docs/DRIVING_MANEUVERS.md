@@ -1410,7 +1410,11 @@ any crawler — has gain 0 and wants no pass **at any eagerness**: that half is
 physics, not disposition, and it is why §9 Case B works out of the model rather
 than out of a staging. The other half, "this driver wants the pass", is staged
 through `POST /teleport`'s `driver_eagerness` — a scenario needs it for its
-Cast anyway, because wanting cannot be read off a car.
+Cast anyway, because wanting cannot be read off a car. The standing default is
+eagerness **1.0**: fleet-wide, drivers want to pass ("they should want to pass
+either way"); patience is staged, never assumed. A **parked** car is not asked
+at all - it is off duty and holds no turn (measured: letting one want a pass
+blocked the car behind it forever and `park_block_overtake` timed out).
 
 The word in the log carries the reason, so a tape says what the model asked:
 
@@ -1474,6 +1478,39 @@ every pose and every decision line, as §1c's grading paragraph says):
 
 A test whose expected record does not change between A and B is not testing
 this rule — the same sentence §1c writes for its bay row.
+
+### What exists now (#78, 2026-11-03)
+
+Branch `fix-78-chain-row-intent`, `DrivingGame.Sim/CarCollisions.cs` + `Car.cs`
++ `TestMaps.cs` + `tests/test_turning.py`:
+
+- **R40 exists**, with the code above: `Car.DriverEagerness` (standing default
+  `1.0`), `MinAcceptableGainMps`, `DriverModelMaxGainMps = 8.0`, staged through
+  `driver_eagerness`; a PARKED car is not asked.
+- **R32's commitment now requires the intent.** `wantM > 0 && c.OvertakeIntent &&
+  !blocked && myTurn` — a driver that declined must not commit. Measured before
+  the link existed: "Ms. Daisy" logged `no pass wanted` and still held `PassUid`
+  of the row's front, which made the car behind read a guest in its lane and
+  take no turn at all. The intent is also **asked about the thing I pass**
+  (the queue leader if there is one, else R32's target), because a parked car at
+  the kerb is outside the queue band and is still what a pass is about.
+- **the row is a numbered scenario now** (`fig8_row`, position 22): a new map
+  start `b.Start("fig8_row", "xing_n31", facing: "xing_n32")` on the self-crossing
+  tile, 190 m of the priority diagonal before a real degree-4 crossing, the row's
+  front ~29 m before it, the rear tractor staged as Ms. Daisy, the flag past the
+  crossing. One run records both halves of the rule:
+
+```
+row_rear_tractor: [R37] intent: no pass wanted from car 2 ahead:
+                  a gain of 0.2 m/s is not worth a pass to this driver (it asks for 8.0)
+u1 (row_passing_car): [R37] intent: I want to pass car 3 ahead
+u1: [R32] obstruction ahead - borrowing the free lane (2.67 m left)
+✅ Reached the end flag - the whole row passed, next to a real crossing
+```
+
+- **no regression**: the branch's red set is the same six scenarios as `main`
+  (three parking, the negative hairpin, the two fig8 crossings); unit tests
+  168/0, `dotnet test` green.
 
 ### What exists now (#73, 2026-11-03)
 

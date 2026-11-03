@@ -1036,9 +1036,6 @@ public static class CarCollisions
             int leaderUid32 = -1;
             bool leadHolds32 = false;
             double leadSpeed32 = 0.0;    // what my leader drives: the gain I could get
-            double leadLat32 = 0.0;      // how far across MY LINE my leader sits
-            double leadNeedM32 = 0.0;    // metres of side room clearing it would ask
-            string leadReject32 = "";    // why my leader is NOT an obstruction (R39/queue/speed)
             // R32's target is the car I follow; the WINDOW is measured past the
             // front of the row (docs §9 "The obstruction is a train"), so the
             // auction is asked for the longer stretch and the far half of the
@@ -1085,26 +1082,17 @@ public static class CarCollisions
                     leaderUid32 = o.Uid;
                     leadHolds32 = o.OvertakeIntent || o.PassUid >= 0;
                     leadSpeed32 = o.Speed;
-                    leadLat32 = lat;
-                    leadNeedM32 = needM;
                 }
                 // R39: a guest in my lane (it is passing) - not an obstruction.
                 if (o.OvertakeIntent || o.OvertakeShiftM > 0.05 || o.PassUid >= 0)
                 {
-                    if (o.Uid == leaderUid32)
-                        leadReject32 = "a guest in my lane (intent " + o.OvertakeIntent +
-                                       $", shift {o.OvertakeShiftM:F2} m, passUid {o.PassUid})";
                     if (needM > borrowerNeedM) { borrowerNeedM = needM; borrowerUid32 = o.Uid; }
                     if (along < borrowerAlongM) borrowerAlongM = along;
                     continue;
                 }
                 // An obstruction: stopped, or crawling far below my speed.
                 if (o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0))
-                {
-                    if (o.Uid == leaderUid32)
-                        leadReject32 = "not slow enough: it drives near my speed";
                     continue;
-                }
                 // A car that is STOPPED but NOT parked is a queue lead, not an
                 // obstruction: it has a route and may pull away at any moment,
                 // so borrowing the other lane past it is not a safe commitment -
@@ -1114,11 +1102,7 @@ public static class CarCollisions
                 // Crawling traffic (Speed > 0.5, the line above) is still fair
                 // game - a tractor, a bus that cannot turn.
                 if (o.Speed <= 0.5 && o.BicycleNav?.Parked != true)
-                {
-                    if (o.Uid == leaderUid32)
-                        leadReject32 = "stopped but not parked: a queue lead, not an obstruction";
                     continue;
-                }
                 // How far LEFT must I sit to clear it? The margin is the speed
                 // curve, so the demand and the pass speed below speak the same
                 // relation - two constants set to the same value (demand 0.5,
@@ -1226,9 +1210,13 @@ public static class CarCollisions
             // asked about: the obstruction R32 picked (a parked car at the kerb is
             // outside the queue band but it is what a pass is about) - the ORDER
             // gate stays the leader's, the DECISION is about whatever I pass.
+            // A PARKED car asks nothing: it is off duty, it holds no turn, and a
+            // car that would otherwise read one from it would wait behind a car
+            // that is not going anywhere (measured: park_block_overtake timed out
+            // once the parked car itself was allowed to want a pass).
             int askUid32 = leaderUid32 >= 0 ? leaderUid32 : passUid32;
             double askSpeed32 = leaderUid32 >= 0 ? leadSpeed32 : passSpeed32;
-            if (askUid32 < 0)
+            if (askUid32 < 0 || c.State == CarState.Parked)
             {
                 c.OvertakeIntent = false; c.IntentWithUid = -1;
                 c.OvertakeIntentLog = false;
@@ -1236,40 +1224,37 @@ public static class CarCollisions
             else if (c.IntentWithUid != askUid32)
             {
                 // TWO questions, two answers (§9 + the driver model): may a pass
-                // be DRIVEN at all (the geometry, feasibility), and does THIS
-                // driver want to drive one? The gain a driver accepts is the
-                // whole of the difference between an impatient one and "Ms.
-                // Daisy" - everything else about a pass (the check, the signal,
-                // the return) is the same for every driver. A car already at its
-                // own ceiling (a tractor, a crawler) gains nothing and wants no
-                // pass at any eagerness: that is the physics, not the disposition.
+                // be DRIVEN at all (the geometry, feasibility - R32 asks it at the
+                // commitment below), and does THIS driver want to drive one? Only
+                // the second question is answered here, and it stays the
+                // driver's: the gain they accept is the whole of the difference
+                // between an impatient one and "Ms. Daisy" - everything else about
+                // a pass (the check, the signal, the return) is the same for every
+                // driver. A car already at its own ceiling (a tractor, a crawler)
+                // gains nothing and wants no pass at any eagerness: that half is
+                // physics, not disposition. The geometry must stay OUT of this
+                // question: the decision runs ONCE per object, while "is there
+                // room now" changes without the object changing - folding it in
+                // made a car ask once, early, and never re-ask (measured:
+                // park_block_overtake timed out, its driver having answered "no"
+                // for a parked car it was not yet blocking).
                 double gainMps = c.EffectiveTopMps - askSpeed32;
                 double wantMps = MinAcceptableGainMps(c.DriverEagerness);
-                bool roomExists = wantM > 0.0;
-                bool intent = roomExists && gainMps > wantMps;
+                bool intent = gainMps > wantMps;
                 c.OvertakeIntent = intent;
                 c.IntentWithUid = askUid32;
                 // R20: the decision is recorded when it CHANGES, both ways -
                 // a car that declines is not a silent car, and a queue check
                 // has to tell "not asked" from "asked and declined". The
-                // surrounding branch already runs once per new leader, so this
+                // surrounding branch already runs once per new object, so this
                 // is one line per approach, not one per tick.
                 c.OvertakeIntentLog = intent;
-                // The reason, in the driver's own terms, so a tape says WHAT the
-                // model asked instead of making the reader guess: "nothing to
-                // pass" and "not worth a pass" are different facts, and the
-                // first one names the guard that refused my leader.
-                string whyNoRoom = leadReject32.Length > 0
-                    ? leadReject32 : "not in my line: my leader sits"
-                    + $" {leadLat32:F2} m across my line, clearing it asks {leadNeedM32:F2} m";
-                c.RecordDecision(simTime,
-                    intent
-                        ? $"[R37] intent: I want to pass car {askUid32} ahead"
-                        : $"[R37] intent: no pass wanted from car {leaderUid32} ahead"
-                          + (roomExists
-                              ? $": a gain of {gainMps:F1} m/s is not worth a pass"
-                                + $" to this driver (it asks for {wantMps:F1})"
-                              : $" ({whyNoRoom})"));
+                string wish = intent
+                    ? $"[R37] intent: I want to pass car {askUid32} ahead"
+                    : $"[R37] intent: no pass wanted from car {askUid32} ahead: "
+                      + $"a gain of {gainMps:F1} m/s is not worth a pass to this driver "
+                      + $"(it asks for {wantMps:F1} m/s)";
+                c.RecordDecision(simTime, wish);
             }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;
