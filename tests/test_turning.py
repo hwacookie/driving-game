@@ -666,6 +666,12 @@ DETERMINISTIC_TESTS = [
     #      leaves a car where it was put: that is how a PARKED car is staged.
     #      EVERY extra names its role ('name'); the primary car of the scenario
     #      gets its role from PRIMARY_CAR_ROLE above.
+    #  11 primary_eagerness: THE DRIVER of the PRIMARY (docs §9, R40) - 0.0 =
+    #      "Ms. Daisy" (passes only what runs ~30 km/h below her), 1.0 = pushy
+    #      (passes what is in its way). Absent = the sim's standing default (1.0).
+    #      The PRIMARY is staged through the same POST /teleport as an extra, so
+    #      the engine already parses this field; a row test whose passing car IS
+    #      the primary states its own disposition instead of inheriting a default.
     # 90-degree corners (the classic reported bug)
     ('corner_right_entry', 'right', 50, 'cornerR_c→cornerR_w', 60.0,
      "Taking a sharp 90° right corner"),
@@ -863,7 +869,11 @@ DETERMINISTIC_TESTS = [
        # "passes what is in its way") is today's behaviour - patience is staged,
        # never assumed.
        'driver_eagerness': 0.0,
-       'model': 'tractor', 'name': 'row_rear_tractor'}]),
+       'model': 'tractor', 'name': 'row_rear_tractor'}],
+     # THE PRIMARY's own disposition (index 11, primary_eagerness): the car
+     # that passes the whole row IS the primary, so the scenario says what
+     # that driver wants instead of inheriting the fleet default. 1.0 = pushy.
+     1.0),
     # Hairpin, entered from the opposite end (reverse direction)
     ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
@@ -1259,7 +1269,8 @@ class TurnTester:
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
                                   speed_mps: float | None = None,
-                                  model: str = "mercedes_c220", role: str | None = None):
+                                  model: str = "mercedes_c220", role: str | None = None,
+                                  eagerness: float | None = None):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -1277,6 +1288,13 @@ class TurnTester:
         role: the car's ROLE in this scenario ('left_turning_car', …) - sent
         WITH the spawn, so the label exists before the car's first tick (see
         PRIMARY_CAR_ROLE and docs/TESTING.md "Named cars").
+        eagerness: THE DRIVER (docs/DRIVING_MANEUVERS.md §9, R40) - 0.0 is
+        "Ms. Daisy" (she passes only what runs ~30 km/h below her), 1.0 is a
+        pushy driver (passes what is in its way). None leaves the SIM's own
+        standing default (1.0). Wanting a pass is the driver's, not a car's
+        speed, so a scenario that wants a patient PRIMARY has to say so - the
+        PRIMARY goes through this same POST /teleport as any staged extra, so
+        the engine path already exists and only this field was missing.
         """
         try:
             old_uid = self.get_state().get('car_uid')
@@ -1287,6 +1305,8 @@ class TurnTester:
             payload['speed'] = speed_mps
         if role:
             payload['name'] = role
+        if eagerness is not None:
+            payload['driver_eagerness'] = eagerness
         requests.post(f"{API_URL}/teleport", json=payload)
         # Wait until the game loop has actually processed the teleport and
         # the state reflects the NEW car (see _wait_for_new_car).
@@ -2667,7 +2687,8 @@ class TurnTester:
                       expect_wrong_side: bool = False,
                       spawn_speed_kmh: float | None = None,
                       car_name: str | None = None,
-                      extra_cars: list[dict] | None = None) -> dict:
+                      extra_cars: list[dict] | None = None,
+                      primary_eagerness: float | None = None) -> dict:
         """Monitor a turn for violations.
         
         Args:
@@ -2718,6 +2739,13 @@ class TurnTester:
                 first tick. None leaves the car unnamed - only the big-cast
                 runners (fig8_*) do that now, and they name their whole fleet
                 `<class>-<uid>` (see _cast_fallback_names).
+            primary_eagerness: THE DRIVER of the primary (docs §9, R40), 0.0
+                = "Ms. Daisy", 1.0 = pushy. None = the sim's standing default
+                (1.0 - "passes what is in its way"). A row test whose PASSING
+                car is the primary states its own disposition instead of
+                inheriting a fleet default; the value travels with the spawn
+                (POST /teleport's driver_eagerness), which the engine already
+                parses.
         Returns:
             dict with test results
         """
@@ -2773,7 +2801,8 @@ class TurnTester:
             else:
                 rolling = RUNNING_START_KMH / 3.6
             self.create_car_at_start_point(start_point, progress=start_progress,
-                                           speed_mps=rolling, role=car_name)
+                                           speed_mps=rolling, role=car_name,
+                                           eagerness=primary_eagerness)
             # Label under the minimap: the current test number ("10/27"),
             # when running as part of a suite; standalone runs fall back
             # to the track number / start-point name. Only when the scenario
@@ -4302,6 +4331,11 @@ class TurnTester:
             end_flag_progress = test[8] if len(test) > 8 else END_FLAG_PROGRESS
             expect_wrong_side = bool(test[9]) if len(test) > 9 else False
             extra_cars = test[10] if len(test) > 10 else None
+            # 11 primary_eagerness: THE DRIVER of the PRIMARY (docs §9, R40).
+            # Absent = the sim's standing default (1.0). A scenario whose own
+            # primary is patient or pushy declares it here, because wanting a
+            # pass is the driver's, not something a car's speed implies.
+            primary_eagerness = test[11] if len(test) > 11 else None
             # The primary car's ROLE: keyed by the maneuver (PRIMARY_CAR_ROLE).
             # The NEGATIVE hairpin test drives the SAME maneuver as the
             # positive one and is the car EXPECTED to end up wrong side - the
@@ -4311,6 +4345,14 @@ class TurnTester:
                         else PRIMARY_CAR_ROLE.get((start_point, direction)))
             print(f"\n\n{'#'*60}")
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
+            # THE DRIVER of the primary, on the same line as the cast: wanting
+            # a pass is the driver's (docs §9, R40), so a run must show which
+            # driver it staged - a None here means "the sim's standing default",
+            # not "an ordinary driver I forgot to ask about".
+            if primary_eagerness is not None:
+                who = ('Ms. Daisy' if primary_eagerness <= 0.0 else
+                       'pushy' if primary_eagerness >= 1.0 else f'{primary_eagerness:g}')
+                print(f"# primary driver: {who} (driver_eagerness={primary_eagerness:g})")
             print(f"{'#'*60}")
 
             skip_reason = SKIPPED_TESTS.get(start_point)
@@ -4372,7 +4414,8 @@ class TurnTester:
                                            end_flag_progress=end_flag_progress,
                                            expect_wrong_side=expect_wrong_side,
                                            car_name=car_name,
-                                           extra_cars=extra_cars)
+                                           extra_cars=extra_cars,
+                                           primary_eagerness=primary_eagerness)
 
             _emit({'type': 'done', 'index': i, 'passed': result['passed'],
                    'aborted': bool(result.get('aborted'))})

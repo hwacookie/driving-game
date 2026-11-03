@@ -30,9 +30,12 @@
 > above names: §9 Case B works out of the model, measured as the rear tractor's
 > own declined-intent line in a numbered scenario. R32's target selection
 > changed too - the commitment names the car I FOLLOW, while the lateral need
-> and the window stay the row's. What remains: the primary car of a scenario
-> cannot carry a personality yet, and the row scenario borrows another
-> scenario's named start.
+> and the window stay the row's. What remains: **the PRIMARY of a scenario now
+> carries a disposition too** (the suite's tuple gained field 11,
+> `primary_eagerness`, sent through the same `POST /teleport` as any extra, and
+> the run header prints it) - what is still open is a scenario that DISCRIMINATES
+> on it (a leader close enough in speed that an eager driver passes and a patient
+> one does not), and R38's no-overtake zone at a crossing.
 
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
@@ -1415,6 +1418,10 @@ eagerness **1.0**: fleet-wide, drivers want to pass ("they should want to pass
 either way"); patience is staged, never assumed. A **parked** car is not asked
 at all - it is off duty and holds no turn (measured: letting one want a pass
 blocked the car behind it forever and `park_block_overtake` timed out).
+A scenario stages the PRIMARY the same way: the suite's scenario tuple carries
+`primary_eagerness` at field 11 and the run header prints what it staged
+(`# primary driver: pushy (driver_eagerness=1)`), because a run that does not
+name its drivers cannot be read as a driver experiment.
 
 The word in the log carries the reason, so a tape says what the model asked:
 
@@ -1577,13 +1584,16 @@ numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
   carries the disposition, and the measured row of two tractors logs the rear
   one declining (`[R37] intent: no pass wanted … a gain of 0.2 m/s is not
   worth a pass`).
-  What is still not in the code: **only an extra car can be staged as a
-  personality** — a scenario's PRIMARY takes the standing default, so "the
-  primary is a pushy driver" is not testable today. (The API path for it
-  already exists: the primary is staged through `POST /teleport` like any
-  other car and that endpoint parses `driver_eagerness`; what is missing is
-  the harness passing it.) The row scenario itself is a numbered test with its
-  own map start now (`fig8_row`).
+  What is still not in the code: nothing about the disposition itself -
+  **the PRIMARY now carries one too** (the suite's scenario tuple has field
+  11 `primary_eagerness`, which `create_car_at_start_point` sends through the
+  same `POST /teleport`; a run prints `# primary driver: Ms. Daisy |
+  pushy (driver_eagerness=…)`). What is still missing is a scenario that
+  DISCRIMINATES on it: `fig8_row` stages its primary as pushy and proves the
+  value travels, but the row's front is 19 m/s slower than the primary's own
+  ceiling, so even Ms. Daisy would pass it. A discriminating cast needs a
+  leader within ~8 m/s - that is a scenario of its own, and R38 (no pass at
+  a crossing) is #80.
 - **no queue scenario in the numbered suite** — there is now a **row-of-two
   scenario** (a second entry on `slow_pass_priority`'s named start, one tractor
   more in the row), graded on the row's own decision facts and printing who
