@@ -7,7 +7,10 @@
 #   PR_VERDICTS="$(tail -5 tests/run_test_*.log)" scripts/pr.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ -f .git/offline-mode ]; then
+# `.git` is a FILE in a git worktree, so this test has to ask git where its
+# state lives — a fix worktree must not pretend the repo is online while the
+# primary tree is offline (docs/WORKFLOW.md, worktree habit).
+if [ -f "$(git rev-parse --git-common-path)/offline-mode" ]; then
   echo "!! offline mode is on (.git/offline-mode) - this step needs GitHub."
   echo "   Land the fix locally instead: scripts/offline.sh land  (docs/WORKFLOW.md)"
   echo "   Or scripts/offline.sh off if the network is back."

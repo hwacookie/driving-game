@@ -176,14 +176,39 @@ the exempt commit is still built and unit-tested immediately after landing.
 
 ## Helper scripts
 
+### One issue, one branch, one directory (the worktree habit)
+
+Parallel sessions work different issues at the same time, so a fix branch gets
+its **own directory**, named after the repo plus the issue number:
+
+```
+/Users/hauke/prj/driving-game       main
+/Users/hauke/prj/driving-game-62    fix-62-bay-claim-as-park-target
+/Users/hauke/prj/driving-game-75    fix-75-worktree-aware-helper-scripts
+```
+
+`scripts/fix.sh` creates both the branch and that worktree and prints where to
+`cd`; the main directory does not move. `scripts/merge.sh` lands the PR **in the
+primary worktree** — run it from any tree — and removes the fix worktree and its
+local branch afterwards, so a landed issue leaves no directory behind.
+
+Why this is a rule and not a convenience: a branch checkout is a **move of the
+tree**, not of my attention. Two sessions, one tree, means the other session's
+build compiles the files I am about to edit — that is the same class of surprise
+as the two clients (a live sim and a tape) or a parked car and a moving one: one
+subject, its own place. The main tree is never a fix branch's home.
+
 - `scripts/issue.sh TITLE [BODY]` — create the issue, print its number and URL.
 - `scripts/fix.sh N [SLUG]` — `git fetch`, branch `fix-N-slug` off
-  `origin/main`, refuse a dirty tree.
+  `origin/main` **in a new worktree** `<repo-dir>-N` (reusing that worktree if
+  the branch already has one), refuse a dirty tree; print `cd <path>`.
 - `scripts/pr.sh [TITLE]` — commit staged work if any, push, open the PR
   against `main` with a body linking `Fixes #N`.
 - `scripts/merge.sh [N]` — merge the PR for the current branch, delete the
   branch, return to `main`, `git pull --ff-only`, then rebuild so the tree the
-  next step runs on is the merged one.
+  next step runs on is the merged one. Run from a fix worktree: it resolves the
+  primary worktree, lands there, and removes the fix worktree and its local
+  branch.
 
 All four refuse to act on a dirty working tree unless told (`--allow-dirty`),
 because a half-saved edit must never ride into a PR unnoticed.
