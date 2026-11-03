@@ -81,6 +81,22 @@ public class BayReverseInTests
         BayAt(clearanceM);
     }
 
+    /// <summary>The roomiest bay, as the ISOLATION test for the manoeuvre itself
+    /// (owner decision 2026-11-03: prove the widest bay first, then work inward — the
+    /// owner asked for a parking manoeuvre with the most space, tested on its own,
+    /// until THAT works). 5.00 m of slack per end is far beyond §1c tier 1, so nothing
+    /// here is about the bay rule: the question is whether the reverse-in — turn in,
+    /// counter-steer, and where needed pull forward and straighten (docs §1b, the
+    /// owner's description of the real manoeuvre) — completes cleanly when space is
+    /// NOT the constraint. Strict exit, same as the ladder: a verdict on record, no
+    /// GAVE UP, no hazard, no contact.</summary>
+    [Theory]
+    [InlineData(5.0)]
+    public void TheRoomiestBay_TheManoeuvreCompletes(double clearanceM)
+    {
+        BayAt(clearanceM);
+    }
+
     /// <summary>§1c tier 1 (2026-11-02): the tight bays, and why they are not
     /// verdicts yet. What changed is what the PLAN IS TOLD: a parking job now
     /// sees the whole row standing at its spot (BicycleNav.PARK_BAY_ROW_SCAN_M
@@ -177,6 +193,30 @@ public class BayReverseInTests
                     $"reason: '{(car.Driver as BicycleDriver)?.HazardReason ?? "?"}' - " +
                     "the driver surrendered and made it visible, as designed, so this " +
                     "is not a pass");
+                // A VERDICT is not a park. §1c tier 3 (owner decision 2026-11-02):
+                // at rest the car needs at least 0.20 m at EACH end of the bay, and
+                // §1b the body ends parallel to the kerb — a car resting 20° across
+                // the row has a parking verdict and is nonetheless not parked. The
+                // geometry is the row's own: the payload anchor is the REAR AXLE
+                // (docs/UNITS.md), so a car standing along the row spans
+                // [anchor, anchor + length].
+                double uRear = rear.Progress * AvenueLenM + rear.LengthM;
+                double uFront = front.Progress * AvenueLenM;
+                double uCar = car.Progress * AvenueLenM;
+                double endRearM = uCar - uRear;
+                double endFrontM = uFront - (uCar + car.LengthM);
+                double yawOff = Math.Abs(((car.Heading - 180.0 + 540.0) % 360.0) - 180.0);
+                Assert.True(endRearM >= 0.20 && endFrontM >= 0.20,
+                    $"the {clearanceM:F1} m bay says it parked, but the body does not " +
+                    $"stand in it: {endRearM:F2} m behind and {endFrontM:F2} m ahead of " +
+                    $"the two flanks (§1c tier 3 wants at least +0.20 m at EACH end; " +
+                    $"the mouth is {(uFront - uRear):F2} m, the car {car.LengthM:F2} m)\n" +
+                    ParkTrace(car, 60));
+                Assert.True(yawOff <= 5.0,
+                    $"the {clearanceM:F1} m bay ended {yawOff:F1}° off the kerb — " +
+                    "the counter-steer that straightens the car (§1b: turn in, " +
+                    "counter-steer, pull forward and straighten) never finished\n" +
+                    ParkTrace(car, 60));
                 return;
             }
             if (car.Speed < minSpeed) minSpeed = car.Speed;

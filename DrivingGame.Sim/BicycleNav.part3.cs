@@ -1099,6 +1099,29 @@ public sealed partial class BicycleNav
                     $"(attempt {_parkAttempts + 1}/{PARK_MAX_ATTEMPTS})");
                 return;
             }
+            // The reverse ran out of room and the car is still yawed: that is exactly
+            // the pose the owner's manoeuvre answers (§1b, owner decision 2026-11-03:
+            // turn in, counter-steer — and when the angle cannot be closed in reverse,
+            // pull forward and straighten). The forward leg already exists here as the
+            // SHIMMY state (the mirrored law unwinds the angle, bounded, then hands
+            // back); what was missing is that it was reachable only from a HOLD, never
+            // from the END of the reverse run — measured in the 2.5 m bay: steering
+            // saturates (`sat=True`, yaw pinned at 22.9°), the body reaches the bay
+            // line (off=-0.26 m) with dRem=1.1 m of reverse left, and this branch then
+            // FINISHED the job at 9.8° off the kerb.
+            if (!inBay && _parkShimmyTries < PARK_SHIMMY_TRIES &&
+                Math.Abs(eOff) <= PARK_ACCEPT_OFF_M + PARK_SHIMMY_OFF_M)
+            {
+                _parkShimmyTries++;
+                _parkShimmy = true;
+                _parkShimmyDist = 0.0;
+                car.RecordDecision(_navTime,
+                    $"[PARK] SHIMMY #{_parkShimmyTries} at the end of the reverse — " +
+                    $"still {psiDeg:F1}° off the kerb with the body {Math.Abs(eOff):F2} m " +
+                    $"off the bay line: pull forward {PARK_SHIMMY_M:F1} m unwinding the " +
+                    "angle, then back in (§1b)");
+                return;
+            }
             FinishReversePark(converged ? "standing at the kerb" :
                 $"standing in the bay, {psiDeg:F1}° off the kerb - accepted within " +
                 $"{PARK_ACCEPT_PSI_DEG:F0}° (#36)");
@@ -1169,9 +1192,15 @@ public sealed partial class BicycleNav
             else if (!_parkRetried && _reversePark is not null)
             {
                 // Held mid-tuck and not straight enough to accept: abandon THIS path
-                // and re-solve from here rather than fight it. A forward shuffle was
-                // my first idea and it is wrong — in a reverse-in bay the room is
-                // behind, not in front.
+                // and re-solve from here rather than fight it. The forward correction
+                // (turn in, pull forward a little, straighten) IS a valid correction
+                // here — owner decision 2026-11-03, after the earlier wording
+                // (“a forward shuffle … is wrong — in a reverse-in bay the room is
+                // behind, not in front”) was called out as simply false: while the
+                // car is still half outside the bay, its nose has room in front of
+                // it. That correction is what `SHIMMY` does (the mirrored law, see
+                // the branch above); this branch is the fallback for the pose the
+                // shimmy does not apply to (body far off the bay line).
                 _parkRetried = true;
                 _reversePark = null;
                 ParkPhase = "none";
