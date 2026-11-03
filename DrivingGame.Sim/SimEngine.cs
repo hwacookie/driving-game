@@ -67,7 +67,17 @@ public sealed record TeleportCommand(string? StartPoint, int? Segment,
                                      // null = today: the driving lane of that
                                      // carriageway. This is placement, not physics:
                                      // the nav keeps its own lane offset afterwards.
-                                     double? LatOffsetM = null) : SimCommand;
+                                     double? LatOffsetM = null,
+                                     // THE DRIVER (docs/DRIVING_MANEUVERS.md §9,
+                                     // "a driver that does not want to pass"): how
+                                     // pushy this driver is, 0.0 = "Ms. Daisy", who
+                                     // only pays for a pass when the gain is large,
+                                     // to 1.0 = impatient, who passes at any gain. A
+                                     // number, not a label: the personalities are the
+                                     // words in the doc, the sim asks for the one
+                                     // thing they change (the gain a driver accepts).
+                                     // null = an ordinary driver (Config default).
+                                     double? DriverEagerness = null) : SimCommand;
 
 /// <summary>Multi-car cleanup: Action "clear" (all) or "remove" (one Uid).</summary>
 public sealed record CarsCommand(string Action, int? Uid) : SimCommand;
@@ -607,6 +617,11 @@ public sealed class SimEngine
                 // queue lead it must not pass).
                 if (tp.CruiseKmh is not null && tp.CruiseKmh.Value > 0.0)
                     newCar.CruiseCapMps = tp.CruiseKmh.Value / 3.6;
+                // THE DRIVER (§9): who wants to pass is the driver's decision, so
+                // a scenario (and a fleet) can stage a pushy one and a patient
+                // one; clamped to the 0..1 the model understands.
+                if (tp.DriverEagerness is not null)
+                    newCar.DriverEagerness = Math.Clamp(tp.DriverEagerness.Value, 0.0, 1.0);
                 _cars[newCar.Uid] = newCar;
                 _carFlags[newCar.Uid] = new TestFlags();
                 // Unaddressed flags/label (legacy clients that set them before

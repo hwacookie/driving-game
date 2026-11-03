@@ -53,7 +53,7 @@ hosts):
 | GET | `/car/{uid}/decisions` | that car's rule log (events, newest last) |
 | POST | `/control` | sustained keys + one-shot `hazard` |
 | POST | `/reset` | all control inputs false |
-| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `model`, `color`, `role`, `reverse`, `detail_window`, `tyre_lines`) |
+| POST | `/teleport` | spawn/replace cars (`add`, `segment`, `speed`, `model`, `color`, `role`, `reverse`, `cruise_kmh`, `driver_eagerness`, `name`, `lat_m`, `detail_window`, `tyre_lines`) |
 | POST | `/caropts` | change one car's `color` / `tyre_lines` / `detail_window` during the run (uid required) |
 | POST | `/park` | park an existing car where it stands — the R32 obstruction primitive |
 | POST | `/follow` | re-point the PRIMARY (followed) car at another uid |

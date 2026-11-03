@@ -71,6 +71,14 @@ public static class CarCollisions
     // for that pair: they physically cannot drive past one another, so the
     // pair must negotiate the claim (docs/DRIVING_MANEUVERS.md §8 R26).
     const double MinPassClearanceM = 0.5;
+    // A driver's own ceiling (EffectiveTopMps) minus the leader's speed is the
+    // gain a pass could give; this is the MOST a driver may ask for, so the
+    // accepted gain runs from "any" (an eager driver, 0 asked) to this full
+    // number for "Ms. Daisy" (eagerness 0). 8 m/s = 29 km/h: a patient driver
+    // pays for a pass only when the traffic ahead is far slower - the shape the
+    // §9 two-tractor case needs, where a tractor that already drives at its own
+    // ceiling is not passed by nothing at all but declines on its own.
+    const double DriverModelMaxGainMps = 8.0;
     // Lateral clearance asked for BESIDE an obstruction - not a constant, and
     // not two constants any more. The old shape used 0.5 twice: once as the
     // DEMAND ("I want half a metre beside it") and once as a VETO ("under half
@@ -87,6 +95,18 @@ public static class CarCollisions
     const double SideClearPerMpsM = 0.05;   // m of extra gap per m/s of closing speed
     public static double SideClearM(double vMps) =>
         MinPassClearanceM + Math.Max(0.0, vMps) * SideClearPerMpsM;
+    /// <summary>The driver model (§9 "Why the queue's turn is not enough"): how
+    /// much faster the ego must be than the vehicle ahead before it accepts a
+    /// pass. A pushy driver (eagerness 1) passes at any gain; "Ms. Daisy" (0)
+    /// only pays for a pass when the gain is a full DriverModelMaxGainMps. The
+    /// number is one knob because one thing separates the personalities: what
+    /// gain a driver accepts - the route choice, the signalling, the check and
+    /// the return are the same for every driver. My own ceiling (EffectiveTopMps)
+    /// is what the driver wants to drive, so a car already at its ceiling - a
+    /// tractor, a crawler - wants no pass at any eagerness: there is nothing to
+    /// gain, and that is physics, not a disposition.</summary>
+    public static double MinAcceptableGainMps(double eagerness) =>
+        DriverModelMaxGainMps * (1.0 - Math.Clamp(eagerness, 0.0, 1.0));
     /// <summary>One owner for "am I mid-pass?" - read by the corridor bound,
     /// by v1's forward corridor and by R33's intent (docs/RIGHT_OF_WAY_NEGOTIATION.md
     /// §7c: three consumers, one object).
@@ -1015,11 +1035,14 @@ public static class CarCollisions
             double leadAlongM = 1e9;
             int leaderUid32 = -1;
             bool leadHolds32 = false;
+            double leadSpeed32 = 0.0;    // what my leader drives: the gain I could get
             // R32's target is the car I follow; the WINDOW is measured past the
             // front of the row (docs §9 "The obstruction is a train"), so the
             // auction is asked for the longer stretch and the far half of the
             // window is observed from there (the accepted observation cheat).
             int passUid32 = -1; double passProg32 = -1.0; double passLen32 = 0.0;
+            double passSpeed32 = 0.0;    // what my target drives (a parked car: 0)
+            double passAlong32 = 1e9;
             double passX32 = 0.0, passY32 = 0.0;
             double frontLen32 = 0.0, frontX32 = 0.0, frontY32 = 0.0, frontAlongM = 0.0;
             // R39: a car that is in my lane BECAUSE it is passing is not an
@@ -1058,6 +1081,7 @@ public static class CarCollisions
                     leadAlongM = along;
                     leaderUid32 = o.Uid;
                     leadHolds32 = o.OvertakeIntent || o.PassUid >= 0;
+                    leadSpeed32 = o.Speed;
                 }
                 // R39: a guest in my lane (it is passing) - not an obstruction.
                 if (o.OvertakeIntent || o.OvertakeShiftM > 0.05 || o.PassUid >= 0)
@@ -1084,10 +1108,20 @@ public static class CarCollisions
                 // relation - two constants set to the same value (demand 0.5,
                 // veto 0.5) can never both hold when the delivery is off by
                 // centimetres, which is what pinned the car at 0.46 m.
-                if (needM > wantM)
+                // TWO questions, two answers (issue #78). The LATERAL need is
+                // the max over the row - how far left I must sit to clear the
+                // widest of them (docs §9, "the obstruction is a train"). The
+                // TARGET is the car I follow: the nearest qualifying obstruction
+                // ahead. Picking by need was wrong for a row of the same width
+                // - every tractor asks for the same metres, so the pick was
+                // whatever the broadphase grid handed first, and the commitment
+                // named the far tractor while I was still behind the near one.
+                if (needM > wantM) wantM = needM;
+                if (along < passAlong32)
                 {
-                    wantM = needM; passUid32 = o.Uid; passProg32 = o.Progress;
-                    passLen32 = o.LengthM; passX32 = o.X; passY32 = o.Y;
+                    passAlong32 = along;
+                    passUid32 = o.Uid; passProg32 = o.Progress;
+                    passLen32 = o.LengthM; passSpeed32 = o.Speed; passX32 = o.X; passY32 = o.Y;
                 }
                 // The window is measured past the FRONT of the row, whatever car
                 // of it is furthest along (docs §9).
@@ -1172,37 +1206,72 @@ public static class CarCollisions
             // judgement, asked once while that one is still my leader; the car
             // behind reads the flag instead of asking me again. A driver who does
             // not want to pass leaves it clear, and the car behind IT is free.
-            if (leaderUid32 < 0)
+            // With no car ahead of me IN MY LINE there is still a thing I may be
+            // asked about: the obstruction R32 picked (a parked car at the kerb is
+            // outside the queue band but it is what a pass is about) - the ORDER
+            // gate stays the leader's, the DECISION is about whatever I pass.
+            // A PARKED car asks nothing: it is off duty, it holds no turn, and a
+            // car that would otherwise read one from it would wait behind a car
+            // that is not going anywhere (measured: park_block_overtake timed out
+            // once the parked car itself was allowed to want a pass).
+            int askUid32 = leaderUid32 >= 0 ? leaderUid32 : passUid32;
+            double askSpeed32 = leaderUid32 >= 0 ? leadSpeed32 : passSpeed32;
+            if (askUid32 < 0 || c.State == CarState.Parked)
             {
                 c.OvertakeIntent = false; c.IntentWithUid = -1;
                 c.OvertakeIntentLog = false;
             }
-            else if (c.IntentWithUid != leaderUid32)
+            else if (c.IntentWithUid != askUid32)
             {
-                bool intent = wantM > 0.0;
+                // TWO questions, two answers (§9 + the driver model): may a pass
+                // be DRIVEN at all (the geometry, feasibility - R32 asks it at the
+                // commitment below), and does THIS driver want to drive one? Only
+                // the second question is answered here, and it stays the
+                // driver's: the gain they accept is the whole of the difference
+                // between an impatient one and "Ms. Daisy" - everything else about
+                // a pass (the check, the signal, the return) is the same for every
+                // driver. A car already at its own ceiling (a tractor, a crawler)
+                // gains nothing and wants no pass at any eagerness: that half is
+                // physics, not disposition. The geometry must stay OUT of this
+                // question: the decision runs ONCE per object, while "is there
+                // room now" changes without the object changing - folding it in
+                // made a car ask once, early, and never re-ask (measured:
+                // park_block_overtake timed out, its driver having answered "no"
+                // for a parked car it was not yet blocking).
+                double gainMps = c.EffectiveTopMps - askSpeed32;
+                double wantMps = MinAcceptableGainMps(c.DriverEagerness);
+                bool intent = gainMps > wantMps;
                 c.OvertakeIntent = intent;
-                c.IntentWithUid = leaderUid32;
+                c.IntentWithUid = askUid32;
                 // R20: the decision is recorded when it CHANGES, both ways -
                 // a car that declines is not a silent car, and a queue check
                 // has to tell "not asked" from "asked and declined". The
-                // surrounding branch already runs once per new leader, so this
+                // surrounding branch already runs once per new object, so this
                 // is one line per approach, not one per tick.
                 c.OvertakeIntentLog = intent;
-                c.RecordDecision(simTime,
-                    (intent ? "[R37] intent: I want to pass "
-                            : "[R37] intent: no pass wanted from ")
-                    + $"car {leaderUid32} ahead");
+                string wish = intent
+                    ? $"[R37] intent: I want to pass car {askUid32} ahead"
+                    : $"[R37] intent: no pass wanted from car {askUid32} ahead: "
+                      + $"a gain of {gainMps:F1} m/s is not worth a pass to this driver "
+                      + $"(it asks for {wantMps:F1} m/s)";
+                c.RecordDecision(simTime, wish);
             }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;
 
-            // --- the commitment (R32) ------------------------------------
+            // --- the commitment (R32 + R40) ------------------------------
             // wantM exists only while the obstruction is still in my line; the
             // PASS is not over at that moment, so the object names WHICH car I am
             // passing (my target, the near one) while the WINDOW is measured past
             // the front of its row (§9 "The obstruction is a train"). Read by the
             // corridor bound, by v1 and by R33 - one object, three consumers.
-            if (wantM > 0.0 && !blocked && myTurn32 && passUid32 >= 0)
+            // Three conditions, and the third one is the driver's: a car may only
+            // commit a pass its own driver asked for (R37's flag, R40's model).
+            // Without it a decline is a suggestion, not a decision - measured on
+            // the figure-8 row: "Ms. Daisy" logged "no pass wanted" and still
+            // committed (PassUid of the row's front), which made the car behind
+            // see a guest in its lane and take no turn at all.
+            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurn32 && passUid32 >= 0)
             {
                 c.PassUid = passUid32;
                 c.PassSegIdx = c.SegIdx;

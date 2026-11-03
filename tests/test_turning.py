@@ -364,6 +364,23 @@ def describe_failure(result: dict) -> str | None:
         return (f"drove past the end flag at "
                 f"{result.get('passed_flag_speed_kmh', 0):.0f} km/h - the "
                 f"scenario requires a stop AT the flag")
+    # §9 Case B/C (issue #78), specific-first — the same ordering lesson as #27:
+    # "the queue never got its turn on a row" is the named diagnosis, and the
+    # generic "timed out before the flag" underneath it would hide that the
+    # manoeuvre itself is missing, not the last metre.
+    if result.get("chain_expected") and not result.get("chain_borrowed_uids"):
+        roles = result.get("chain_role_map") or {}
+        who = lambda u: roles.get(u, f"uid {u}")
+        dec = ", ".join(who(u) for u in result.get("chain_declined_uids", [])) or "nobody"
+        return (f"never entered the other lane on a row (docs §9 Case B/C). Measured "
+                f"this run: intent declined by [{dec}], pass taken by nobody - "
+                "no car of the cast entered the other lane, so the row was never "
+                "passed. What a row demands (§9): the lateral need and the window "
+                "are the row's, the turn order is each driver's own (R37), and a "
+                "driver that does not want to pass leaves the turn open (R40) so "
+                "the car behind takes it; where the primary of a scenario gets "
+                "its own disposition from is still open (only staged extras "
+                "carry driver_eagerness today).")
     if result.get("segment_changed") and not result.get("reached_expected_segment"):
         final = result.get("final_segment")
         expected = result.get("expected_end_segment")
@@ -541,6 +558,9 @@ SCENARIO_FOCUS = {
     # Both crossings: 50 cars through one degree-4 box.
     'fig8_xing':           {"kind": "loc", "node_prefix": "xing_"},
     'fig8_xing_plain':     {"kind": "loc", "node_prefix": "xingp_"},
+    # The row test: the camera holds the row and the crossing node xing_c in one
+    # frame, so the check, the borrow and the return are all visible.
+    'fig8_row':            {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
     # The pass happens at the parked car / at the crawler's start spot, on the
     # two-lane straight — a place, because the subject never moves (17) or
     # because the box must hold the whole squeeze (20).
@@ -608,7 +628,14 @@ PRIMARY_CAR_ROLE = {
     ('slow_pass_priority', 'straight'): 'overtaking_car',  # after waiting
     ('roundabout_from_north', 'right'): 'roundabout_exit_car',
     ('park_6lane_right_lane', 'straight'): 'parking_car',
+    ('fig8_row', 'straight'): 'row_passing_car',   # the car that passes a whole row
 }
+
+# docs §9 Case B + C (issue #78): a scenario is graded on the ROW when its
+# staging names these roles. The demand is attached to the roles, not to a
+# (start_point, direction) key - several scenarios share one road, and the
+# question here is about the cars on it, not about which scenario string ran.
+CHAIN_ROW_ROLES = {'row_front_tractor', 'row_rear_tractor'}
 
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
@@ -639,6 +666,12 @@ DETERMINISTIC_TESTS = [
     #      leaves a car where it was put: that is how a PARKED car is staged.
     #      EVERY extra names its role ('name'); the primary car of the scenario
     #      gets its role from PRIMARY_CAR_ROLE above.
+    #  11 primary_eagerness: THE DRIVER of the PRIMARY (docs §9, R40) - 0.0 =
+    #      "Ms. Daisy" (passes only what runs ~30 km/h below her), 1.0 = pushy
+    #      (passes what is in its way). Absent = the sim's standing default (1.0).
+    #      The PRIMARY is staged through the same POST /teleport as an extra, so
+    #      the engine already parses this field; a row test whose passing car IS
+    #      the primary states its own disposition instead of inheriting a default.
     # 90-degree corners (the classic reported bug)
     ('corner_right_entry', 'right', 50, 'cornerR_c→cornerR_w', 60.0,
      "Taking a sharp 90° right corner"),
@@ -799,6 +832,48 @@ DETERMINISTIC_TESTS = [
        'name': 'slow_car'},
       {'start_point': 'straight_reverse', 'progress': 0.15,
        'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
+    # --- The row as ONE obstruction (docs §9 Case B + C, issue #78) ---------
+    # Two slow vehicles in a row, a car behind them, traffic in the other lane.
+    # What §9 demands: the row is one plan (its window ends past its FRONT),
+    # the turn order is each driver's own (a queue passes front-first), and a
+    # driver that does NOT want to pass leaves the turn open so the car behind
+    # takes it - the rear tractor keeps its lane, the passing car goes past
+    # BOTH. With an oncoming car owning the other half, the check is visible
+    # (signal before any commitment, a creep to the edge of its own lane) and
+    # an aborted plan is a driven way back, not a standstill; the lane's own
+    # drivers keep their way (R39: room to their right, a gentle brake).
+    # RED today, and that is the point of the scenario: nothing decides a
+    # driver's preference (R37's intent is still R32's obstruction test), so
+    # the rear tractor takes the turn and the car behind never gets one.
+    ('fig8_row', 'straight', 50, 'xing_c→xing_n37', 90.0,
+     "Row of two slow vehicles on the figure-8's priority diagonal: the rear one "
+     "keeps its lane, the car behind passes the whole row, and the pass has to "
+     "end at a REAL crossing (R37 order, R32 row window, R36, R38's no-overtake "
+     "zone)",
+     0.1, False, 0.5, False,
+     [{'segment': 'xing_n35→xing_c', 'progress': 0.35,
+       # the row's FRONT, 15 m along a 44 m segment: ~29 m before the crossing
+       # node xing_c (1250,1750), the degree-4 self-crossing of this tile. The
+       # room: the start sits ~140 m back along the priority diagonal, so the
+       # passing car has time to do the check, the borrow and the return - and
+       # the crossing is where an honest pass over the row must end (R38 says a
+       # pass may not begin or continue here; it is not in the code yet, so the
+       # run shows what happens).
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'model': 'tractor', 'name': 'row_front_tractor'},
+      {'segment': 'xing_n34→xing_n35', 'progress': 0.9,
+       # ~19 m behind its front, one node back: in the queue this is the leader.
+       'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       # "Ms. Daisy" (R40): this driver does NOT want the pass, so it must keep
+       # its lane and leave its turn to the car behind it. The default (1.0,
+       # "passes what is in its way") is today's behaviour - patience is staged,
+       # never assumed.
+       'driver_eagerness': 0.0,
+       'model': 'tractor', 'name': 'row_rear_tractor'}],
+     # THE PRIMARY's own disposition (index 11, primary_eagerness): the car
+     # that passes the whole row IS the primary, so the scenario says what
+     # that driver wants instead of inheriting the fleet default. 1.0 = pushy.
+     1.0),
     # Hairpin, entered from the opposite end (reverse direction)
     ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
@@ -1026,6 +1101,41 @@ class TurnTester:
             trace = getattr(self, '_state_trace', None)
             if st and trace is not None and (not trace or trace[-1] != st):
                 trace.append(st)
+        # §9 Case B/C (issue #78): the row facts are read from the cars' OWN
+        # rule logs, and Car.Decisions is a 100-entry ring (Car.cs) - a 60 s
+        # run pushes the row's first decisions out of it. So the facts are read
+        # while the scenario runs, from every car in the world (role names are
+        # resolved when the facts are assembled, where the staged uids are
+        # known). One request per car every ~20 polls, not one per frame.
+        if getattr(self, '_chain_on', False):
+            self._chain_poll = getattr(self, '_chain_poll', 0) + 1
+            # Every poll, not every twentieth: a one-shot decision line ("the
+            # driver declined", "the pass started") exists for one step, and a
+            # ~1 s sampling gap was measured to miss it (the primary logged
+            # nothing while a queued tractor's repeated line came through). The
+            # set is this scenario's cast only - a handful of cars, not the
+            # fleet - so the cost is a few small GETs per poll, not physics.
+            for u in getattr(self, '_chain_uids', ()):  # every car on the field
+                    try:
+                        rr = requests.get(f"{API_URL}/car/{u}/decisions", timeout=2)
+                        rows = (rr.json() or {}).get("decisions", []) if rr.ok else []
+                    except requests.exceptions.RequestException:
+                        continue
+                    for e in rows:
+                        m = e.get("msg", "")
+                        if m.startswith("[R32] obstruction ahead - borrowing"):
+                            getattr(self, '_chain_borrowed', set()).add(u)
+                        elif m.startswith("[R37] intent: no pass wanted"):
+                            getattr(self, '_chain_declined', set()).add(u)
+                        elif m.startswith("[R37] "):
+                            getattr(self, '_chain_r37', set()).add(u)
+                        if m.startswith("[R37] intent") or m.startswith("[R32] obstruction"):
+                            # The WHY, kept for the reviewer: one line per kind
+                            # per car, so the facts block states the model's own
+                            # arithmetic instead of a guess about it.
+                            got = self._chain_msgs.setdefault(u, {})
+                            if m[:14] not in got:
+                                got[m[:14]] = m
         return data
     
     def get_segment_geometry(self, idx: int) -> dict | None:
@@ -1159,7 +1269,8 @@ class TurnTester:
 
     def create_car_at_start_point(self, name: str, progress: float = 0.5,
                                   speed_mps: float | None = None,
-                                  model: str = "mercedes_c220", role: str | None = None):
+                                  model: str = "mercedes_c220", role: str | None = None,
+                                  eagerness: float | None = None):
         """Replace car with a fresh one at named start point.
 
         progress: fraction along the start segment (from the node). The
@@ -1177,6 +1288,13 @@ class TurnTester:
         role: the car's ROLE in this scenario ('left_turning_car', …) - sent
         WITH the spawn, so the label exists before the car's first tick (see
         PRIMARY_CAR_ROLE and docs/TESTING.md "Named cars").
+        eagerness: THE DRIVER (docs/DRIVING_MANEUVERS.md §9, R40) - 0.0 is
+        "Ms. Daisy" (she passes only what runs ~30 km/h below her), 1.0 is a
+        pushy driver (passes what is in its way). None leaves the SIM's own
+        standing default (1.0). Wanting a pass is the driver's, not a car's
+        speed, so a scenario that wants a patient PRIMARY has to say so - the
+        PRIMARY goes through this same POST /teleport as any staged extra, so
+        the engine path already exists and only this field was missing.
         """
         try:
             old_uid = self.get_state().get('car_uid')
@@ -1187,6 +1305,8 @@ class TurnTester:
             payload['speed'] = speed_mps
         if role:
             payload['name'] = role
+        if eagerness is not None:
+            payload['driver_eagerness'] = eagerness
         requests.post(f"{API_URL}/teleport", json=payload)
         # Wait until the game loop has actually processed the teleport and
         # the state reflects the NEW car (see _wait_for_new_car).
@@ -2567,7 +2687,8 @@ class TurnTester:
                       expect_wrong_side: bool = False,
                       spawn_speed_kmh: float | None = None,
                       car_name: str | None = None,
-                      extra_cars: list[dict] | None = None) -> dict:
+                      extra_cars: list[dict] | None = None,
+                      primary_eagerness: float | None = None) -> dict:
         """Monitor a turn for violations.
         
         Args:
@@ -2618,6 +2739,13 @@ class TurnTester:
                 first tick. None leaves the car unnamed - only the big-cast
                 runners (fig8_*) do that now, and they name their whole fleet
                 `<class>-<uid>` (see _cast_fallback_names).
+            primary_eagerness: THE DRIVER of the primary (docs §9, R40), 0.0
+                = "Ms. Daisy", 1.0 = pushy. None = the sim's standing default
+                (1.0 - "passes what is in its way"). A row test whose PASSING
+                car is the primary states its own disposition instead of
+                inheriting a fleet default; the value travels with the spawn
+                (POST /teleport's driver_eagerness), which the engine already
+                parses.
         Returns:
             dict with test results
         """
@@ -2673,7 +2801,8 @@ class TurnTester:
             else:
                 rolling = RUNNING_START_KMH / 3.6
             self.create_car_at_start_point(start_point, progress=start_progress,
-                                           speed_mps=rolling, role=car_name)
+                                           speed_mps=rolling, role=car_name,
+                                           eagerness=primary_eagerness)
             # Label under the minimap: the current test number ("10/27"),
             # when running as part of a suite; standalone runs fall back
             # to the track number / start-point name. Only when the scenario
@@ -2747,6 +2876,12 @@ class TurnTester:
                         # (its class ceiling still applies) - staging real
                         # slow traffic rather than a stopped car.
                         payload['cruise_kmh'] = spec['cruise_kmh']
+                    if spec.get('driver_eagerness') is not None:
+                        # THE DRIVER (§9): 0 = "Ms. Daisy", 1 = impatient. A row
+                        # whose rear driver is patient is the two-tractor case -
+                        # it cannot be staged any other way, because wanting to
+                        # pass is the driver's, not a car's speed.
+                        payload['driver_eagerness'] = spec['driver_eagerness']
                     # The car's ROLE, carried WITH the spawn (the sim sets
                     # the label atomically - a second request would race the
                     # first tick). The client can then address "the oncoming
@@ -2911,6 +3046,17 @@ class TurnTester:
         # for would fail them for the wrong reason.
         self._state_trace = []
         self._state_trace_on = True
+        # §9 Case B/C (issue #78): the row facts, armed where the clock starts
+        # (same reason as the state trace: the facts must cover the whole
+        # manoeuvre, and the decision log is a ring that forgets the start).
+        chain_here = any((s.get('name') in CHAIN_ROW_ROLES) for s in (extra_cars or []))
+        self._chain_on = chain_here
+        self._chain_poll = 0
+        self._chain_borrowed, self._chain_declined, self._chain_r37 = set(), set(), set()
+        self._chain_msgs = {}
+        self._chain_uids = tuple({c['car_uid'] for c in self.get_state().get('cars', [])} |
+                                 {self.get_state().get('car_uid')}) \
+            if chain_here else ()
 
         if _aborted():
             return self._aborted_result(start_point, direction, target_speed, results)
@@ -3910,6 +4056,16 @@ class TurnTester:
                             max((state.get('time') or 0.0) - sim_at_start, 1e-9),
             'driving_cars': 1 + len(throttle_uids),
             'world_cars': 1 + len(extra_uids),
+            # §9 Case B/C (issue #78): which car said which rule line. Roles,
+            # not uids, are what the diagnosis quotes - a scenario names its
+            # cars on purpose (docs/TESTING.md, "Named cars").
+            'chain_expected': chain_here,
+            'chain_role_map': {uid: (spec.get('name') or f'#{uid}')
+                               for spec, uid in zip(extra_cars or [], extra_uids)},
+            'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
+            'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
+            'chain_msgs': {u: list(k.values()) for u, k in
+                           getattr(self, '_chain_msgs', {}).items()},
             'collision_detected': collision_detected,
             'priority_failed': priority_failed,
             'extra_arrivals': extra_arrival,
@@ -3922,7 +4078,14 @@ class TurnTester:
             'violation_details': violation_details,
             'positions': positions,
             'aborted': False,
-            'passed': passed
+            # §9 Case B/C (issue #78): a row scenario's demand is part of PASSING,
+            # not only of the diagnosis - describe_failure returns None for a pass
+            # first, so a demand that lives only there can name a failure but can
+            # never make a run red. Passing a row means ENTERING the other lane
+            # at some point (R32's own decision line is the fact); a run that
+            # reached the flag without one never did the maneuver.
+            'passed': passed and not (chain_here and not
+                                     getattr(self, '_chain_borrowed', set()))
         }
         
         # Summary
@@ -3951,6 +4114,23 @@ class TurnTester:
             print(red(f"   ⚠️  Wrong-side driving: {wrong_frames} frames ({wrong_secs}s)"))
         else:
             print(green("   ✅ Lane guard: no wrong-side driving detected"))
+
+        # §9 (issue #78): a row scenario's evidence is WHO SAID WHAT - a
+        # declined intent and a taken pass are decisions, not positions, and
+        # they are what a reviewer looks for in the tape. Roles, not uids:
+        # the scenario names its cast (docs/TESTING.md, "Named cars").
+        if result.get('chain_expected'):
+            roles = result.get('chain_role_map') or {}
+            who = lambda u: roles.get(u, f'uid {u} (not a named extra)')
+            print(dim("   [R37] intent declined by: "
+                      + (", ".join(who(u) for u in result.get('chain_declined_uids', []))
+                         or 'nobody')))
+            print(dim("   [R32] pass taken by: "
+                      + (", ".join(who(u) for u in result.get('chain_borrowed_uids', []))
+                         or 'nobody')))
+            for u, ms in sorted((result.get('chain_msgs') or {}).items()):
+                for m in ms:
+                    print(dim(f"      {who(u)}: {m[:150]}"))
 
         if kerb_gaps is not None:
             ok = not kerb_failed
@@ -4151,6 +4331,11 @@ class TurnTester:
             end_flag_progress = test[8] if len(test) > 8 else END_FLAG_PROGRESS
             expect_wrong_side = bool(test[9]) if len(test) > 9 else False
             extra_cars = test[10] if len(test) > 10 else None
+            # 11 primary_eagerness: THE DRIVER of the PRIMARY (docs §9, R40).
+            # Absent = the sim's standing default (1.0). A scenario whose own
+            # primary is patient or pushy declares it here, because wanting a
+            # pass is the driver's, not something a car's speed implies.
+            primary_eagerness = test[11] if len(test) > 11 else None
             # The primary car's ROLE: keyed by the maneuver (PRIMARY_CAR_ROLE).
             # The NEGATIVE hairpin test drives the SAME maneuver as the
             # positive one and is the car EXPECTED to end up wrong side - the
@@ -4160,6 +4345,14 @@ class TurnTester:
                         else PRIMARY_CAR_ROLE.get((start_point, direction)))
             print(f"\n\n{'#'*60}")
             print(f"# TEST {i}/{len(tests)}: '{start_point}' -> {direction.upper()} @ {speed} km/h")
+            # THE DRIVER of the primary, on the same line as the cast: wanting
+            # a pass is the driver's (docs §9, R40), so a run must show which
+            # driver it staged - a None here means "the sim's standing default",
+            # not "an ordinary driver I forgot to ask about".
+            if primary_eagerness is not None:
+                who = ('Ms. Daisy' if primary_eagerness <= 0.0 else
+                       'pushy' if primary_eagerness >= 1.0 else f'{primary_eagerness:g}')
+                print(f"# primary driver: {who} (driver_eagerness={primary_eagerness:g})")
             print(f"{'#'*60}")
 
             skip_reason = SKIPPED_TESTS.get(start_point)
@@ -4221,7 +4414,8 @@ class TurnTester:
                                            end_flag_progress=end_flag_progress,
                                            expect_wrong_side=expect_wrong_side,
                                            car_name=car_name,
-                                           extra_cars=extra_cars)
+                                           extra_cars=extra_cars,
+                                           primary_eagerness=primary_eagerness)
 
             _emit({'type': 'done', 'index': i, 'passed': result['passed'],
                    'aborted': bool(result.get('aborted'))})

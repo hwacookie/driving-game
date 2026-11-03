@@ -49,6 +49,12 @@ public class Car
     /// crawler is an obstruction to pass, a queue lead that merely happens to
     /// be at 0 is not.</summary>
     public double CruiseCapMps { get; internal set; } = 0.0;
+    /// <summary>The driver model (§9 "Why the queue's turn is not enough"): 0 =
+    /// "Ms. Daisy", who pays for a pass only when the gain is large, 1 = impatient,
+    /// who passes at any gain. One number, because one thing separates the
+    /// personalities - the gain a driver accepts. Read by R37's intent only; the
+    /// route, the signal, the check and the return are the same for every driver.</summary>
+    public double DriverEagerness = 1.0;   // the standing driver: passes what is in its way
 
     /// <summary>The two per-car VIEW options a scenario can declare at staging
     /// (issue #9): does this car get a detail window, does it draw its own tyre
