@@ -1258,6 +1258,44 @@ public static class CarCollisions
             }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;
+            // --- R38: the PLACE a pass may use (docs §9) -----------------
+            // A pass is a place-bound manoeuvre and the place is decided BEFORE
+            // it starts (owner, 2026-11-03: "überholen auf einer Kreuzung ist
+            // grundsätzlich verboten… der überholende muss sicherstellen, dass
+            // er vor Erreichen der Kreuzung den Überholvorgang abgeschlossen
+            // hat, und zwar in einem ausreichenden Abstand vor"). So the room a
+            // pass may use ENDS before the next no-over-take zone, and the
+            // WHOLE cycle - blend out, past the row, blend back - must fit in
+            // it with the driver's own look-ahead left over (LookAheadForSpeed,
+            // the same distance the driver model already reads the road with:
+            // 40 m at 50 km/h, 74.6 m at 80 km/h - no new constant).
+            // A zone is a FACT OF THE ROAD, not something this rule knows: its
+            // only source today is a junction mouth (any junction, a T included
+            // - the same mouth the paint goes solid at), and a sign, a painted
+            // stretch or `overtaking=no` may add zones later without a single
+            // line here changing. Nothing asks WHY a zone exists.
+            double zoneNearM = NoOvertakeZoneAheadM(net, c, segC32);
+            // Inside one already? The mouth BEHIND me says so: a car that has
+            // just come through a crossing is standing in its paved box (the
+            // widening the arms are drawn with, plus the corner rounding - the
+            // same figures §4/§7 use), and "a pass may not begin inside a zone"
+            // has to answer there, not only ahead. Measured before this check
+            // existed: a row that had crawled across `xing_c` let the car behind
+            // start its pass at 1.7 m from the node - a pass begun IN the box.
+            double pastBoxM = Config.JUNCTION_WIDENING_M + Config.JUNCTION_CORNER_RADIUS_M;
+            double pastNodeM = (c.Forward ? c.Progress : 1.0 - c.Progress) * segC32.Length;
+            bool insideZone32 = net.IsJunctionMouth(c.Forward ? segC32.StartNode
+                                                              : segC32.EndNode)
+                                && pastNodeM <= pastBoxM;
+            double blendBackM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
+                                           BicycleNav.MERGE_LEN_MIN_M,
+                                           BicycleNav.MERGE_LEN_MAX_M);
+            double pastRowM = Math.Max(frontAlongM,
+                                       passAlong32 < 1e8 ? passAlong32 : 0.0);
+            double planEndM = pastRowM + 0.5 * (frontLen32 + c.LengthM) + blendBackM;
+            bool placeOk32 = !insideZone32
+                             && (zoneNearM < 0.0
+                                 || planEndM + LookAheadForSpeed(c.Speed) <= zoneNearM);
 
             // --- the commitment (R32 + R40) ------------------------------
             // wantM exists only while the obstruction is still in my line; the
@@ -1271,7 +1309,8 @@ public static class CarCollisions
             // the figure-8 row: "Ms. Daisy" logged "no pass wanted" and still
             // committed (PassUid of the row's front), which made the car behind
             // see a guest in its lane and take no turn at all.
-            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurn32 && passUid32 >= 0)
+            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurn32
+                && placeOk32 && passUid32 >= 0)
             {
                 c.PassUid = passUid32;
                 c.PassSegIdx = c.SegIdx;
@@ -1325,8 +1364,10 @@ public static class CarCollisions
             // R2/R7's brake may hold the car down, and it keeps its place behind
             // the obstruction while edging to the edge of its OWN lane (below).
             string reason32 = blocked ? $"r32:{byUid32}"
-                                      : (!myTurn32 && wantM > 0.0 ? $"r37:{leaderUid32}" : "");
-            if (blocked || (!myTurn32 && wantM > 0.0))
+                                      : (!myTurn32 && wantM > 0.0 ? $"r37:{leaderUid32}"
+                                       : (!placeOk32 && wantM > 0.0 ? "r38:mouth" : ""));
+            if (blocked || (!myTurn32 && wantM > 0.0)
+                || (!placeOk32 && wantM > 0.0))
             {
                 c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
                 c.PassLengthM = 0.0;
@@ -1343,6 +1384,14 @@ public static class CarCollisions
                     c.RecordDecision(simTime,
                         $"[R37] car {leaderUid32} ahead has the turn - " +
                         "waiting for it, not for a gap");
+                else if (reason32 == "r38:mouth")
+                    c.RecordDecision(simTime,
+                        insideZone32
+                            ? $"[R38] I am standing in a crossing's box "
+                              + $"({pastNodeM:F1} m past its mouth) - no pass begins here"
+                            : $"[R38] a pass here would end at the junction mouth "
+                              + $"{zoneNearM:F1} m ahead - the plan needs "
+                              + $"{planEndM + LookAheadForSpeed(c.Speed):F1} m: not a pass");
             }
             // Outside the window the car belongs to its own lane: the shift is
             // RELEASED, not decayed. The nav re-solves the line when the pass
@@ -2649,6 +2698,71 @@ public static class CarCollisions
             bestOff = (x - qx) * (dy / tl) + (y - qy) * (-dx / tl);   // right positive
         }
         return (bestS, bestOff);
+    }
+
+    /// <summary>R38 (docs §9, "Where a pass may live at all"): how far ahead of
+    /// me, along the road I drive, the nearest no-over-take zone BEGINS - or -1
+    /// when this stretch holds none. Today the only source of a zone is a
+    /// junction mouth on my segment (any junction, a T included) and the zone
+    /// starts where the centreline already stops inviting a lane change:
+    /// `Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M` before the node, the same
+    /// stretch `RoadNetworkGeometry.StyleCentrelinePiece` paints solid. A sign,
+    /// a painted stretch or `overtaking=no` would add zones to the same answer -
+    /// the rules that read this number never ask which source made it. The walk
+    /// runs on past nodes that are NOT mouths (degree ≤ 2, one road continuing),
+    /// so a row standing two segments before a crossing is still bounded by that
+    /// crossing.</summary>
+    static double NoOvertakeZoneAheadM(RoadNetwork net, Car c, RoadSegment seg)
+    {
+        double ax = seg.X2 - seg.X1, ay = seg.Y2 - seg.Y1;
+        double alen = Math.Max(Math.Hypot(ax, ay), 1e-9);
+        double u = ((c.X - seg.X1) * ax + (c.Y - seg.Y1) * ay) / (alen * alen);
+        bool fwd = c.Forward;
+        double travelled = fwd ? (1.0 - u) * seg.Length : u * seg.Length;
+        string node = fwd ? seg.EndNode : seg.StartNode;
+        double inX = (fwd ? ax : -ax) / alen, inY = (fwd ? ay : -ay) / alen;
+        int prev = c.SegIdx;
+        // Nothing needs to know about a mouth 300 m away: R32 only asks about
+        // an obstruction 60 m out, and a plan is one row plus two blends.
+        const double ReachM = 300.0;
+        for (int hops = 0; hops < 8; hops++)
+        {
+            if (net.IsJunctionMouth(node))
+                return Math.Max(0.0,
+                                travelled - Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M);
+            if (travelled > ReachM) return -1.0;
+            if (!net.Nodes.TryGetValue(node, out var near)) return -1.0;
+            int bestIdx = -1; double bestDot = -2.0, bestDX = 0.0, bestDY = 0.0;
+            string bestFar = "";
+            foreach (var ni in net.NodeConnections.GetValueOrDefault(node, _noSegs))
+            {
+                if (ni == prev) continue;
+                var ns = net.Segments[ni];
+                if (ns.Length <= 0.1) continue;      // degenerate - cannot advance
+                bool awayFwd = ns.StartNode == node;
+                string far = awayFwd ? ns.EndNode : ns.StartNode;
+                if (far == node || !net.Nodes.TryGetValue(far, out var fxy)) continue;
+                double dx = fxy.X - near.X, dy = fxy.Y - near.Y;
+                double dl = Math.Max(Math.Hypot(dx, dy), 1e-9);
+                dx /= dl; dy /= dl;
+                // This walk only runs on past nodes that are NOT mouths (degree
+                // ≤ 2, one road continuing), and the figure-8's tile turns at
+                // such nodes every 40 m - a straight-ahead test (dot > 0.3)
+                // gave up there and answered "no zone ahead", which let a row
+                // 29 m before a crossing pay for its pass across the crossing.
+                // Past a degree-≤2 node the only neighbour that is not where I
+                // came from IS the continuation, whatever the bend.
+                double dot = dx * inX + dy * inY;
+                if (dot > bestDot) { bestDot = dot; bestIdx = ni; bestDX = dx;
+                                     bestDY = dy; bestFar = far; }
+            }
+            if (bestIdx < 0) return -1.0;            // the road ends: none ahead
+            travelled += net.Segments[bestIdx].Length;
+            node = bestFar;
+            prev = bestIdx;
+            inX = bestDX; inY = bestDY;
+        }
+        return -1.0;
     }
 
     static double LookAheadForSpeed(double v)

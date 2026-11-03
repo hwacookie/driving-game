@@ -300,6 +300,17 @@ public class RoadNetwork
     public List<int> GetConnectedSegments(string nodeId) =>
         NodeConnections.TryGetValue(nodeId, out var l) ? l : new List<int>();
 
+    /// <summary>R38's zone source: does this node open a JUNCTION? Any junction
+    /// counts - a T-junction included (owner, 2026-11-03), not only a degree-4
+    /// crossing - so the mouth is the same place the paint stops inviting a lane
+    /// change (`RoadNetworkGeometry.StyleCentrelinePiece`). Degree ≤ 2 is a
+    /// continuation of one road, not a mouth. This answers only "is a mouth
+    /// here": R38 reads the SET of no-over-take zones and never asks a source -
+    /// a sign, a painted stretch or `overtaking=no` may add zones later without
+    /// the rule changing.</summary>
+    public bool IsJunctionMouth(string nodeId) =>
+        GetConnectedSegments(nodeId).Count >= 3;
+
     /// <summary>Turning angle (degrees, negative=left, positive=right) when
     /// going from one segment to another at a shared node.</summary>
     public double GetExitAngle(int fromSegIdx, int toSegIdx)

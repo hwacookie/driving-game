@@ -45,6 +45,18 @@
 > at it. One consequence is a test, not only code: `fig8_row` (position 22)
 > parks its row ~29 m before the crossing, which under this rule is not a legal
 > pass - that staging moves, or it becomes R38's refusal test.
+>
+> **Landed 2026-11-03 (issue #80, branch `fix-80-r38-…`):** **R38 is in the code**
+> (its entry lost the tag). The decisions as recorded: the clearance is
+> `LookAheadForSpeed(my speed)` (the driver model's own look-ahead, 40 m at 50 km/h,
+> 74.6 m at 80 km/h, no new constant) and a zone comes from **every junction
+> mouth**, a T-junction included. Two tests carry it: `fig8_row` (position 22)
+> still passes a row — legal, since the row it passes has already crawled across
+> the crossing and the pass finishes PAST it — and `fig8_row_short` (position 23)
+> is the refusal: nobody borrows and R38's own line names the mouth. The 300 m
+> avenue staging that the split seemed to need turned out not to: with the rule
+> in the code, `fig8_row`'s pass happens on the far side of the crossing, so that
+> test needed no move.
 
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
@@ -1184,18 +1196,24 @@ break** and the **measurements that show whether it does**.
   never forward (§9, "The check is a visible act"). A plan over a row of slow
   vehicles is one object: its window ends past the **front** car of the row and
   feasibility of that whole is judged before the car starts (§9).
-- **R38 A pass must be finished before a crossing** *(crossing)* *[proposed]* —
+- **R38 A pass must be finished before a no-over-take zone** *(crossing)* —
   over-taking **at** a crossing is forbidden, full stop (owner, 2026-11-03). A
-  borrow may **not begin** inside a **no-over-take zone** and may **not continue**
+  borrow may **not begin** inside a no-over-take zone and may **not continue**
   through one: R36's window (`in`, `out`) and the return must stand
   **`LookAheadForSpeed(my speed)` before the zone's near end** — the driver
-  finishes the whole manoeuvre, with room left over, before reaching it. Today
-  those zones come from **every junction mouth** (a T-junction included, the same
-  mouth the paint goes solid at); signs, road markings and `overtaking=no` may
-  add zones later, and the rule reads the set, never the reason. Where the room
-  between here and the zone cannot hold the full cycle, **there is no plan**. R37's
-  order and R39's owner path are not relaxed. Full text: §9, "Where a pass may
-  live at all".
+  finishes the whole manoeuvre, with room left over, before reaching it (40 m at
+  50 km/h, 74.6 m at 80 km/h: the distance the driver model already reads the
+  road with, no new constant). Today the zones are the **junction mouths**:
+  `RoadNetwork.IsJunctionMouth` (degree ≥ 3, a T-junction included) and
+  `CarCollisions.NoOvertakeZoneAheadM` (the walk along the road I actually drive;
+  the zone starts `Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M` before the node,
+  the same stretch the paint paints solid, plus "I am standing in a crossing's
+  box" from the mouth behind me). Where the room cannot hold the whole cycle
+  (blend out, the row, blend back), **there is no plan**: the intent may still
+  be stated and the check-act may still creep, the car never commits and gets
+  its turn back. R37's order and R39's owner path are not relaxed. Signs,
+  road markings and `overtaking=no` may add zones to the same set — the rules
+  read the set, never the reason. Full text: §9, "Where a pass may live at all".
 
 - **R39 The lane's own driver keeps its way** *(crossing of lanes)* — a borrower may never make the owner of the other lane give up
   that lane: oncoming traffic has the right of way here (§8's premise: "drivable"
@@ -1422,19 +1440,31 @@ a carriageway, its reason, and its source) and every source is allowed to add to
 that set; the rule never asks *why* a zone exists, only whether the whole
 manoeuvre fits before it. Adding a signed zone must not mean editing R38 again.
 
-### Why the intent has to be a flag
-
 **Why this changes a test, not only the code.** The plan's room is
 `blend_out(v) + the row's extent + blend_back(v)` and it must **end**
 `LookAheadForSpeed(v)` before the zone — at 50 km/h that is ~35 m + row + ~35 m
 ending 40 m before the mouth, so an obstruction whose front stands closer than
-~100 m to the crossing **cannot be passed at that speed at all**: you may not
-pass a car that is parked inside the margin. `fig8_row` (position 22) parks its
-row's front ~29 m before `xing_c`, so under this rule the scenario has no legal
-pass - it becomes R38's **refusal** test (the intent is stated, the check-act
-creeps, nobody borrows). A row pass that is still a *pass* test needs a stretch
-long enough to hold the whole cycle and end before a zone: the 300 m parking
-avenue (`pkw_n→pkw_s`, two-way 19.4 m) or ~160 m of open straight at ~40 km/h.
+~110 m to the crossing cannot be passed at that speed at all: you may not pass a
+car that is standing inside the margin. Measured on this branch, both halves:
+
+- `fig8_row` (position 22) keeps its row ~29 m before `xing_c` — but the row
+  CRAWLS across the crossing at 10 km/h, so by the time the passing car is close
+  enough to act, the row is past it and the pass finishes on the far side: legal,
+  ✅ green. The 300 m avenue this seemed to need turned out not to be needed —
+  that was the guess the rule's arithmetic made before it ran.
+- `fig8_row_short` (position 23) is the refusal test: the same row, the end flag
+  **before** the crossing, and the graded expectation is that nobody borrows
+  while R38 names the mouth. Verdict of the run, in one tape:
+
+```
+[R37] intent: I want to pass car 3 ahead                    (the driver wants it)
+[R38] a pass here would end at the junction mouth 41.9 m ahead - the plan needs
+      87.4 m: not a pass                                   (the place says no)
+[R32] pass taken: nobody                        (nothing entered the other lane)
+✅ the flag reached, behind the row
+```
+
+### Why the intent has to be a flag
 
 The owner's rule (2026-11-02) — *a driver anticipates that the car in front of it
 probably wants to pass too, and does not start its own pass then* — is not a
@@ -1564,6 +1594,37 @@ every pose and every decision line, as §1c's grading paragraph says):
 A test whose expected record does not change between A and B is not testing
 this rule — the same sentence §1c writes for its bay row.
 
+### What exists now (#80, 2026-11-03)
+
+Branch `fix-80-r38-pass-finishes-before-a-no-overtake-zone`, `RoadNetwork.cs`,
+`CarCollisions.cs`, `TestMaps.cs`, `tests/test_turning.py`:
+
+- **the zone set has one source today**: `RoadNetwork.IsJunctionMouth(nodeId)`
+  (degree ≥ 3, so a T-junction counts as the owner asked) and
+  `CarCollisions.NoOvertakeZoneAheadM(net, c, seg)` — the metres to the near end
+  of the next zone along the road I drive. The walk runs on past nodes that are
+  NOT mouths (degree ≤ 2): the test map's figure-8 turns at such nodes every ~40 m,
+  and a straight-ahead test gave up there and answered "no zone", which is what
+  had let a row 29 m before a crossing pay for its pass across the crossing.
+- **inside a zone already** is answered from the mouth BEHIND me (the box =
+  `JUNCTION_WIDENING_M + JUNCTION_CORNER_RADIUS_M`), because "a pass may not
+  begin inside" is exactly the case of a car that has just come through.
+- **the place gate** sits at R32's commitment (`placeOk32`): the plan
+  `past-the-row + half the row and my own length + blend back (v · LANE_CHANGE_TIME_S)`
+  must end `LookAheadForSpeed(v)` before the zone. The driver's wish (R37/R40)
+  stays where it is - the place never joins the intent question, exactly as §9's
+  "asked once per object" note demanded, and it is a separate reason: the log
+  line `[R38] a pass here would end at the junction mouth … the plan needs …: not
+  a pass`, the cap reason `r38:mouth`, and no cap of 0 - the car keeps its
+  following behaviour and its turn.
+- **the tests**: `fig8_row` (position 22) is green unchanged, the pass it makes is
+  past the crossing; `fig8_row_short` (position 23) is green as the refusal —
+  nothing borrows and R38's line is present. The suite went from 31 to 32 tests,
+  unit tests 168/0, the branch's red set equals `main`'s (see the PR).
+- **not done**: signs, road markings and `overtaking=no` are NOT in the importer,
+  so the set has one source; and the walk only follows the road straight on
+  (bounded at 300 m / 8 hops), which is what a pass needs but not a route guess.
+
 ### What exists now (#78, 2026-11-03)
 
 Branch `fix-78-chain-row-intent`, `DrivingGame.Sim/CarCollisions.cs` + `Car.cs`
@@ -1652,14 +1713,12 @@ numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
 
 ### Still not in the code
 
-- **R38 — nothing forbids a pass at a crossing.** The paint model for the zone
-  exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, and
-  `RoadNetworkGeometry.StyleCentrelinePiece` already knows which segment ends are
-  junction mouths), the map fact does not: `overtaking=no` is read nowhere in the
-  importer. Specified now (owner, 2026-11-03): zones come from **every junction
-  mouth** and the clearance is **`LookAheadForSpeed(v)`** (40 m at 50 km/h, 74.6 m
-  at 80 km/h), and the rule reads a **set** of no-over-take zones so signs,
-  road markings and `overtaking=no` can join it without rewriting the rule.
+- ~~**R38 — nothing forbids a pass at a crossing.**~~ **closed the same day
+  (#80):** the place gate is in the code, with `LookAheadForSpeed` as the margin
+  and every junction mouth as a zone (see "What exists now (#80)"). What is
+  still not there: the other sources of a zone - a no-over-taking **sign**,
+  a **painted** stretch, `overtaking=no` from the map - none of which the
+  importer reads, so the set has exactly one source today.
 - ~~the intent *decision* is R32's obstruction test, not a driver preference~~ —
   **closed the same day (R40, #78):** the decision is `gain > what the driver
   accepts` (feasibility stays R32's at the commitment), `Car.DriverEagerness`
