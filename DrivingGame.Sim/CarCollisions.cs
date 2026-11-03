@@ -1044,6 +1044,7 @@ public static class CarCollisions
             // auction is asked for the longer stretch and the far half of the
             // window is observed from there (the accepted observation cheat).
             int passUid32 = -1; double passProg32 = -1.0; double passLen32 = 0.0;
+            double passSpeed32 = 0.0;    // what my target drives (a parked car: 0)
             double passAlong32 = 1e9;
             double passX32 = 0.0, passY32 = 0.0;
             double frontLen32 = 0.0, frontX32 = 0.0, frontY32 = 0.0, frontAlongM = 0.0;
@@ -1091,7 +1092,8 @@ public static class CarCollisions
                 if (o.OvertakeIntent || o.OvertakeShiftM > 0.05 || o.PassUid >= 0)
                 {
                     if (o.Uid == leaderUid32)
-                        leadReject32 = "a guest in my lane, it is passing";
+                        leadReject32 = "a guest in my lane (intent " + o.OvertakeIntent +
+                                       $", shift {o.OvertakeShiftM:F2} m, passUid {o.PassUid})";
                     if (needM > borrowerNeedM) { borrowerNeedM = needM; borrowerUid32 = o.Uid; }
                     if (along < borrowerAlongM) borrowerAlongM = along;
                     continue;
@@ -1135,7 +1137,7 @@ public static class CarCollisions
                 {
                     passAlong32 = along;
                     passUid32 = o.Uid; passProg32 = o.Progress;
-                    passLen32 = o.LengthM; passX32 = o.X; passY32 = o.Y;
+                    passLen32 = o.LengthM; passSpeed32 = o.Speed; passX32 = o.X; passY32 = o.Y;
                 }
                 // The window is measured past the FRONT of the row, whatever car
                 // of it is furthest along (docs §9).
@@ -1220,12 +1222,18 @@ public static class CarCollisions
             // judgement, asked once while that one is still my leader; the car
             // behind reads the flag instead of asking me again. A driver who does
             // not want to pass leaves it clear, and the car behind IT is free.
-            if (leaderUid32 < 0)
+            // With no car ahead of me IN MY LINE there is still a thing I may be
+            // asked about: the obstruction R32 picked (a parked car at the kerb is
+            // outside the queue band but it is what a pass is about) - the ORDER
+            // gate stays the leader's, the DECISION is about whatever I pass.
+            int askUid32 = leaderUid32 >= 0 ? leaderUid32 : passUid32;
+            double askSpeed32 = leaderUid32 >= 0 ? leadSpeed32 : passSpeed32;
+            if (askUid32 < 0)
             {
                 c.OvertakeIntent = false; c.IntentWithUid = -1;
                 c.OvertakeIntentLog = false;
             }
-            else if (c.IntentWithUid != leaderUid32)
+            else if (c.IntentWithUid != askUid32)
             {
                 // TWO questions, two answers (§9 + the driver model): may a pass
                 // be DRIVEN at all (the geometry, feasibility), and does THIS
@@ -1235,12 +1243,12 @@ public static class CarCollisions
                 // the return) is the same for every driver. A car already at its
                 // own ceiling (a tractor, a crawler) gains nothing and wants no
                 // pass at any eagerness: that is the physics, not the disposition.
-                double gainMps = c.EffectiveTopMps - leadSpeed32;
+                double gainMps = c.EffectiveTopMps - askSpeed32;
                 double wantMps = MinAcceptableGainMps(c.DriverEagerness);
                 bool roomExists = wantM > 0.0;
                 bool intent = roomExists && gainMps > wantMps;
                 c.OvertakeIntent = intent;
-                c.IntentWithUid = leaderUid32;
+                c.IntentWithUid = askUid32;
                 // R20: the decision is recorded when it CHANGES, both ways -
                 // a car that declines is not a silent car, and a queue check
                 // has to tell "not asked" from "asked and declined". The
@@ -1256,7 +1264,7 @@ public static class CarCollisions
                     + $" {leadLat32:F2} m across my line, clearing it asks {leadNeedM32:F2} m";
                 c.RecordDecision(simTime,
                     intent
-                        ? $"[R37] intent: I want to pass car {leaderUid32} ahead"
+                        ? $"[R37] intent: I want to pass car {askUid32} ahead"
                         : $"[R37] intent: no pass wanted from car {leaderUid32} ahead"
                           + (roomExists
                               ? $": a gain of {gainMps:F1} m/s is not worth a pass"
@@ -1266,13 +1274,19 @@ public static class CarCollisions
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;
 
-            // --- the commitment (R32) ------------------------------------
+            // --- the commitment (R32 + R40) ------------------------------
             // wantM exists only while the obstruction is still in my line; the
             // PASS is not over at that moment, so the object names WHICH car I am
             // passing (my target, the near one) while the WINDOW is measured past
             // the front of its row (§9 "The obstruction is a train"). Read by the
             // corridor bound, by v1 and by R33 - one object, three consumers.
-            if (wantM > 0.0 && !blocked && myTurn32 && passUid32 >= 0)
+            // Three conditions, and the third one is the driver's: a car may only
+            // commit a pass its own driver asked for (R37's flag, R40's model).
+            // Without it a decline is a suggestion, not a decision - measured on
+            // the figure-8 row: "Ms. Daisy" logged "no pass wanted" and still
+            // committed (PassUid of the row's front), which made the car behind
+            // see a guest in its lane and take no turn at all.
+            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurn32 && passUid32 >= 0)
             {
                 c.PassUid = passUid32;
                 c.PassSegIdx = c.SegIdx;
