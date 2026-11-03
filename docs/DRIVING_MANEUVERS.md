@@ -127,7 +127,7 @@ repo; `--only` is the door that replaced it (see [TESTING.md](TESTING.md)).
   the final section; `PARK_ALIGN_HDG_GAIN = 3.0` is the heading gain
   (≈0.45 s time constant at V_C) and the cross term fades to zero over the
   last `PARK_ALIGN_CROSS_FADE_START_M` 1.0 m → `PARK_ALIGN_CROSS_FADE_END_M`
-  0.4 m so the car cannot counter-steer past parallel at the standstill
+  0.4 m so the car cannot counter-turn past parallel at the standstill
 - `PARK_ALIGN_LATERAL_M` (0.35 m) — lateral tolerance for "on the line"
 - **Two kerb clearances, deliberately different** (`Config`): a DRIVING car
   keeps `KERB_CLEARANCE_M = ROAD_EDGE_TOLERANCE_M` (0.35 m) — the same inset
@@ -161,6 +161,7 @@ reads it from `GET /state` as `parking.style == "reverse"`.
 | **Style decision** | Forward vs back-in is decided ONCE per approach, from the tuck the geometry allows. Below `PARK_REVERSE_MIN_TUCK_M` (0.10 m) the maneuver is not worth it — park forwards. |
 | **Stage past the spot** | The car drives PAST the flag and stops several metres beyond it — a real back-in needs the staging room. Crossing the flag while this plan is active is NOT a "drove past" failure (docs/TESTING.md §3); the run only passes once `parking.parked == true`. |
 | **Back in** | Reverse gear, signed speed, feedback parking law `delta = PSI_GAIN·psi − POS_GAIN·e_off` (`PARK_REVERSE_PSI_GAIN` 2.8 ≈ 1.2 s heading damping, `PARK_REVERSE_POS_GAIN` 1.4 ≈ 2.5 s at creep), creep speed `PARK_REVERSE_CREEP_M_S` 0.8 m/s (~3 km/h). Arc steering candidates are tried sharpest-first (`REVERSE_STEER_CANDIDATE_DEGS` 38/30/25/20/16°) — full lock is the shortest back-in. `PARK_REVERSE_TAIL_M` 2.4 m straight run-out after the arcs (must be long enough for heading and cross-track to converge AT speed; `PARK_REVERSE_MIN_TAIL_M` 0.3 m is the minimum that still settles). |
+| **The shape: turn-in and counter-turn** (two words, defined once, used by the code comments and this document) — **turn-in** = steering so the car leaves its current axis on a constant-radius arc and starts a manoeuvre; **counter-turn** = steering the other way to come out of that arc and bring the car back to the row's axis. The pair, plus whatever straight leg its own geometry leaves between the two, is the shape of every back-in (the owner asked for it 2026-11-03: first the turn-in, then the counter-turn back to parallel, still reversing). A constant-radius arc rotates the heading continuously, so a manoeuvre that ends parallel needs both halves by construction - a plan with only one arc cannot be corrected by straightening, only by driving the other one. |
 | **Hard bounds** | The nose swings toward the centreline while backing in and must stay on OUR half: `PARK_CENTRELINE_MARGIN_M` 0.10 — unlike a U-turn (§5), parking may NOT use the oncoming lane. Swept body corners keep `PARK_REVERSE_KERB_MARGIN_M` 0.05 at the kerb. The staging stop may sit `PARK_PLAN_START_MARGIN_M` 0.35 m closer to the centreline than the planned lane offset (a deeper start needs a longer back-in for the same tuck, so plan from the deeper offset). |
 
 Two pitfalls that were measured in this branch: the entry speed is NOT the

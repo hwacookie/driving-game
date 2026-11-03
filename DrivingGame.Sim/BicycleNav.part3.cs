@@ -1931,7 +1931,7 @@ public sealed partial class BicycleNav
             // Aim point at or BEHIND us: happens in tight corners where the s-projection
             // (coarse window scan, ~0.5-1 m resolution) lags the car while the
             // high-curvature lookahead (0.5 m) is shorter than that lag. Aiming at a
-            // point behind commands a hard counter-steer and oscillates the car in place
+            // point behind commands a hard counter-turn and oscillates the car in place
             // until it leaves the road (measured: roundabout entry - heading sawed
             // 190 -> 178 -> 210 deg at 9 km/h while s sat on a quantisation step). Align
             // with the line's tangent instead: that is what a driver does when the aim

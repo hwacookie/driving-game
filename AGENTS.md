@@ -85,6 +85,30 @@ bare list, metres by convention - `docs/REST_API.md` says so; adding the key
 there would retire the exception). Before touching
 units, grep `pxPerM` - that list IS the set of frame crossings.
 
+## Vocabulary: one word per concept (binding user decision, 2026-11-03)
+
+The same thing gets the **same word everywhere** - code comments, `docs/`, commit
+and PR text, and chat. When a manoeuvre, a state or a measurement needs a name,
+pick one, define it once in the document that owns the rule (a Terms row or the
+section itself), and use exactly that spelling afterwards. Synonyms, per-section
+re-inventions and borrowed jargon are not free: a reader cannot tell whether a
+second word means the same thing or a new thing.
+
+- **No invented group names.** "the unit ladder" hid three test files (`BayChoiceTests`,
+  `BayClaimTests`, `BayReverseInTests`) behind a name that exists nowhere; the reader
+  had no way to find them. Name the file.
+- **No other language's word for an English concept.** The German word the owner used
+  for the entry arc was dropped for this reason - in ordinary German it reads as
+  something else entirely, and it names an action, not the shape a document has to
+  describe. English documents say what the geometry is.
+- The settled pair for the two halves of a manoeuvre is **turn-in** (steering so the
+  car leaves its current axis onto a constant-radius arc) and **counter-turn** (steering
+  the other way to come out of that arc and back to the row's axis). One arc rotates
+  the heading continuously, so a manoeuvre that ends parallel needs both halves - a
+  plan with only one arc cannot be corrected by straightening, only by driving the other
+  one. `docs/DRIVING_MANEUVERS.md` §1b carries the definition; code comments use these
+  words.
+
 ## No pygame compatibility target — Godot idioms win
 
 The pygame frontend is retired and the transition to Godot is complete. **
