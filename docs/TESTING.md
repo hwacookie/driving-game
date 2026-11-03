@@ -129,8 +129,29 @@ that car - e.g. the last crashed uid - at `CrashZoom` 34 px/m),
 `--focus <name|role>`, `--map <name>`, and anything else, which is passed
 through to the suite (e.g. `--stress-cars 250`). Env vars: `CRASH_SHOT`
 (one PNG 0.5 s after the crash camera latches, diagnostic) and
-`DG_FREEZE_STAGE=1` (set by `--watch`: stage every car while the sim is
-frozen, then unfreeze).
+`DG_FREEZE_STAGE=1` (set by `--watch`, which also announces the spectacle —
+see the two run modes below).
+
+**A numbered scenario is staged alone (issue #84, 2026-11-03).** `monitor_turn`
+now does two things before any scenario's cast exists, for every run and not
+only for `--watch`:
+
+- it **clears the map** (`_clear_all_cars()` — the same "clean slate" the
+  crossing runners already used): a car left over from the previous scenario is
+  part of the approach, so a run was not a function of the scenario.
+- it **freezes the clock while staging** and unfreezes only once the cast
+  exists. This used to be `--watch`-only. Without it the sim ticks during
+  staging, so every car staged later gets a head start whose length is whatever
+  the uid-poll happened to take. Measured on one unchanged pair (`20-21`): the
+  primary's first frames line up exactly (y 324.977, 13.66 m/s both) once the
+  tapes are compared at the same physical point, then diverge **1.4 s later** —
+  A: no cap, 45.2 → 45.5 km/h; B: `cap=avoid#5`, 45.2 → 46.0 km/h — because the
+  staged oncoming car sat ~1 m further along in B. That 0.5 km/h compounds over
+  the 100 m approach into a **4 m** arrival shift (End (101,226) stopped vs
+  (102,222) rolling past the flag at 8 km/h against `FLAG_CRAWL_KMH = 5.0`),
+  which is what made `slow_pass_priority` green 4/4 alone and red behind test
+  20. After the change: 3/3 runs of the pair stop at 83% (0.13 m, 0.13 m,
+  0.08 m past the pennant).
 
 **The two run modes** (binding user decision, see `AGENTS.md`) are both the
 runner's, not a manual recipe: an e2e run is `--warp 4` in a normal window;

@@ -2821,19 +2821,44 @@ class TurnTester:
                       (f" ({last['timestamp']})" if last.get("timestamp") else ""))
         print(f"{'='*60}")
         
+        # --- scenario isolation (issue #84, docs/TESTING.md §1c) ----------
+        # A numbered scenario must be reproducible ON ITS OWN: what it grades
+        # may not depend on whatever happened to run before it. Measured on the
+        # same build: `slow_pass_priority` alone came to rest 0.29 m past its
+        # flag (End (101,226)), run right after test 20 (the liveried cast)
+        # ended (102,222) - ~4 m further - and rolled past the pennant at 8 km/h
+        # against FLAG_CRAWL_KMH = 5.0, so the strict arrival rule called that a
+        # missed stop. The reason is not the driving: the previous scenario's
+        # cars were still on the road when this one staged. This is the same
+        # "clean slate" the crossing runners already do (1759: "also drops any
+        # car a previous scenario left") - _clear_all_cars() waits until /state
+        # is really empty, so no stale clear can be in flight when we spawn.
+        # It runs BEFORE the watch-mode freeze below, so a clean stage is also a
+        # frozen one. A map that will not empty is not a pass and not a run:
+        # the scenario could not be staged at all.
+        if not self._clear_all_cars():
+            print("   ❌ Could not clear the map - the scenario cannot be staged alone")
+            return self._aborted_result(start_point, direction, target_speed,
+                                        results)
+
         # Reset and enable breadcrumbs for visual debugging
         self.reset_controls()
         requests.post(f"{API_URL}/toggle", json={'breadcrumbs': True})
 
-        # WATCH MODE (docs/AGENTS.md, user decision 2026-10-21): staging must
-        # not race the sim. Every car is placed AT SPEED while the world is
-        # halted, the harness polls until all uids exist, and only then does
-        # the run start at the requested pace - otherwise the first second of
-        # the manoeuvre under review is spent driving into a half-staged
-        # world, which is what "loses half the action".
+        # STAGE FROZEN, ALWAYS (issue #84; the watch-mode rule of docs/AGENTS.md
+        # is the same path). The sim must not tick while a cast is being placed:
+        # every car that is staged later would otherwise get a head start whose
+        # length is whatever the poll loop happened to take, so the approach the
+        # scenario grades is not a function of the scenario. Measured on the SAME
+        # cast, un-frozen: the oncoming car sat ~1 m further along at the primary's
+        # first frame (identical to 0.00 m once both are lined up on y=325), and
+        # that turned into a brake 1.4 s into the approach - A: no cap, 45.2 ->
+        # 45.5 km/h; B: cap=avoid#5, 45.2 -> 46.0 - which compounded into a 4 m
+        # arrival shift and the flag stop was graded on a different approach.
+        # DG_FREEZE_STAGE (the runner's watch mode) keeps its meaning: it announces
+        # the spectacle; the staging below is the same for every run.
         watch = os.environ.get("DG_FREEZE_STAGE") == "1"
-        if watch:
-            requests.post(f"{API_URL}/freeze", json={'frozen': True})
+        requests.post(f"{API_URL}/freeze", json={'frozen': True})
         
         # Create a fresh car at the given start point or a random location.
         # Deterministic scenarios start MID-segment (50%) so the maneuver
@@ -3084,8 +3109,10 @@ class TurnTester:
             self.create_car_at_random()
             self.set_hud_label(None)
 
-        if watch:
-            requests.post(f"{API_URL}/freeze", json={'frozen': False})
+        # Unfreeze only now: the cast exists, so the clock and the pace the
+        # runner asked for start together (issue #84: this used to be watch-only,
+        # which is what made a CI-style run inherit a random head start).
+        requests.post(f"{API_URL}/freeze", json={'frozen': False})
 
         # Record the primary car's STATE transitions for this scenario (#27):
         # driving → parking → parked. Armed here, where the clock starts and the
