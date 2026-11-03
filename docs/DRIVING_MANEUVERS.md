@@ -1572,17 +1572,18 @@ numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
   12 m junction easing of §4/§7 already uses), the map fact does not:
   `overtaking=no` is read nowhere in the importer, so R38 is geometry-only first.
 - ~~the intent *decision* is R32's obstruction test, not a driver preference~~ —
-  **closed the same day (R40, #78):** the decision is `room AND gain > the
-  driver's threshold`, `Car.DriverEagerness` carries the disposition, and the
-  measured row of two tractors logs the rear one declining
-  (`[R37] intent: no pass wanted … a gain of 0.0 m/s is not worth a pass`).
+  **closed the same day (R40, #78):** the decision is `gain > what the driver
+  accepts` (feasibility stays R32's at the commitment), `Car.DriverEagerness`
+  carries the disposition, and the measured row of two tractors logs the rear
+  one declining (`[R37] intent: no pass wanted … a gain of 0.2 m/s is not
+  worth a pass`).
   What is still not in the code: **only an extra car can be staged as a
-  personality** — a scenario's PRIMARY car has no `driver_eagerness` path yet
-  (it takes the default), so "the primary is a pushy driver" is not testable
-  today, and the numbered row scenario borrows `slow_pass_priority`'s named
-  start, so the suite prints it under that name — its own identity needs a
-  named start in the test map (or, as decided, a re-stage onto an existing
-  track such as a fig-8 loop).
+  personality** — a scenario's PRIMARY takes the standing default, so "the
+  primary is a pushy driver" is not testable today. (The API path for it
+  already exists: the primary is staged through `POST /teleport` like any
+  other car and that endpoint parses `driver_eagerness`; what is missing is
+  the harness passing it.) The row scenario itself is a numbered test with its
+  own map start now (`fig8_row`).
 - **no queue scenario in the numbered suite** — there is now a **row-of-two
   scenario** (a second entry on `slow_pass_priority`'s named start, one tractor
   more in the row), graded on the row's own decision facts and printing who
