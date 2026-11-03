@@ -303,6 +303,13 @@ public sealed partial class BicycleNav
     private bool TryClaimBay()
     {
         var r = TryClaimBayInner();
+        // One line per half second into the car's own record: the three flags say
+        // which of the three answers the ask gave (a row there? this car inside a
+        // mouth? a claim taken?). Without it the record shows the ask but not why it
+        // stopped, and a wrong window cannot be told from a wrong measurement.
+        if (_bayAskTicks % 30 == 0)
+            _car.RecordDecision(_navTime, $"[BAYST] row={(_bayRowAtAsk ? 1 : 0)} " +
+                                      $"beside={(_bayClaimed ? 1 : 0)} flanks={_bayFlanks}");
         if (_bayClaimed && !_bayAsked)
         {
             _bayAsked = true;
@@ -313,9 +320,13 @@ public sealed partial class BicycleNav
         }
         else if (!_bayClaimed && _bayRowAtAsk)
         {
-            // A row of bays is there and this car has not claimed one — the asks
-            // that keep the approach going are the fact the verdicts cannot show:
-            // whether a fast car ever stands inside a mouth's window at all.
+            // A row of bays is there and this car has not claimed one — the ask that
+            // keeps the approach going. It goes into the car's OWN decision record too,
+            // because stdout is swallowed under `dotnet test` and the verdict must be
+            // readable from inside the test (see ParkTrace in BayReverseInTests).
+            if (_bayAskTicks % 30 == 0)
+                _car.RecordDecision(_navTime, $"[BAYASK] row=1 beside=0 " +
+                                          $"v={_car.Speed * 3.6:F0}km/h u≈{_car.X:F0},{_car.Y:F0}");
             if (++_bayAskTicks % 30 == 1)
                 Console.WriteLine($"[BAYASK] car #{_car.Uid} flanks={_bayFlanks} row=1 " +
                                   $"beside=0 v={_car.Speed * 3.6:F0}km/h at u≈{_car.X:F0},{_car.Y:F0}");
@@ -362,14 +373,26 @@ public sealed partial class BicycleNav
         }
         _bayFlanks = plain.Count;
         if (plain.Count < 2) return false;
-        if (PickKerbBay(_car.LengthM, plain) is null)
+        var bay0 = PickKerbBay(_car.LengthM, plain);
+        if (bay0 is null)
             return false;     // no mouth here fits this car — §1c refuses the row;
         _bayRowAtAsk = true;  // the kerb past the row stays the caller's decision
         var (cx, cy) = _car.BodyCenter();
         double ownU = (cx - seg.X1) * tx + (cy - seg.Y1) * ty;
         if (ClaimBayBeside(ownU, _car.LengthM, plain) is not (double rearEndM,
                                                               double frontEndM, double freeM))
+        {
+            // The numbers the verdict cannot show: where the car's own box stands
+            // against the first mouth that fits it. Without this the only evidence is
+            // "beside=0", which cannot tell a wrong window from a wrong measurement.
+            if (_bayAskTicks % 30 == 0 && bay0 is (double bR, double bF, double bFree))
+            {
+                _car.RecordDecision(_navTime, $"[BAYGEO] ownU={ownU:F2} len={_car.LengthM:F2} " +
+                                              $"first_mouth={bR:F2}..{bF:F2} free={bFree:F2} " +
+                                              $"inside_window={bR + _car.LengthM / 2.0:F2}..{bF - _car.LengthM / 2.0:F2}");
+            }
             return false;     // a row of bays is there — this car is not beside one
+        }
         int ub = -1, ua = -1;
         double latSum = 0.0;
         var latN = 0;

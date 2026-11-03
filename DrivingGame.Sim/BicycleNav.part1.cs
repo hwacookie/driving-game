@@ -388,6 +388,7 @@ public sealed partial class BicycleNav
     /// not engage, because braking to the mark parks the car 50 m before the row and
     /// it never stands beside a window (measured in the three bay scenarios).
     private bool _pkAwaitingClaim;
+    private double _claimSOnLineM;
     private bool _bayAsked;      // one witness line per destination, not per tick
     private int _bayAskTicks;    // the asks WHILE unclaimed, every ~0.5 s
     /// A row of bays this car fits stands at the ask while this car is not beside
@@ -719,16 +720,19 @@ public sealed partial class BicycleNav
         // asks again on the next tick. This replaces the anchor, which moved the
         // spot to a gap without ever asking where the car stood.
         _pkAwaitingClaim = false;
-        if (!_bayClaimed)
         {
             if (TryClaimBay())
             {
                 // NOT re-cutting the line here: the claimed mouth sits on the same
                 // line a few metres from the ask, and re-cutting at claim time moved
-                // the line under the car — measured as `❌ TELEPORTATION / UNEXPECTED
+                // the line's END under the car — measured as `❌ TELEPORTATION / UNEXPECTED
                 // JUMP DETECTED!` in the watch run of 24–26, i.e. physically
-                // impossible motion. The reverse-in extends the line itself when it
-                // stages past the spot.
+                // impossible motion. Where the line may be re-cut at all is decided
+                // below, from the arc position of the claimed mouth (§1d): only an
+                // extension is allowed.
+                _claimSOnLineM = _ref is not null
+                    ? RefLineMath.ProjectS(_ref, _claimX, _claimY, ParkS())
+                    : 0.0;
             }
             else if (_bayRowAtAsk)
             {
@@ -771,8 +775,15 @@ public sealed partial class BicycleNav
         }
         // Not committed yet: decide while the destination is still far enough
         // away that changing the line costs nothing.
+        // §1d (2026-11-03): the decision point MOVED with the claim. Upstream of the
+        // row the style cannot be decided any more — WHERE to park is unknown until a
+        // mouth is claimed (docs §1c tier 1 + §1d) — so a car that HAS claimed decides
+        // from beside the mouth. The old guard (only decide while the destination is
+        // still far enough away that changing the line costs nothing) belongs to the
+        // old path where the mark doubled as the spot, and applies only there.
         double? dStop = DistanceToDestination();
-        if (dStop is null || dStop < PARK_BLEND_START_M + 5.0) return;
+        if (dStop is null) return;
+        if (!_bayClaimed && dStop < PARK_BLEND_START_M + 5.0) return;
 
         // The width that matters is the one AT THE DESTINATION, not under the
         // car: the decision is taken far upstream.
@@ -792,7 +803,21 @@ public sealed partial class BicycleNav
         _parkTuck = tuck;
         _parkStageM = stage;
         _parkStageShort = false;
-        _routeKey = null;          // re-cut the line past the flag
+        // The line may only be re-cut when that is a pure EXTENSION: the stage point
+        // (claimed mouth + stage) must not fall short of the end the car is already
+        // driving on, or the re-cut would move the end behind the car and put the
+        // car off its line — the TELEPORTATION / UNEXPECTED JUMP measured in the
+        // watch run of 24–26.
+        if (!_bayClaimed || _claimSOnLineM + stage >= _ref.Total - 1e-6)
+        {
+            _routeKey = null;          // re-cut the line past the flag
+        }
+        else if (RefLineMath.PARK_DEBUG)
+        {
+            Console.WriteLine($"↩️  line NOT re-cut at claim: staging ends at " +
+                              $"{_claimSOnLineM + stage:F1} m, the line already runs to " +
+                              $"{_ref.Total:F1} m — shortening it would jump the car");
+        }
         Console.WriteLine($"↩️  parking plan: reverse-in, {tuck:F2} m tuck, " +
                           $"staging {stage:F2} m past the flag " +
                           $"[car at ({_car.X:F0},{_car.Y:F0}) " +
@@ -883,6 +908,19 @@ public sealed partial class BicycleNav
             // distance, so the deceleration eases off to zero at the stop
             // point (spec §1: "kein Rucken beim Stillstand").
             return ("final", Math.Max(0.0, dStop) / PARK_STOP_TAU);
+        }
+        // A car that is already AT the plan's creep speed — the §1d scanning approach,
+        // a driver entering the row of bays at V_C instead of at approach speed — still
+        // has to come to rest at the staging point. The profile below sizes the decel
+        // from the CURRENT speed, so below V_C the window between PARK_BLEND_START_M
+        // and the lead zone returned no plan at all, and the car rolled past its own
+        // ask (measured: a bay scenario ending at (2095,553) — the segment's far end,
+        // 100 m past the flag — `❌ never reached expected segment`). The creep window
+        // is what the brake model can still cover from the creep speed: no new constant.
+        double dCreep = PARK_BLEND_START_M + v * PARK_STOP_TAU + (vc * vc) / (2.0 * a);
+        if (v <= vcTol && dStop <= dCreep)
+        {
+            return ("creep", vc);
         }
         if (dStop <= PARK_BLEND_START_M)
         {

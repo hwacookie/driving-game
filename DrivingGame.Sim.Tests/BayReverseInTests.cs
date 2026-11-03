@@ -195,7 +195,7 @@ public class BayReverseInTests
             $"neighbours: rear uid {rear.Uid}, front uid {front.Uid}, pitch {pitchM:F2} m " +
             $"→ inner gap {(2 * pitchM - 3.14):F2} m for a {car.LengthM:F2} m car\n" +
             "last of the tick trace:\n  " + string.Join("\n  ", trace.TakeLast(4)) +
-            "\nthe tuck's own record:\n  " + ParkTrace(car));
+            "\nthe tuck's own record:\n  " + ParkTrace(car, 80));
     }
 
     /// <summary>How often the neighbour-aware envelope actually intervened. Read from
@@ -217,7 +217,9 @@ public class BayReverseInTests
         lock (car.Decisions)
         {
             var rows = car.Decisions
-                .Where(d => d.Msg?.StartsWith("[PARKT]") == true || d.Msg?.StartsWith("[PARK]") == true || d.Msg?.StartsWith("[PARKPLAN]") == true || d.Msg?.StartsWith("[PARKAPP]") == true || d.Msg?.StartsWith("[PARKACC]") == true)
+                .Where(d => d.Msg != null && (d.Msg.StartsWith("[PARK") ||
+                                    d.Msg.StartsWith("[BAYASK]") || d.Msg.StartsWith("[BAYGEO]") ||
+                                    d.Msg.StartsWith("[BAYST]")))
                 .Select(d => d.Msg!)
                 .ToList();
             return string.Join("\n  ", rows.TakeLast(last));
