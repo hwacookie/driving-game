@@ -378,6 +378,29 @@ public sealed partial class BicycleNav
     private int _bayNeighboursRaw = -2;
     private int _bayVPositive;
     private int _bayFlanks;
+    /// §1d (2026-11-03, docs/DRIVING_MANEUVERS.md): this car has CLAIMED a mouth —
+    /// the gap it is beside, named by the two parked cars that bracket it. The claim
+    /// is a property of the car, not a reservation list: `park_target` renders it and
+    /// a following car reads it.
+    private bool _bayClaimed;
+    /// A row of bays this car fits stands at the ask while this car is not beside
+    /// one of them — the state that means "keep driving along the row", which is
+    /// NOT the same no as "no row fits this car" (that one leaves the mark as the
+    /// spot, an open kerb).
+    private bool _bayRowAtAsk;
+    private double _claimX, _claimY, _claimMidM, _claimLatM, _claimHeadDeg,
+                   _claimRearEndM, _claimFrontEndM;
+    private int _claimBehindUid = -1, _claimAheadUid = -1;
+    public bool ParkBayClaimed() => _bayClaimed;
+    public bool ParkBayRowAtAsk() => _bayRowAtAsk;
+    /// <summary>The claimed mouth as one object: centre (world metres), the row's
+    /// heading, the mouth's two ends along the road, and the two cars that define
+    /// it. null until this car claims — a bay nobody claimed is not a box.</summary>
+    public (double X, double Y, double HeadingDeg, double RearEndM, double FrontEndM,
+            int UidBehind, int UidAhead)? ParkBayClaim() => _bayClaimed
+        ? (_claimX, _claimY, _claimHeadDeg, _claimRearEndM, _claimFrontEndM,
+           _claimBehindUid, _claimAheadUid)
+        : null;
     private ReverseParkState? _reversePark;   // active manoeuvre state, or null
     /// <summary>Standing at the destination.</summary>
     public bool Parked { get; private set; }
@@ -462,6 +485,7 @@ public sealed partial class BicycleNav
         _dest = (x, y);
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
+        _bayClaimed = false; _bayRowAtAsk = false;   // a fresh ask claims nothing
         _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
@@ -481,6 +505,7 @@ public sealed partial class BicycleNav
         _dest = null;
         _routeKey = null;
         _parkBayAnchored = false;
+        _bayClaimed = false; _bayRowAtAsk = false;   // nothing is asked, nothing claimed
         _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
@@ -675,23 +700,22 @@ public sealed partial class BicycleNav
     {
         if (Parked || _reversePark is not null) return;
         if (_parkStyleLocked) return;
-        // §1c tier 1 (2026-11-02): WHERE a car parks is a question about the row of
-        // cars standing at the spot, not about the mark it was given. The mark says
-        // "park here"; the flanks say where the gaps are, and the car takes the
-        // first gap its own box fits (docs/DRIVING_MANEUVERS.md §1c). Moving the
-        // destination to that gap is the whole change: staging, running past and
-        // reversing back all follow the spot, they were never asked about the mark
-        // itself. A row that is out of range yet is not a verdict — the next
-        // decision asks again.
-        if (!_parkBayAnchored)
+        // §1d (2026-11-03): WHERE a car parks is a question about the row of cars
+        // standing at the spot, and the answer exists only from BESIDE the mouth
+        // (docs/DRIVING_MANEUVERS.md §1c tier 1 + §1d). The mark is the ask, the
+        // claim is the answer; a car that is not yet beside a gap its own box fits
+        // has no style to decide, so the approach keeps driving along the row and
+        // asks again on the next tick. This replaces the anchor, which moved the
+        // spot to a gap without ever asking where the car stood.
+        if (!_bayClaimed)
         {
-            var bay = ChosenBayCentre();
-            if (bay is (double bx, double by) && _dest is (double dx, double dy))
+            if (TryClaimBay())
             {
-                _parkBayShiftM = Math.Max(_parkBayShiftM, Math.Hypot(bx - dx, by - dy));
-                _dest = (bx, by);
-                _parkBayAnchored = true;
-                _routeKey = null;      // the line must be re-cut to the new spot
+                _routeKey = null;      // the line must be re-cut to the claimed spot
+            }
+            else if (_bayRowAtAsk)
+            {
+                return;                // the bays are there, this car is not beside one
             }
         }
 

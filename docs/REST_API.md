@@ -726,8 +726,11 @@ Returns `200` (`{"ok": true, "id": 1}`) or `404` for an unknown id.
 
 ## `park_target` — the bay acceptance box (per car, `GET /state`)
 
-A car that has a destination or a parking job answers one more object, and **null** when it
-has neither, when nothing brackets a bay, or when no gap near it fits the model:
+A car answers one more object **once it has CLAIMED a bay**, and **null** until it did. A
+claim is §1d (`docs/DRIVING_MANEUVERS.md`): a mouth is claimable only from beside it — the
+car's own body inside the gap, its rear past the front of the car before it, its front before
+the rear of the car after it — so a car that is not beside a mouth its model fits has no box,
+and the end mark is an ASK ("a row over there"), never a spot a verdict may grade.
 
 ```json
 "park_target": {
@@ -737,12 +740,23 @@ has neither, when nothing brackets a bay, or when no gap near it fits the model:
 }
 ```
 
-It is **the area the parked car must end in**, declared by the sim (`SimEngine.ParkTargetPayload`)
-from what is physically there: the two parked cars that bracket the widest free stretch beside
-the destination bound the gap, and the box is the parking car's own body rectangle
-(`lengthM`/`widthM` = model dims + `Config.PARK_BOX_MARGIN_M` on every side, 0.30 m default =
-the kerb tolerance the suite already uses) centred in that stretch, on the line the neighbours
-stand on. `headingDeg` is the row's direction (north-zero clockwise, the sim's convention).
+It is **the area the parked car must end in**, declared by the sim from the claim the car
+made: `BicycleNav.TryClaimBay` chose the mouth (tier 1 of §1c says a mouth exists for this
+car only when `free = gap − own length ≥ 1.00 m`, §1d says the car may claim it only from
+beside it, in driving order), and `SimEngine.ParkTargetPayload` renders exactly that mouth —
+`behind_uid`/`ahead_uid` are the two cars that flank it, and the box is the parking car's own
+body rectangle (`lengthM`/`widthM` = model dims + `Config.PARK_BOX_MARGIN_M` on every side,
+0.30 m default = the kerb tolerance the suite already uses) centred in that mouth, on the line
+the flanks stand on. `headingDeg` is the row's direction (north-zero clockwise, the sim's
+convention). Measured, the row of §1c's worked numbers, pm1 the sedan:
+
+```text
+✅ pm1: sim box centre u=125.02 (1/2 flank it); rule says centre u=125.02 (Δ -0.00 m)
+```
+
+The pair scan that used to answer this object — nearest pair of parked cars to the mark, with
+a `gap ≥ body` fit test — is gone: two answers to "which bay" was the thing this section warns
+about, and the one that survived was tier 1 with 0 m of free chosen by distance.
 
 `inside` / `marginM` are the same fact the picture and the e2e verdict use: a convex body lies
 in a rectangle iff all four of its corners do, and `marginM` is the tightest corner's distance

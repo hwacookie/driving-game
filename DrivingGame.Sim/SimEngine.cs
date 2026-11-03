@@ -1487,75 +1487,24 @@ public sealed class SimEngine
         var nav = c.BicycleNav;
         if (nav is null) return null;
 
-        // WHICH car owns a bay: the one that was SENT somewhere, and only if the mark it
-        // was sent to is its declared end flag. Both halves are needed - measured on issue
-        // 51 the first hour out, a staged PARKED NEIGHBOUR answered a box of its own 8.3 m
-        // away, so one bay drew two amber rectangles while nothing had asked that car to
-        // park anywhere (it was teleported into the row: style `forward`, no end flag).
-        // "Has a parking job in play" alone is not the test: a car resting in a bay has a
-        // phase, and so does one that was placed there.
-        if (!nav.HasDestination() && !nav.ParkJobActive) return null;
-        var fr = tf?.FlagRed;
-        if (fr is null || fr.Length < 2) return null;
-        double anX = fr[0], anY = fr[1];     // which bay: the one the mark points at
-
-        var parked = new List<Car>(_cars.Count);
-        foreach (var n in _cars.Values)
-        {
-            if (ReferenceEquals(n, c) || n.State != CarState.Parked) continue;
-            // A neighbour that is itself the subject of a parking job is not scenery: the
-            // stretch beside it belongs to that job, not to this one. Without this, the
-            // just-parked car became one of the two bracketing bodies for its own
-            // neighbour, and that pair invented a second bay (issue 56).
-            if (n.BicycleNav?.ParkJobActive == true &&
-                _carFlags.GetValueOrDefault(n.Uid)?.FlagRed is not null) continue;
-            parked.Add(n);
-        }
-        if (parked.Count < 2) return null;
-
-        double bestD = double.MaxValue, bMid = 0.0, bLat = 0.0, bHead = 0.0;
-        long uidBehind = -1, uidAhead = -1;
-        for (int i = 0; i < parked.Count; i++)
-        {
-            for (int j = i + 1; j < parked.Count; j++)
-            {
-                var n1 = parked[i];
-                var n2 = parked[j];
-                // Parallel bodies = the same row direction. 20 deg is generous: a car
-                // left crooked in front of the bay still defines the bay's axis.
-                if (Math.Abs(Math.WrapDeg(n1.Heading - n2.Heading)) > 20.0) continue;
-                double h = n1.Heading + 0.5 * Math.WrapDeg(n2.Heading - n1.Heading);
-                double r = Math.Radians(h);
-                // The sim's heading is north-zero clockwise, so forward = (sin, cos) and
-                // right = (cos, -sin) - the same pair the client's flag drawing uses.
-                double ax = Math.Sin(r), ay = Math.Cos(r);
-                double qx = Math.Cos(r), qy = -Math.Sin(r);
-                var (x1, y1) = n1.BodyCenter();
-                var (x2, y2) = n2.BodyCenter();
-                double c1 = x1 * ax + y1 * ay, l1 = x1 * qx + y1 * qy;
-                double c2 = x2 * ax + y2 * ay, l2 = x2 * qx + y2 * qy;
-                if (Math.Abs(l1 - l2) > 3.0) continue;      // side by side, not in a row
-                double lo, hi; long ub, ua;
-                if (c1 <= c2)
-                {
-                    lo = c1 + n1.LengthM / 2.0; hi = c2 - n2.LengthM / 2.0;
-                    ub = n1.Uid; ua = n2.Uid;
-                }
-                else
-                {
-                    lo = c2 + n2.LengthM / 2.0; hi = c1 - n1.LengthM / 2.0;
-                    ub = n2.Uid; ua = n1.Uid;
-                }
-                if (hi - lo < c.LengthM) continue;          // a stretch this car cannot fit
-                double mid = 0.5 * (lo + hi), lat = 0.5 * (l1 + l2);
-                double gx = mid * ax + lat * qx, gy = mid * ay + lat * qy;
-                double d = Math.Sqrt((gx - anX) * (gx - anX) + (gy - anY) * (gy - anY));
-                if (d >= bestD) continue;
-                bestD = d; bMid = mid; bLat = lat; bHead = h; uidBehind = ub; uidAhead = ua;
-            }
-        }
-        // A bay 60 m away is not THIS car's bay - it is the next row along.
-        if (bestD > 60.0) return null;
+        // §1d (2026-11-03, owner decision): the CLAIM is the box. Which bay a car
+        // owns stopped being answered here — the car named the mouth when it claimed
+        // one from beside it (BicycleNav.TryClaimBay, docs/DRIVING_MANEUVERS.md §1d),
+        // and the claim is a property of the car, not a reservation. A car that has
+        // not claimed has no box: the ask (the end mark) is not a spot a verdict may
+        // grade. Measured before this change, the box came from a pair scan nearest
+        // the mark with a `hi − lo ≥ length` fit test — tier 1 with 0 m of free,
+        // chosen by distance rather than from beside the mouth, and unchanged here
+        // until a claim exists.
+        if (nav.ParkBayClaim() is not (double cx, double cy, double bHead,
+                                       double claimRearM, double claimFrontM,
+                                       int uidBehind, int uidAhead))
+            return null;
+        // The claim's own frame: the row's axis through the claimed centre.
+        double bMid = cx * Math.Sin(Math.Radians(bHead))
+                    + cy * Math.Cos(Math.Radians(bHead));
+        double bLat = cx * Math.Cos(Math.Radians(bHead))
+                    - cy * Math.Sin(Math.Radians(bHead));
 
         double rr = Math.Radians(bHead);
         double fax = Math.Sin(rr), fay = Math.Cos(rr);

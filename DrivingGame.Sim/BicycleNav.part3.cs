@@ -283,47 +283,89 @@ public sealed partial class BicycleNav
         return list;
     }
 
-    /// <summary>§1c tier 1 (2026-11-02): the bay this car would take, as the point
-    /// its centre has to end at. The bays are the gaps between the cars ALREADY
-    /// standing in the parking lane at the destination; PickKerbBay answers which
-    /// of those gaps this car's OWN box fits, in driving order. null when no row
-    /// stands there or no gap fits — that is the case that leaves the asked spot
-    /// alone, so an open kerb keeps its old meaning. The lateral coordinate is not
-    /// what this answers (the reverse-in takes its depth from the kerb), so the
-    /// point comes back on the segment's axis.</summary>
-    private (double X, double Y)? ChosenBayCentre()
+    /// <summary>§1c tier 1 + §1d (2026-11-03): the row at the ask, and the mouth
+    /// this car claims WHERE IT STANDS. Replaces ChosenBayCentre: the mark is the
+    /// ask ("a row over there"), the claim is the answer, and §1d says an answer
+    /// exists only from beside the mouth — so this is asked again every tick
+    /// (DecideParkStyle is stateless per tick) until the car is beside a gap its
+    /// own box fits. `_bayRowAtAsk` separates the two no's: a row of bays stands
+    /// at the ask and this car is not beside one (keep driving along it), versus
+    /// no row fits this car at all (the mark keeps its old meaning, an open kerb).
+    /// The claim is recorded as the car's own (§1d: a property of the car, not a
+    /// reservation list) and `_dest` moves to the claimed centre, which is all the
+    /// manoeuvre needs — staging, running past and reversing back follow the spot.
+    /// The point stays on the segment's axis because the reverse-in takes its depth
+    /// from the kerb; the claim's lateral comes from the two cars that flank it.</summary>
+    private bool TryClaimBay()
     {
+        _bayRowAtAsk = false;
+        if (_dest is not (double oldDx, double oldDy)) return false;
         var seg = DestSegment();
-        if (_dest is null) { Console.WriteLine("[BAYNO] no _dest at all"); return null; }
-        if (seg is null) { Console.WriteLine("[BAYNO] destination not on a segment"); return null; }
+        if (seg is null) return false;
         var near = _car.ParkingNeighbours;
         _bayNeighboursRaw = near?.Count ?? -1;
-        if (near is null || near.Count == 0) return null;
+        if (near is null || near.Count == 0) return false;
         double tx, ty;
         if (_car.Forward) { tx = seg.X2 - seg.X1; ty = seg.Y2 - seg.Y1; }
         else { tx = seg.X1 - seg.X2; ty = seg.Y1 - seg.Y2; }
         double tl = Math.Hypot(tx, ty);
-        if (tl < 1e-6) return null;
+        if (tl < 1e-6) return false;
         tx /= tl; ty /= tl;
         var rx = ty; var ry = -tx;
-        var flanks = new List<(double CentreU, double LengthM)>();
+        var plain = new List<(double CentreU, double LengthM)>();
+        var flanks = new List<(double CentreU, double LengthM, double LatM, int Uid)>();
         foreach (var o in near)
         {
-            // Only the cars that are parked beside the kerb bound a bay. A car
-            // driving past on the other side of the road is not a flank.
+            // Only the cars parked beside the kerb bound a bay. A car driving past
+            // on the other side of the road is not a flank.
             if (o.State != CarState.Parked) continue;
             double u = (o.X - seg.X1) * tx + (o.Y - seg.Y1) * ty;
             double v = (o.X - seg.X1) * rx + (o.Y - seg.Y1) * ry;
-            if (v > 0.0) _bayVPositive++;
             if (v <= 0.0) continue;
-            flanks.Add((u, o.LengthM));
+            _bayVPositive++;
+            plain.Add((u, o.LengthM));
+            flanks.Add((u, o.LengthM, v, o.Uid));
         }
-        _bayFlanks = flanks.Count;
-        if (PickKerbBay(_car.LengthM, flanks) is not (double rearEndM, double frontEndM,
-                                                       double freeM))
-            return null;
+        _bayFlanks = plain.Count;
+        if (plain.Count < 2) return false;
+        if (PickKerbBay(_car.LengthM, plain) is null)
+            return false;     // no mouth here fits this car — §1c refuses the row;
+        _bayRowAtAsk = true;  // the kerb past the row stays the caller's decision
+        var (cx, cy) = _car.BodyCenter();
+        double ownU = (cx - seg.X1) * tx + (cy - seg.Y1) * ty;
+        if (ClaimBayBeside(ownU, _car.LengthM, plain) is not (double rearEndM,
+                                                              double frontEndM, double freeM))
+            return false;     // a row of bays is there — this car is not beside one
+        int ub = -1, ua = -1;
+        double latSum = 0.0;
+        var latN = 0;
+        foreach (var (cu, cl, cv, uid) in flanks)
+        {
+            var isRear = cu + cl / 2.0 - rearEndM;
+            var isFront = cu - cl / 2.0 - frontEndM;
+            if (isRear < 0) isRear = -isRear;
+            if (isFront < 0) isFront = -isFront;
+            if (isRear < 1e-6) ub = uid;
+            if (isFront < 1e-6) ua = uid;
+            if (isRear < 1e-6 || isFront < 1e-6) { latSum += cv; latN++; }
+        }
+        if (latN < 2 || ub < 0 || ua < 0) return false;   // a mouth nobody brackets
         double mid = (rearEndM + frontEndM) / 2.0;
-        return (seg.X1 + tx * mid, seg.Y1 + ty * mid);
+        _claimRearEndM = rearEndM;
+        _claimFrontEndM = frontEndM;
+        _claimMidM = mid;
+        _claimLatM = latSum / latN;
+        _claimBehindUid = ub;
+        _claimAheadUid = ua;
+        _claimHeadDeg = Math.PosDeg(Math.Degrees(Math.Atan2(tx, ty)));
+        _claimX = seg.X1 + tx * mid + rx * _claimLatM;
+        _claimY = seg.Y1 + ty * mid + ry * _claimLatM;
+        double nx = seg.X1 + tx * mid, ny = seg.Y1 + ty * mid;
+        _dest = (nx, ny);                       // the ask moves to the claim
+        _parkBayShiftM = Math.Max(_parkBayShiftM, Math.Hypot(nx - oldDx, ny - oldDy));
+        _parkBayAnchored = true;   // the spot is a real gap now (the old observable)
+        _bayClaimed = true;
+        return true;
     }
 
     /// <summary>Does the planned tuck clear every body beside the bay, at every sample

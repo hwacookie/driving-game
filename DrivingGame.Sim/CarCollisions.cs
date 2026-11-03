@@ -1749,7 +1749,16 @@ public static class CarCollisions
             // Filled for every car with a parking job, not only a running tuck: the
             // planner must see the neighbours BEFORE it commits (#36) — waiting for
             // the tuck to be armed asked the question one step too late.
-            if (c.BicycleNav is not { ParkJobActive: true })
+            // §1d (2026-11-03): the ask opens the window, not the locked style.
+            // ParkJobActive is `ReverseParkActive || ParkPhase != "none" ||
+            // _parkStyleLocked` — a car that has a DESTINATION but refuses to pick
+            // a style yet (§1d: no style before it is beside a mouth) would ask for
+            // neighbours that the query never fills, and the row would stay unseen
+            // forever: measured as five cars planning a reverse-in at the MARK with
+            // `park_target: null`. The window is still only opened for cars that are
+            // meant to park, the scope the comment above keeps.
+            if (c.BicycleNav is null ||
+                (c.BicycleNav is not { ParkJobActive: true } && !c.BicycleNav.HasDestination()))
             {
                 c.ParkingNeighbours = null;
                 continue;
