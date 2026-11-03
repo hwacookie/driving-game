@@ -1186,16 +1186,16 @@ break** and the **measurements that show whether it does**.
   feasibility of that whole is judged before the car starts (§9).
 - **R38 A pass must be finished before a crossing** *(crossing)* *[proposed]* —
   over-taking **at** a crossing is forbidden, full stop (owner, 2026-11-03). A
-  borrow may **not begin** inside a crossing's zone and may **not continue**
-  through one: R36's window (`in`, `out`) and the return must all stand
-  **`R38_CLEARANCE_M` before the near mouth** — the driver finishes the whole
-  manoeuvre, with room left over, before reaching the crossing. Where the room
-  between here and (crossing − clearance) cannot hold the full cycle (R36's
-  minimum commitment plus the blend of §9), **there is no plan**: the car does
-  not commit. Where the centreline — and with it "the other lane" — does not
-  exist (`CENTERLINE_JUNCTION_GAP_M`), no window can be built across. R37's
-  order and R39's owner path are not relaxed by this; `R38_CLEARANCE_M` is the
-  open number (issue #80). Full text: §9, "Where a pass may live at all".
+  borrow may **not begin** inside a **no-over-take zone** and may **not continue**
+  through one: R36's window (`in`, `out`) and the return must stand
+  **`LookAheadForSpeed(my speed)` before the zone's near end** — the driver
+  finishes the whole manoeuvre, with room left over, before reaching it. Today
+  those zones come from **every junction mouth** (a T-junction included, the same
+  mouth the paint goes solid at); signs, road markings and `overtaking=no` may
+  add zones later, and the rule reads the set, never the reason. Where the room
+  between here and the zone cannot hold the full cycle, **there is no plan**. R37's
+  order and R39's owner path are not relaxed. Full text: §9, "Where a pass may
+  live at all".
 
 - **R39 The lane's own driver keeps its way** *(crossing of lanes)* — a borrower may never make the owner of the other lane give up
   that lane: oncoming traffic has the right of way here (§8's premise: "drivable"
@@ -1389,32 +1389,52 @@ and the crossing, and that stretch is the whole plan's room.
 
 | Fact | The rule | Comes from |
 |------|---------|------------|
-| the zone | the crossing's near mouth plus the approach that is already spoken for: `Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M` of solid line, the same mouth `RoadNetworkGeometry.StyleCentrelinePiece` paints | geometry, as today |
-| a pass may **not begin** | while any of the car is inside the zone | hard, every member of a queue |
-| a pass may **not continue** | through the zone: R36's `out` point and the return must both stand **`R38_CLEARANCE_M` before** the near mouth | R36's window, place-checked |
+| the zone | a **stretch where passing is forbidden** (today: every junction mouth — a T-junction included — plus the solid approach the paint already draws, `Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`) | geometry, as today; signs and markings may add zones later |
+| a pass may **not begin** | while any of the car is inside such a zone | hard, every member of a queue |
+| a pass may **not continue** | through it: R36's `out` point and the return must stand **`LookAheadForSpeed(my speed)` before the zone** (40 m at 50 km/h, 74.6 m at 80 km/h) | R36's window, place-checked |
 | the plan is one object | the room is `(crossing − clearance) − here`; if the full cycle — blend out, pass, blend back — does not fit in it, **there is no plan** | R36's minimum commitment + §9's blend |
 | inside the box | the centreline does not exist (`CENTERLINE_JUNCTION_GAP_M`), so "the other lane" is undefined there and no window can be built across | the geometry already says no |
 | no relaxation | R37's order (front-first, and the ban applies to every member), R39's owner path, R36's minimum commitment | unchanged rules |
 | what the eye sees | a car whose plan does not fit does not commit: the check-act may creep to the lane edge (blinker on), the car never enters the borrowed lane | §9's check act, R17 |
 
-`R38_CLEARANCE_M` is the one open number — "ein ausreichender Abstand". It is
-not the same as the paint's 6 m: a driver at speed must finish earlier than one
-at walking pace. Candidate definitions (issue #80 asks for the decision):
+`R38_CLEARANCE_M` is not a second measurement of the same thing as the paint's
+6 m: **a driver at speed must finish earlier than one at walking pace.** Decided
+2026-11-03:
 
-- **(a) one constant** — e.g. 25 m, chosen by eye, no new machinery.
-- **(b) speed-derived** — the margin is `LookAheadForSpeed(v)` (already in the
-  code, the same distance R32/R36 use to read the road): a driver that reads
-  60 m ahead finishes 60 m before the mouth. No new constant, scales with speed.
-- **(c) map fact** — `overtaking=no` on the approach, which the importer does
-  not read today; the honest long-term source, geometry stays the fallback.
+| Decision | What was chosen | Consequence |
+|----------|-----------------|-------------|
+| the zone | **every junction mouth**, a T-junction included | the same mouths the paint goes solid at (`StyleCentrelinePiece`), not only degree-4 crossings |
+| the clearance | **speed-derived**: the margin is `LookAheadForSpeed(my speed)` | the distance the driver model already uses to read the road; at 50 km/h it is the 40 m floor, at 80 km/h 74.6 m — no new constant |
+| what the zone is | a **fact of the road**, not a rule's own geography | a rule must not know "junction": it must know "a stretch where passing is forbidden" |
+
+The last line is the point of the rule's shape. Today the only way to find such
+a stretch is the junction geometry. Later, more sources join the SAME set:
+
+- **a sign** — a no-over-taking sign at the approach (`no_overtaking`, or a
+  signed `overtaking=no` section);
+- **road markings** — a solid or hatched centreline stretch that is not next to a
+  junction, a bus lane's hatched tongue, a forbidden stretch painted on the road;
+- **the map** — `overtaking=no` on the way itself, which the importer does not
+  read today.
+
+So R38 is written against a set of `NoOvertakeZone`s (each one: a stretch along
+a carriageway, its reason, and its source) and every source is allowed to add to
+that set; the rule never asks *why* a zone exists, only whether the whole
+manoeuvre fits before it. Adding a signed zone must not mean editing R38 again.
 
 ### Why the intent has to be a flag
 
-**Why this changes a test, not only the code:** `fig8_row` (position 22) parks
-its row's front ~29 m before the degree-4 crossing `xing_c`. Under R38 that
-pass is **not legal**, so that staging must move (the row back, the crossing
-still ahead of it) or become R38's own test — where the graded expectation is
-the refusal: the queue states its intent, creeps, and never borrows.
+**Why this changes a test, not only the code.** The plan's room is
+`blend_out(v) + the row's extent + blend_back(v)` and it must **end**
+`LookAheadForSpeed(v)` before the zone — at 50 km/h that is ~35 m + row + ~35 m
+ending 40 m before the mouth, so an obstruction whose front stands closer than
+~100 m to the crossing **cannot be passed at that speed at all**: you may not
+pass a car that is parked inside the margin. `fig8_row` (position 22) parks its
+row's front ~29 m before `xing_c`, so under this rule the scenario has no legal
+pass - it becomes R38's **refusal** test (the intent is stated, the check-act
+creeps, nobody borrows). A row pass that is still a *pass* test needs a stretch
+long enough to hold the whole cycle and end before a zone: the 300 m parking
+avenue (`pkw_n→pkw_s`, two-way 19.4 m) or ~160 m of open straight at ~40 km/h.
 
 The owner's rule (2026-11-02) — *a driver anticipates that the car in front of it
 probably wants to pass too, and does not start its own pass then* — is not a
@@ -1633,15 +1653,13 @@ numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
 ### Still not in the code
 
 - **R38 — nothing forbids a pass at a crossing.** The paint model for the zone
-  exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, the same half-span the
-  12 m junction easing of §4/§7 already uses, and
+  exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, and
   `RoadNetworkGeometry.StyleCentrelinePiece` already knows which segment ends are
   junction mouths), the map fact does not: `overtaking=no` is read nowhere in the
-  importer, so R38 is geometry-only first. What is specified now (owner, 2026-11-03)
-  is stronger than "not inside the box": the whole pass must be **finished**
-  `R38_CLEARANCE_M` before the near mouth. The open decision is that clearance:
-  a constant, or `LookAheadForSpeed(v)` (speed-derived, no new constant), or the
-  OSM tag as the real source — see issue #80.
+  importer. Specified now (owner, 2026-11-03): zones come from **every junction
+  mouth** and the clearance is **`LookAheadForSpeed(v)`** (40 m at 50 km/h, 74.6 m
+  at 80 km/h), and the rule reads a **set** of no-over-take zones so signs,
+  road markings and `overtaking=no` can join it without rewriting the rule.
 - ~~the intent *decision* is R32's obstruction test, not a driver preference~~ —
   **closed the same day (R40, #78):** the decision is `gain > what the driver
   accepts` (feasibility stays R32's at the commitment), `Car.DriverEagerness`
