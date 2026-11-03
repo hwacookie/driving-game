@@ -80,7 +80,7 @@ def _req(method, path, body=None):
     req = urllib.request.Request(API_URL + path, data=data, method=method,
                                 headers={"Content-Type": "application/json"} if data else {})
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
     except Exception:
         return None
@@ -88,7 +88,7 @@ def _req(method, path, body=None):
 
 def get_state():
     try:
-        with urllib.request.urlopen(API_URL + "/state", timeout=5) as r:
+        with urllib.request.urlopen(API_URL + "/state", timeout=20) as r:
             return json.loads(r.read())
     except Exception:
         return None
@@ -317,7 +317,7 @@ def main():
         if not st:
             dead += 1
             print(yellow(f"  /state unreadable ({dead}/5)"), flush=True)
-            if dead >= 5:
+            if dead >= 8:
                 print(red("the host stopped answering"))
                 sys.exit(1)
             time.sleep(POLL_S)
