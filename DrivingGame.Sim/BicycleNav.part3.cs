@@ -377,17 +377,24 @@ public sealed partial class BicycleNav
         if (bay0 is null)
             return false;     // no mouth here fits this car — §1c refuses the row;
         _bayRowAtAsk = true;  // the kerb past the row stays the caller's decision
-        // The far end of the row, in world coordinates: the scanning drive has to be
-        // able to come to rest clear of it (§1d — the ask is an ask, not a stop).
-        double farU = double.NegativeInfinity;
+        // The row's extent in world coordinates — the far end and the near end. The
+        // scanning drive has to be able to come to rest clear of the row (§1d: the
+        // ask is an ask, not a stop), and the crawl must NOT start before the area
+        // (owner note 2026-11-03): a driver approaches at normal speed and slows
+        // only where the brake model says he must, to be at crawl speed as he enters
+        // the row. The near end is where that row begins.
+        double farU = double.NegativeInfinity, nearU = double.PositiveInfinity;
         foreach (var (cu, cl, cv2, uid2) in flanks)
         {
             if (cu + cl / 2.0 > farU) farU = cu + cl / 2.0;
+            if (cu - cl / 2.0 < nearU) nearU = cu - cl / 2.0;
         }
-        if (farU > double.NegativeInfinity / 2.0)
+        if (farU > double.NegativeInfinity / 2.0 && nearU < double.PositiveInfinity / 2.0)
         {
             _pkRowEndX = seg.X1 + tx * farU;
             _pkRowEndY = seg.Y1 + ty * farU;
+            _pkRowStartX = seg.X1 + tx * nearU;
+            _pkRowStartY = seg.Y1 + ty * nearU;
         }
         var (cx, cy) = _car.BodyCenter();
         double ownU = (cx - seg.X1) * tx + (cy - seg.Y1) * ty;
@@ -1961,24 +1968,46 @@ public sealed partial class BicycleNav
         // before this: the car braked to a standstill 53 m before the row and never
         // stood beside a window, and with the braking simply removed it flew past the
         // flag at 52 km/h. Neither is what a driver scanning the row does.
-        if (_pkAwaitingClaim)
+        // §1d (2026-11-03, owner decisions 1a/2b): a row of bays at the ask is
+        // DRIVEN ALONG, not braked to. The scanning speed is the plan's own creep
+        // speed V_C (PARK_SWERVE_SPEED_M) — the speed the brake model already
+        // reserves for the zone where a park is being chosen — no new constant.
+        // The stop the scan is sized for is the FAR END of the row, not the ask:
+        // measured, sizing it at the ask left the car 0.9 m short of the first
+        // mouth's inside window (ownU 146.59 vs 147.50..152.50) and it never
+        // stood inside a mouth, so it never claimed.
+        // The crawl applies only while the car is IN the row, and starts where the
+        // brake model says it must (owner note 2026-11-03: there is nothing to
+        // crawl over on the approach): `slowInM` is the distance this car needs to
+        // come down to V_C at A_PARK. Outside that window the row is still ahead,
+        // and the approach is normal driving.
+        bool scanPhase = false;
+        double sRowEndM = _ref is not null && _pkRowEndX != 0.0
+            ? RefLineMath.ProjectS(_ref, _pkRowEndX, _pkRowEndY, ParkS(), _ref.Total)
+            : double.NaN;
+        double sRowStartM = _ref is not null && _pkRowStartX != 0.0
+            ? RefLineMath.ProjectS(_ref, _pkRowStartX, _pkRowStartY, ParkS(), _ref.Total)
+            : double.NaN;
+        double slowInM = Math.Max(0.0, car.Speed * car.Speed -
+                                  PARK_SWERVE_SPEED_M * PARK_SWERVE_SPEED_M) / (2.0 * A_PARK);
+        bool atTheRow = sRowEndM == sRowEndM &&
+                        ParkS() + Math.Max(slowInM, 6.0) >= sRowStartM &&
+                        ParkS() <= sRowEndM;
+        if (_pkAwaitingClaim && atTheRow)
         {
-            // §1d (2026-11-03, owner decisions 1a/2b): a row of bays at the ask is
-            // DRIVEN ALONG, not braked to. The scanning speed is the plan's own creep
-            // speed V_C (PARK_SWERVE_SPEED_M) — the speed the brake model already
-            // reserves for the zone where a park is being chosen — no new constant.
-            // The stop the scan is sized for is the FAR END of the row, not the ask:
-            // measured, sizing it at the ask left the car 0.9 m short of the first
-            // mouth's inside window (ownU 146.59 vs 147.50..152.50) and it never
-            // stood inside a mouth, so it never claimed. The roll-out is the plan's
-            // own (v = d/tau, PARK_STOP_TAU), so the easing to a standstill is the
-            // existing physics, not a new one.
-            double dRowEndM = _ref is not null && _pkRowEndX != 0.0
-                ? RefLineMath.ProjectS(_ref, _pkRowEndX, _pkRowEndY, ParkS()) - ParkS()
-                : double.PositiveInfinity;
+            scanPhase = true;
+            double dRowEndM = sRowEndM - ParkS();
             if (dRowEndM <= PARK_SWERVE_SPEED_M * PARK_STOP_TAU)
             {
                 plan = ("final", Math.Max(0.0, dRowEndM) / PARK_STOP_TAU);
+            }
+            else if (car.Speed > PARK_SWERVE_SPEED_M + 0.1)
+            {
+                // The plan's own deceleration profile toward the creep speed, sized
+                // to the far end of the row — the same curve ParkingPlan uses.
+                plan = ("decel", Math.Min(car.Speed,
+                    Math.Sqrt(PARK_SWERVE_SPEED_M * PARK_SWERVE_SPEED_M +
+                              2.0 * A_PARK * Math.Max(0.0, dRowEndM - PARK_BLEND_START_M))));
             }
             else
             {
@@ -1986,7 +2015,7 @@ public sealed partial class BicycleNav
             }
             ParkPhase = "scan";
         }
-        else if (HasDestination() && !pullingOut && !_pkAwaitingClaim && _ref is not null)
+        else if (HasDestination() && !pullingOut && !(_pkAwaitingClaim && atTheRow) && _ref is not null)
         {
             // The stop the car is chasing, and whether that stop is stable: the
             // record shows a car creeping at V_C forever (creep dStop=+5.97 after
@@ -1997,8 +2026,10 @@ public sealed partial class BicycleNav
             if (_car.SimStep % 30 == 0)
                 _car.RecordDecision(_navTime, $"[PARKSTOP] refTotal={_ref.Total:F2} " +
                                           $"stopS={_ref.Total - StopMargin():F2} " +
-                                          $"dest={dbgDx:F2},{dbgDy:F2} " +
-                                          $"stage={_parkStageM:F2}");
+                                          $"dest={dbgDx:F2},{dbgDy:F2} stage={_parkStageM:F2} " +
+                                          $"rowStart={_pkRowStartX:F2},{_pkRowStartY:F2} " +
+                                          $"rowEnd={_pkRowEndX:F2},{_pkRowEndY:F2} " +
+                                          $"row={(_bayRowAtAsk ? 1 : 0)} claimed={(_bayClaimed ? 1 : 0)}");
             double stopS = _ref.Total - StopMargin();
             dStop = stopS - ParkS();
             plan = ParkingPlan(dStop.Value, car.Speed);
@@ -2058,7 +2089,7 @@ public sealed partial class BicycleNav
                 }
             }
         }
-        bool pullingOver = plan is not null &&
+        bool pullingOver = plan is not null && !scanPhase &&
                            plan.Value.Phase is "decel" or "swerve" or "final";
 
         // Lane-change blinker (user rule: ALWAYS signal before changing lanes): on

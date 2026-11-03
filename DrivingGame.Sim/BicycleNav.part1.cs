@@ -395,6 +395,10 @@ public sealed partial class BicycleNav
     // mouth's inside window (ownU 146.59 against 147.50..152.50), and a car that
     // never stands inside a mouth never claims one.
     private double _pkRowEndX, _pkRowEndY;
+    // The NEAR end of the row too: the crawl must not start before the area (owner
+    // note 2026-11-03) — a driver approaches at normal speed and slows only where
+    // the brake model says he must, to be at crawl speed when he enters the row.
+    private double _pkRowStartX, _pkRowStartY;
     private bool _bayAsked;      // one witness line per destination, not per tick
     private int _bayAskTicks;    // the asks WHILE unclaimed, every ~0.5 s
     /// A row of bays this car fits stands at the ask while this car is not beside
@@ -500,7 +504,7 @@ public sealed partial class BicycleNav
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
         _bayClaimed = false; _bayRowAtAsk = false;   // a fresh ask claims nothing
-        _pkRowEndX = _pkRowEndY = 0.0;
+        _pkRowEndX = _pkRowEndY = _pkRowStartX = _pkRowStartY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
         _parkBayShiftM = 0.0;
@@ -523,7 +527,7 @@ public sealed partial class BicycleNav
         _routeKey = null;
         _parkBayAnchored = false;
         _bayClaimed = false; _bayRowAtAsk = false;   // nothing is asked, nothing claimed
-        _pkRowEndX = _pkRowEndY = 0.0;
+        _pkRowEndX = _pkRowEndY = _pkRowStartX = _pkRowStartY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
         _parkBayShiftM = 0.0;
