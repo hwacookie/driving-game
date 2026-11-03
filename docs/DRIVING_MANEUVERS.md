@@ -23,6 +23,16 @@
 > with no code. The **intent decision itself** is still fed by R32's obstruction
 > test, so §9 Case B (two tractors, the rear one not wanting to pass) is NOT
 > honoured yet - §9's open list says exactly which part that is.
+>
+> **Changed 2026-11-03 (issue #78, branch `fix-78-chain-row-intent`):** **R40**
+> (wanting a pass is the driver's - one disposition knob, `Car.DriverEagerness`,
+> the gain a driver accepts) is in the code, and it closes the gap the note
+> above names: §9 Case B works out of the model, measured as the rear tractor's
+> own declined-intent line in a numbered scenario. R32's target selection
+> changed too - the commitment names the car I FOLLOW, while the lateral need
+> and the window stay the row's. What remains: the primary car of a scenario
+> cannot carry a personality yet, and the row scenario borrows another
+> scenario's named start.
 
 All maneuvers describe how the car behaves in the simulation. The reference
 line (BicycleNav) controls lane position and speed; the Driver sets blinkers
@@ -1181,6 +1191,20 @@ break** and the **measurements that show whether it does**.
   back into its own lane. Two parties, one question — the borrower's *intent* is
   the fact both read; neither decides by the other's brake.
 
+- **R40 Wanting a pass is the driver's, not the geometry's** *(maneuver)* — a car
+  sets an over-take intent only if **that driver** accepts the pass: the gain it
+  could get (`EffectiveTopMps − the leader's speed`) must exceed the gain that
+  driver accepts, and what a driver accepts is its disposition
+  (`Car.DriverEagerness`, 0 = "Ms. Daisy" … 1 = impatient, default 0.5). "The
+  car ahead of me is slow" is R32's question — *may* I pass — and it is not the
+  same question as *do I want to*; §9 Case B (a tractor behind a tractor) is the
+  case where the two answers differ, and a geometric test blocks the car behind
+  the row wrongly there. A car already at its own ceiling has gain 0 and wants no
+  pass at any eagerness: that half is physics, and only the other half — a
+  driver's wanting — is staged (`driver_eagerness` on `POST /teleport`), because
+  wanting cannot be read off a car. One number, one reason: see §9, "The intent
+  is the driver's".
+
 ### Meta — system (not a traffic rule)
 - **R20 Determinism & logging** *[partial]* — every firing rule logs its
   **R# plus the triggering condition** (the per-car decision log already
@@ -1357,6 +1381,43 @@ consequences:
   first, R32 the other two; no consumer may substitute one for the next, the
   same sentence §1c writes about its three clearances.
 
+### The intent is the driver's — one number, two personalities (2026-11-03)
+
+Decided the same day it was asked: **a car states an intent only if that driver
+actually wants to pass**, and the personalities exist — an impatient driver and
+a patient one ("Ms. Daisy"). A model, and one number: `Car.DriverEagerness`
+(0 = Ms. Daisy … 1 = impatient, default 0.5 = an ordinary driver), because
+exactly one thing differs between the two personalities: **what gain a driver
+accepts before it pays for a pass.** Everything else about a pass — the route,
+the signal, the visible check, the return, R37's order gate — is the same for
+every driver, so the names are words over one knob. (R16's patience for a merge
+is the same KIND of disposition and stays a separate rule: a merge answers
+"may I enter", a pass answers "is a lane change worth the gain".)
+
+The model's one question, as the code states it (`CarCollisions`):
+
+```
+gainMps = c.EffectiveTopMps - leadSpeed32              # what a pass could give me
+wantMps = DriverModelMaxGainMps * (1 - eagerness)      # what this driver accepts
+intent  = room and gainMps > wantMps                   # room is R32's geometry
+```
+
+`DriverModelMaxGainMps = 8.0` m/s (29 km/h) is the most a driver may ask for,
+so an eager driver passes at any gain and Ms. Daisy only pays when the vehicle
+ahead runs ~30 km/h below what she drives. Two things come out right without
+being told: a car at its own ceiling — a tractor staged with `cruise_kmh: 10`,
+any crawler — has gain 0 and wants no pass **at any eagerness**: that half is
+physics, not disposition, and it is why §9 Case B works out of the model rather
+than out of a staging. The other half, "this driver wants the pass", is staged
+through `POST /teleport`'s `driver_eagerness` — a scenario needs it for its
+Cast anyway, because wanting cannot be read off a car.
+
+The word in the log carries the reason, so a tape says what the model asked:
+
+```
+[R37] intent: no pass wanted from car 14 ahead: a gain of 0.0 m/s is not worth a pass to this driver (it asks for 4.0)
+```
+
 ### Lifecycle of the flag
 
 | Moment | Flag | Effect on the car behind |
@@ -1473,15 +1534,21 @@ numbered scenario: the map's 150 m stretch does not hold ten cars, and four at
   exists (`Config.CENTERLINE_SOLID_BEFORE_JUNCTION_M`, the same half-span the
   12 m junction easing of §4/§7 already uses), the map fact does not:
   `overtaking=no` is read nowhere in the importer, so R38 is geometry-only first.
-- **the intent *decision* is R32's obstruction test, not a driver preference.**
-  `intent = wantM > 0.0` — "the car ahead of me in my lane is stopped or
-  crawling" (`o.Speed > 0.5 && o.Speed + 4.0 > Math.Max(c.Speed, 8.0)` and its
-  parked case) is what sets the flag today. What the code has is *may* I pass
-  this; *do I want to* is a driver preference, not a measurement, so **§9 Case B
-  (a tractor behind a tractor that does not want to pass) is not honoured**:
-  today that tractor would set the flag and the car behind it would never get
-  its turn. Where the preference comes from (a speed gain, a wait cost like
-  R16's patience, a minimum absolute gain in m/s) is a decision of its own;
-  the flag is what carries it, and it belongs in its own issue.
-- **no queue scenario in the numbered suite** — the QA script above is the
-  check today; 17/18/19/21 still stage one obstruction and one passing car.
+- ~~the intent *decision* is R32's obstruction test, not a driver preference~~ —
+  **closed the same day (R40, #78):** the decision is `room AND gain > the
+  driver's threshold`, `Car.DriverEagerness` carries the disposition, and the
+  measured row of two tractors logs the rear one declining
+  (`[R37] intent: no pass wanted … a gain of 0.0 m/s is not worth a pass`).
+  What is still not in the code: **only an extra car can be staged as a
+  personality** — a scenario's PRIMARY car has no `driver_eagerness` path yet
+  (it takes the default), so "the primary is a pushy driver" is not testable
+  today, and the numbered row scenario borrows `slow_pass_priority`'s named
+  start, so the suite prints it under that name — its own identity needs a
+  named start in the test map (or, as decided, a re-stage onto an existing
+  track such as a fig-8 loop).
+- **no queue scenario in the numbered suite** — there is now a **row-of-two
+  scenario** (a second entry on `slow_pass_priority`'s named start, one tractor
+  more in the row), graded on the row's own decision facts and printing who
+  declined and who passed. A full ten-car queue still has no numbered scenario:
+  the map's 150 m stretch does not hold one, which is what the QA script above
+  is for.

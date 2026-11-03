@@ -369,12 +369,18 @@ def describe_failure(result: dict) -> str | None:
     # generic "timed out before the flag" underneath it would hide that the
     # manoeuvre itself is missing, not the last metre.
     if result.get("chain_expected") and not result.get("chain_borrowed_uids"):
-        return ("never entered the other lane on a row (docs §9 Case B/C): the car behind "
-                "a row of two slow vehicles got no turn. No car of the row recorded a "
-                "declined intent either - R37's intent is still fed by R32's obstruction "
-                "test, so the row's rear vehicle claims the turn and the queue behind it "
-                "never gets one. A driver that does not want to pass must leave the turn "
-                "open; where that preference comes from is the open decision (#78).")
+        roles = result.get("chain_role_map") or {}
+        who = lambda u: roles.get(u, f"uid {u}")
+        dec = ", ".join(who(u) for u in result.get("chain_declined_uids", [])) or "nobody"
+        return (f"never entered the other lane on a row (docs §9 Case B/C). Measured "
+                f"this run: intent declined by [{dec}], pass taken by nobody - "
+                "no car of the cast entered the other lane, so the row was never "
+                "passed. What a row demands (§9): the lateral need and the window "
+                "are the row's, the turn order is each driver's own (R37), and a "
+                "driver that does not want to pass leaves the turn open (R40) so "
+                "the car behind takes it; where the primary of a scenario gets "
+                "its own disposition from is still open (only staged extras "
+                "carry driver_eagerness today).")
     if result.get("segment_changed") and not result.get("reached_expected_segment"):
         final = result.get("final_segment")
         expected = result.get("expected_end_segment")
@@ -845,8 +851,13 @@ DETERMINISTIC_TESTS = [
        # 22.5 m behind its front, i.e. between the front and the approaching
        # car: in the queue this is the leader. Case B says this driver does NOT
        # want to pass, so it must keep its lane and leave its turn to the car
-       # behind it.
+       # behind it. Stated as a personality (R40: "Ms. Daisy", eagerness 0) -
+       # wanting is the driver's, so a scenario that asks for the two-tractor
+       # case names who drives. The outcome does not depend on the number: at
+       # its own ceiling (cruise 10 km/h) the gain is 0 and no driver wants a
+       # pass at any eagerness - that half is physics, not disposition.
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
+       'driver_eagerness': 0.0,
        'model': 'tractor', 'name': 'row_rear_tractor'},
       {'start_point': 'straight_reverse', 'progress': 0.15,
        'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
@@ -1085,8 +1096,13 @@ class TurnTester:
         # known). One request per car every ~20 polls, not one per frame.
         if getattr(self, '_chain_on', False):
             self._chain_poll = getattr(self, '_chain_poll', 0) + 1
-            if self._chain_poll % 20 == 1:
-                for u in getattr(self, '_chain_uids', ()):  # every car on the field
+            # Every poll, not every twentieth: a one-shot decision line ("the
+            # driver declined", "the pass started") exists for one step, and a
+            # ~1 s sampling gap was measured to miss it (the primary logged
+            # nothing while a queued tractor's repeated line came through). The
+            # set is this scenario's cast only - a handful of cars, not the
+            # fleet - so the cost is a few small GETs per poll, not physics.
+            for u in getattr(self, '_chain_uids', ()):  # every car on the field
                     try:
                         rr = requests.get(f"{API_URL}/car/{u}/decisions", timeout=2)
                         rows = (rr.json() or {}).get("decisions", []) if rr.ok else []
@@ -1100,6 +1116,13 @@ class TurnTester:
                             getattr(self, '_chain_declined', set()).add(u)
                         elif m.startswith("[R37] "):
                             getattr(self, '_chain_r37', set()).add(u)
+                        if m.startswith("[R37] intent") or m.startswith("[R32] obstruction"):
+                            # The WHY, kept for the reviewer: one line per kind
+                            # per car, so the facts block states the model's own
+                            # arithmetic instead of a guess about it.
+                            got = self._chain_msgs.setdefault(u, {})
+                            if m[:14] not in got:
+                                got[m[:14]] = m
         return data
     
     def get_segment_geometry(self, idx: int) -> dict | None:
@@ -2821,6 +2844,12 @@ class TurnTester:
                         # (its class ceiling still applies) - staging real
                         # slow traffic rather than a stopped car.
                         payload['cruise_kmh'] = spec['cruise_kmh']
+                    if spec.get('driver_eagerness') is not None:
+                        # THE DRIVER (§9): 0 = "Ms. Daisy", 1 = impatient. A row
+                        # whose rear driver is patient is the two-tractor case -
+                        # it cannot be staged any other way, because wanting to
+                        # pass is the driver's, not a car's speed.
+                        payload['driver_eagerness'] = spec['driver_eagerness']
                     # The car's ROLE, carried WITH the spawn (the sim sets
                     # the label atomically - a second request would race the
                     # first tick). The client can then address "the oncoming
@@ -2992,7 +3021,9 @@ class TurnTester:
         self._chain_on = chain_here
         self._chain_poll = 0
         self._chain_borrowed, self._chain_declined, self._chain_r37 = set(), set(), set()
-        self._chain_uids = tuple(c['car_uid'] for c in self.get_state().get('cars', [])) \
+        self._chain_msgs = {}
+        self._chain_uids = tuple({c['car_uid'] for c in self.get_state().get('cars', [])} |
+                                 {self.get_state().get('car_uid')}) \
             if chain_here else ()
 
         if _aborted():
@@ -4001,6 +4032,8 @@ class TurnTester:
                                for spec, uid in zip(extra_cars or [], extra_uids)},
             'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
             'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
+            'chain_msgs': {u: list(k.values()) for u, k in
+                           getattr(self, '_chain_msgs', {}).items()},
             'collision_detected': collision_detected,
             'priority_failed': priority_failed,
             'extra_arrivals': extra_arrival,
@@ -4013,7 +4046,14 @@ class TurnTester:
             'violation_details': violation_details,
             'positions': positions,
             'aborted': False,
-            'passed': passed
+            # §9 Case B/C (issue #78): a row scenario's demand is part of PASSING,
+            # not only of the diagnosis - describe_failure returns None for a pass
+            # first, so a demand that lives only there can name a failure but can
+            # never make a run red. Passing a row means ENTERING the other lane
+            # at some point (R32's own decision line is the fact); a run that
+            # reached the flag without one never did the maneuver.
+            'passed': passed and not (chain_here and not
+                                     getattr(self, '_chain_borrowed', set()))
         }
         
         # Summary
@@ -4042,6 +4082,23 @@ class TurnTester:
             print(red(f"   ⚠️  Wrong-side driving: {wrong_frames} frames ({wrong_secs}s)"))
         else:
             print(green("   ✅ Lane guard: no wrong-side driving detected"))
+
+        # §9 (issue #78): a row scenario's evidence is WHO SAID WHAT - a
+        # declined intent and a taken pass are decisions, not positions, and
+        # they are what a reviewer looks for in the tape. Roles, not uids:
+        # the scenario names its cast (docs/TESTING.md, "Named cars").
+        if result.get('chain_expected'):
+            roles = result.get('chain_role_map') or {}
+            who = lambda u: roles.get(u, f'uid {u} (not a named extra)')
+            print(dim("   [R37] intent declined by: "
+                      + (", ".join(who(u) for u in result.get('chain_declined_uids', []))
+                         or 'nobody')))
+            print(dim("   [R32] pass taken by: "
+                      + (", ".join(who(u) for u in result.get('chain_borrowed_uids', []))
+                         or 'nobody')))
+            for u, ms in sorted((result.get('chain_msgs') or {}).items()):
+                for m in ms:
+                    print(dim(f"      {who(u)}: {m[:150]}"))
 
         if kerb_gaps is not None:
             ok = not kerb_failed

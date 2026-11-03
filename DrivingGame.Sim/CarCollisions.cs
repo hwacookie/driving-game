@@ -71,6 +71,14 @@ public static class CarCollisions
     // for that pair: they physically cannot drive past one another, so the
     // pair must negotiate the claim (docs/DRIVING_MANEUVERS.md §8 R26).
     const double MinPassClearanceM = 0.5;
+    // A driver's own ceiling (EffectiveTopMps) minus the leader's speed is the
+    // gain a pass could give; this is the MOST a driver may ask for, so the
+    // accepted gain runs from "any" (an eager driver, 0 asked) to this full
+    // number for "Ms. Daisy" (eagerness 0). 8 m/s = 29 km/h: a patient driver
+    // pays for a pass only when the traffic ahead is far slower - the shape the
+    // §9 two-tractor case needs, where a tractor that already drives at its own
+    // ceiling is not passed by nothing at all but declines on its own.
+    const double DriverModelMaxGainMps = 8.0;
     // Lateral clearance asked for BESIDE an obstruction - not a constant, and
     // not two constants any more. The old shape used 0.5 twice: once as the
     // DEMAND ("I want half a metre beside it") and once as a VETO ("under half
@@ -87,6 +95,18 @@ public static class CarCollisions
     const double SideClearPerMpsM = 0.05;   // m of extra gap per m/s of closing speed
     public static double SideClearM(double vMps) =>
         MinPassClearanceM + Math.Max(0.0, vMps) * SideClearPerMpsM;
+    /// <summary>The driver model (§9 "Why the queue's turn is not enough"): how
+    /// much faster the ego must be than the vehicle ahead before it accepts a
+    /// pass. A pushy driver (eagerness 1) passes at any gain; "Ms. Daisy" (0)
+    /// only pays for a pass when the gain is a full DriverModelMaxGainMps. The
+    /// number is one knob because one thing separates the personalities: what
+    /// gain a driver accepts - the route choice, the signalling, the check and
+    /// the return are the same for every driver. My own ceiling (EffectiveTopMps)
+    /// is what the driver wants to drive, so a car already at its ceiling - a
+    /// tractor, a crawler - wants no pass at any eagerness: there is nothing to
+    /// gain, and that is physics, not a disposition.</summary>
+    public static double MinAcceptableGainMps(double eagerness) =>
+        DriverModelMaxGainMps * (1.0 - Math.Clamp(eagerness, 0.0, 1.0));
     /// <summary>One owner for "am I mid-pass?" - read by the corridor bound,
     /// by v1's forward corridor and by R33's intent (docs/RIGHT_OF_WAY_NEGOTIATION.md
     /// §7c: three consumers, one object).
@@ -1015,6 +1035,7 @@ public static class CarCollisions
             double leadAlongM = 1e9;
             int leaderUid32 = -1;
             bool leadHolds32 = false;
+            double leadSpeed32 = 0.0;    // what my leader drives: the gain I could get
             // R32's target is the car I follow; the WINDOW is measured past the
             // front of the row (docs §9 "The obstruction is a train"), so the
             // auction is asked for the longer stretch and the far half of the
@@ -1059,6 +1080,7 @@ public static class CarCollisions
                     leadAlongM = along;
                     leaderUid32 = o.Uid;
                     leadHolds32 = o.OvertakeIntent || o.PassUid >= 0;
+                    leadSpeed32 = o.Speed;
                 }
                 // R39: a guest in my lane (it is passing) - not an obstruction.
                 if (o.OvertakeIntent || o.OvertakeShiftM > 0.05 || o.PassUid >= 0)
@@ -1190,7 +1212,18 @@ public static class CarCollisions
             }
             else if (c.IntentWithUid != leaderUid32)
             {
-                bool intent = wantM > 0.0;
+                // TWO questions, two answers (§9 + the driver model): may a pass
+                // be DRIVEN at all (the geometry, feasibility), and does THIS
+                // driver want to drive one? The gain a driver accepts is the
+                // whole of the difference between an impatient one and "Ms.
+                // Daisy" - everything else about a pass (the check, the signal,
+                // the return) is the same for every driver. A car already at its
+                // own ceiling (a tractor, a crawler) gains nothing and wants no
+                // pass at any eagerness: that is the physics, not the disposition.
+                double gainMps = c.EffectiveTopMps - leadSpeed32;
+                double wantMps = MinAcceptableGainMps(c.DriverEagerness);
+                bool roomExists = wantM > 0.0;
+                bool intent = roomExists && gainMps > wantMps;
                 c.OvertakeIntent = intent;
                 c.IntentWithUid = leaderUid32;
                 // R20: the decision is recorded when it CHANGES, both ways -
@@ -1200,9 +1233,13 @@ public static class CarCollisions
                 // is one line per approach, not one per tick.
                 c.OvertakeIntentLog = intent;
                 c.RecordDecision(simTime,
-                    (intent ? "[R37] intent: I want to pass "
-                            : "[R37] intent: no pass wanted from ")
-                    + $"car {leaderUid32} ahead");
+                    intent
+                        ? $"[R37] intent: I want to pass car {leaderUid32} ahead"
+                        : $"[R37] intent: no pass wanted from car {leaderUid32} ahead"
+                          + (roomExists
+                              ? $": a gain of {gainMps:F1} m/s is not worth a pass"
+                                + $" to this driver (it asks for {wantMps:F1})"
+                              : " (nothing to pass: the car ahead is not in my way)"));
             }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;

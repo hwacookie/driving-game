@@ -361,6 +361,14 @@ public static class GameApi
             double? cruiseKmh = null;
             if (data.TryGetProperty("cruise_kmh", out var ck) && ck.ValueKind != JsonValueKind.Null)
                 cruiseKmh = ck.GetDouble();
+            // THE DRIVER (§9): how pushy this driver is, 0 = "Ms. Daisy", 1 =
+            // impatient. Staged, because "does a driver want to pass" cannot be
+            // observed from a car's speed - and a test that wants the two-tractor
+            // case needs a row whose rear driver says no.
+            double? driverEager = null;
+            if (data.TryGetProperty("driver_eagerness", out var dev) &&
+                dev.ValueKind != JsonValueKind.Null)
+                driverEager = dev.GetDouble();
             // The car's NAME (docs/TESTING.md): carried from the spawn, so
             // the scenario's role ("slow_car", "oncoming_car", "parked_car")
             // is on the car before its first tick, and the client can address
@@ -410,7 +418,7 @@ public static class GameApi
             engine.EnqueueCommand(
                 new TeleportCommand(startPoint, segment, progress, add, speed, vehicle,
                                     reverse, cruiseKmh, name, detailWindow, tyreLines,
-                                    paint, role, latOffsetM));
+                                    paint, role, latOffsetM, DriverEagerness: driverEager));
             return Results.Json(new Dictionary<string, object?>
             {
                 ["ok"] = true,
