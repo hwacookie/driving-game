@@ -8,14 +8,18 @@
 # Refuses a dirty tree: a half-saved edit must not ride into the fix.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The flag comes FIRST (it used to be shifted after N/SLUG were assigned, which
+# left SLUG holding the issue number and the dirty check looking at the wrong
+# argument — `--allow-dirty` never actually skipped anything).
+ALLOW_DIRTY=""
+if [ "${1:-}" = "--allow-dirty" ]; then ALLOW_DIRTY=1; echo "!! skipping the clean-tree check"; shift; fi
 if [ $# -lt 1 ]; then sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2; fi
 N="$1"; SLUG="${2:-}"
-if [ "${1:-}" = "--allow-dirty" ]; then echo "!! skipping the clean-tree check" ; shift; N="${1:-$N}"; fi
 # The clean-tree check ignores UNTRACKED issue records: scripts/offline.sh issue
 # writes issues/NNN-slug.md and it would be absurd for the record of a problem to
 # block the branch that fixes it. Anything else dirty still stops the branch.
 DIRTY=$(git status --porcelain | grep -v '^?? issues/' || true)
-if [ -n "$DIRTY" ] && [ "${1:-}" != "--allow-dirty" ]; then
+if [ -n "$DIRTY" ] && [ -z "$ALLOW_DIRTY" ]; then
   echo "!! working tree is dirty - commit or stash first (or pass --allow-dirty)"; git status --short | head; exit 1
 fi
 # --- one issue, one branch, ONE directory --------------------------------
