@@ -48,3 +48,24 @@ the unwind never arms (0 unwind records while the guard holds the wheel for hund
 ticks at v = -0.80 m/s). The open defect is therefore arming, not geometry: a held wheel
 is a stall even while the car keeps rolling, and the stall test currently requires
 standstill.
+
+## The claim, as built (2026-11-03)
+
+§1d is implemented and observable, not theoretical: `BicycleNav.TryClaimBay` asks the row
+every tick (the window in `CarCollisions` opens on the ASK, not on a latched style —
+`ParkJobActive` was the reason the row stayed invisible for 45 minutes of measurement), and
+`SimEngine.ParkTargetPayload` renders the claim or answers `null`. Measured on the row of the
+worked numbers, one host on `:5012`, and in a graded scenario:
+
+```text
+[BAYASK] car #6 claimed: row=1 beside=1 rear=121.57 front=128.47 flank_uids=1/2
+✅ pm1: sim box centre u=125.02 (1/2 flank it); rule says centre u=125.02 (Δ -0.00 m)
+✅ pm1 bay: rule wants u=121.57..128.47; car spans 121.88..126.64
+[BAYASK] car #7 flanks=4 row=1 beside=0 at u≈2095,743   ← the row is seen, this car is not beside a mouth
+```
+
+What is NOT done, and stays red on purpose: the shuffle through a tight bay (§1b, the known-reds
+in `BayReverseInTests`). With the leader's manoeuvre unfinished the lane behind it never moves,
+so pm2…pm5 never reach a claim window — `park_target: null` for them is the honest answer, and
+pm1 rests 0.74 m off the centred pose while `parking.parked` stays false. A test that turned
+either of those green by moving a threshold would not be testing the rule.

@@ -383,6 +383,13 @@ public sealed partial class BicycleNav
     /// is a property of the car, not a reservation list: `park_target` renders it and
     /// a following car reads it.
     private bool _bayClaimed;
+    /// The approach is waiting for a claim: a row of bays stands at the ask and no
+    /// mouth is claimed yet. The ask is then NOT a stop point — the braking plan may
+    /// not engage, because braking to the mark parks the car 50 m before the row and
+    /// it never stands beside a window (measured in the three bay scenarios).
+    private bool _pkAwaitingClaim;
+    private bool _bayAsked;      // one witness line per destination, not per tick
+    private int _bayAskTicks;    // the asks WHILE unclaimed, every ~0.5 s
     /// A row of bays this car fits stands at the ask while this car is not beside
     /// one of them — the state that means "keep driving along the row", which is
     /// NOT the same no as "no row fits this car" (that one leaves the mark as the
@@ -486,6 +493,8 @@ public sealed partial class BicycleNav
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
         _bayClaimed = false; _bayRowAtAsk = false;   // a fresh ask claims nothing
+        _bayAsked = false; _bayAskTicks = 0;
+        _bayAsked = false;
         _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
@@ -506,6 +515,8 @@ public sealed partial class BicycleNav
         _routeKey = null;
         _parkBayAnchored = false;
         _bayClaimed = false; _bayRowAtAsk = false;   // nothing is asked, nothing claimed
+        _bayAsked = false; _bayAskTicks = 0;
+        _bayAsked = false;
         _parkBayShiftM = 0.0;
         ParkStyle = "forward";
         _parkStyleLocked = false;
@@ -707,6 +718,7 @@ public sealed partial class BicycleNav
         // has no style to decide, so the approach keeps driving along the row and
         // asks again on the next tick. This replaces the anchor, which moved the
         // spot to a gap without ever asking where the car stood.
+        _pkAwaitingClaim = false;
         if (!_bayClaimed)
         {
             if (TryClaimBay())
@@ -715,7 +727,12 @@ public sealed partial class BicycleNav
             }
             else if (_bayRowAtAsk)
             {
-                return;                // the bays are there, this car is not beside one
+                // The ask is not a stop point until a mouth is claimed: measured,
+                // the scenario car braked to a standstill 53 m before the row and
+                // stayed there, so it never stood beside any window and never
+                // claimed. Until then the approach cruises along the row.
+                _pkAwaitingClaim = true;
+                return;
             }
         }
 

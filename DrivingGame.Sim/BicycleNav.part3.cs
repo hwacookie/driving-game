@@ -296,7 +296,41 @@ public sealed partial class BicycleNav
     /// manoeuvre needs — staging, running past and reversing back follow the spot.
     /// The point stays on the segment's axis because the reverse-in takes its depth
     /// from the kerb; the claim's lateral comes from the two cars that flank it.</summary>
+    /// One-shot witness for the ask, once per destination: what the row query saw,
+    /// how many of those cars became flanks, whether a row of bays was found, and
+    /// whether this car was beside one. The e2e verdicts only say "no box"; this
+    /// says which no it is (docs/REST_API.md §park_target keeps the same split).
     private bool TryClaimBay()
+    {
+        var r = TryClaimBayInner();
+        if (_bayClaimed && !_bayAsked)
+        {
+            _bayAsked = true;
+            Console.WriteLine($"[BAYASK] car #{_car.Uid} claimed: row=1 beside=1 " +
+                              $"rear={_claimRearEndM:F2} front={_claimFrontEndM:F2} " +
+                              $"flank_uids={_claimBehindUid}/{_claimAheadUid} " +
+                              $"at u≈{_car.X:F0},{_car.Y:F0}");
+        }
+        else if (!_bayClaimed && _bayRowAtAsk)
+        {
+            // A row of bays is there and this car has not claimed one — the asks
+            // that keep the approach going are the fact the verdicts cannot show:
+            // whether a fast car ever stands inside a mouth's window at all.
+            if (++_bayAskTicks % 30 == 1)
+                Console.WriteLine($"[BAYASK] car #{_car.Uid} flanks={_bayFlanks} row=1 " +
+                                  $"beside=0 at u≈{_car.X:F0},{_car.Y:F0}");
+        }
+        else if (!_bayAsked && !_bayRowAtAsk)
+        {
+            _bayAsked = true;
+            Console.WriteLine($"[BAYASK] car #{_car.Uid} raw={_bayNeighboursRaw} vpos={_bayVPositive} " +
+                              $"flanks={_bayFlanks} row=0 beside=0 " +
+                              $"at u≈{_car.X:F0},{_car.Y:F0}");
+        }
+        return r;
+    }
+
+    private bool TryClaimBayInner()
     {
         _bayRowAtAsk = false;
         if (_dest is not (double oldDx, double oldDy)) return false;
@@ -1885,7 +1919,7 @@ public sealed partial class BicycleNav
         (string Phase, double? VTarget)? plan = null;
         double? dStop = null;
         DecideParkStyle();
-        if (HasDestination() && !pullingOut && _ref is not null)
+        if (HasDestination() && !pullingOut && !_pkAwaitingClaim && _ref is not null)
         {
             double stopS = _ref.Total - StopMargin();
             dStop = stopS - ParkS();
