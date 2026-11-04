@@ -1512,24 +1512,11 @@ public sealed class SimEngine
         double lenM = c.LengthM + 2.0 * Config.PARK_BOX_MARGIN_M;
         double widM = c.WidthM + 2.0 * Config.PARK_BOX_MARGIN_M;
 
-        // The live body, expressed in the box's own frame: (dp, dq) is its centre offset
-        // and psi its yaw against the row; the four corners then decide the owner's rule.
-        var (bx, by) = c.BodyCenter();
-        double dp = bx * fax + by * fay - bMid;
-        double dq = bx * fqx + by * fqy - bLat;
-        double psi = Math.Radians(Math.WrapDeg(c.Heading - bHead));
-        double cp = Math.Cos(psi), sp = Math.Sin(psi);
-        double hl = c.LengthM / 2.0, hw = c.WidthM / 2.0;
-        double margin = double.MaxValue;
-        for (int k = 0; k < 4; k++)
-        {
-            double lu = (k == 0 || k == 3) ? hl : -hl;
-            double lv = k < 2 ? hw : -hw;
-            double u = dp + lu * cp - lv * sp;
-            double v = dq + lu * sp + lv * cp;
-            double m = Math.Min(lenM / 2.0 - Math.Abs(u), widM / 2.0 - Math.Abs(v));
-            if (m < margin) margin = m;
-        }
+        // The live body's margin against that box is ONE number with ONE owner:
+        // BicycleNav.ParkBoxMarginM(), which the accept test in the reverse-in uses for
+        // the same decision. It used to be computed here as well - two answers to "is
+        // the car in the box", and they drifted apart in what they looked at (#62).
+        double margin = nav.ParkBoxMarginM();
 
         return new Dictionary<string, object?>
         {
@@ -1544,6 +1531,11 @@ public sealed class SimEngine
             // Named so a verdict can say WHICH neighbour it ended on (issue 31's rule).
             ["behind_uid"] = uidBehind,
             ["ahead_uid"] = uidAhead,
+            // The no-park boxes: the two flanks grown by the planner's own clearance
+            // and pads (BicycleNav.ParkForbiddenRects). The orange box answers "where
+            // must the car end up"; these answer the other half of the picture, "where
+            // may it not be" - which is what decided the 2026-11-04 rungs (#62).
+            ["no_park"] = nav.ParkForbiddenRects(),
         };
     }
 

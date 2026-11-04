@@ -206,6 +206,17 @@ public sealed partial class BicycleNav
     //   delta = PSI_GAIN * psi - POS_GAIN * e_off      (radians)
     public const double PARK_REVERSE_PSI_GAIN = 2.8;     // heading damping, ~1.2 s time constant
     public const double PARK_REVERSE_POS_GAIN = 1.4;     // offset correction, ~2.5 s at creep
+    /// <summary>How far the heading residual against the planned sweep may correct the
+    /// plan's own turn-in steering, in radians (PARK_FOLLOW_CORR_DEG overrides for
+    /// measurement runs). The reverse wheel carries the plan's turn-in steering
+    /// (`ReverseParkPath`'s `Steer[]`); this is the correction band around it. Unbounded, the residual outvotes the arc and
+    /// the plan's shape is gone - measured that way twice (the 5 m bay went green → 8.6°
+    /// off the kerb, `held 596×`, once the lateral term sat in the band too). 15° is a
+    /// band, not a manoeuvre: the cap stays at PARK_MAX_STEER_DEG (38°) and the arc owns
+    /// the wheel.</summary>
+    public static readonly double PARK_FOLLOW_CORR_MAX_RAD = Math.Radians(
+        double.TryParse(Environment.GetEnvironmentVariable("PARK_FOLLOW_CORR_DEG"),
+                       out var _fc) ? _fc : 15.0);
     /// <summary>Straight run-out after the arcs. Must be long enough for
     /// heading and cross-track error to converge AT SPEED.</summary>
     public const double PARK_REVERSE_TAIL_M = 2.4;

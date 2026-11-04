@@ -484,6 +484,10 @@ public partial class MapRenderer : Node2D
         // The bay this car has to end in, as the sim declared it (xM, yM, headingDeg,
         // lengthM, widthM, inside) - drawn as the green acceptance rectangle.
         public (float X, float Y, float Hdg, float LenM, float WidM, bool Inside)? ParkTarget;
+        /// <summary>The RED BOXES: this car's no-park boxes (`park_target.no_park`) -
+        /// the parked neighbours as the reverse-in planner forbids them, clearance and
+        /// pads included. null while the car holds no bay claim.</summary>
+        public List<(float X, float Y, float Hdg, float LenM, float WidM)>? NoPark;
         public string HudLabel;
         // Collision footprint (the box used for crash detection), in metres,
         // derived from /state body_corners. 0 = not known yet.
@@ -4007,6 +4011,7 @@ public partial class MapRenderer : Node2D
                     m.FlagGreen = ParseFlag(c, "green");
                     m.FlagRed = ParseFlag(c, "red");
                     m.ParkTarget = ParseParkTarget(c);
+                    m.NoPark = ParseNoPark(c);
                     m.HudLabel = c.TryGetProperty("hud_label", out var hlc)
                                   && hlc.ValueKind == JsonValueKind.String
                            ? hlc.GetString() : null;
@@ -4348,6 +4353,87 @@ public partial class MapRenderer : Node2D
         _world.AddChild(line);
         _flagNodes.Add(poly);
         _flagNodes.Add(line);
+    }
+
+    static bool _noParkProbeDone;    // one probe line, not one per frame
+
+    /// <summary>Parse the no-park boxes as the sim stated them
+    /// (SimEngine.ParkTargetPayload ← BicycleNav.ParkForbiddenRects) - the parked
+    /// neighbours grown by the planner's own clearance and pads. null while the car
+    /// holds no bay claim.</summary>
+    static List<(float X, float Y, float Hdg, float LenM, float WidM)>? ParseNoPark(JsonElement car)
+    {
+        if (!car.TryGetProperty("park_target", out var t) ||
+            t.ValueKind != JsonValueKind.Object) return null;
+        t.TryGetProperty("no_park", out var np);
+        if (!_noParkProbeDone)
+        {
+            // What did the client actually receive? A box that does not paint is
+            // either not in the payload or not in the picture, and this line is the
+            // only thing that tells the two apart without guessing.
+            _noParkProbeDone = true;
+            GD.Print("[NOPARK] park_target keys: " + string.Join(",",
+                         t.EnumerateObject().Select(p => p.Name)) +
+                     $" | no_park kind={np.ValueKind}");
+        }
+        if (np.ValueKind != JsonValueKind.Array)
+            return null;
+        var list = new List<(float, float, float, float, float)>();
+        foreach (var r in np.EnumerateArray())
+        {
+            if (r.ValueKind != JsonValueKind.Object) continue;
+            float Num(string k) => r.TryGetProperty(k, out var v) &&
+                                   v.ValueKind == JsonValueKind.Number ? (float)v.GetDouble() : 0f;
+            float lenM = Num("lengthM"), widM = Num("widthM");
+            if (lenM <= 0.0f || widM <= 0.0f) continue;
+            list.Add((Num("xM"), Num("yM"), Num("headingDeg"), lenM, widM));
+        }
+        return list.Count > 0 ? list : null;
+    }
+
+    /// <summary>One RED RECTANGLE per no-park box: the area a reverse-in may not bring
+    /// its body into, drawn under the bay box and the cars so both stay readable on top.
+    /// The band of red sticking out past each grey car IS the padding - at zoom 32 that
+    /// is 0.5 m ≈ 16 px, i.e. the side clearance the clearance rule asks for (#62).</summary>
+    void DrawNoPark(List<(float X, float Y, float Hdg, float LenM, float WidM)>? boxes)
+    {
+        if (boxes is null) return;
+        foreach (var (x, y, h, lenM, widM) in boxes)
+        {
+            float rad = Mathf.DegToRad(h);
+            float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);      // forward
+            float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad);     // right
+            Vector2 Off(double along, double side) =>
+                W(x + fx * (float)along + rx * (float)side,
+                  y + fy * (float)along + ry * (float)side);
+            float hl = lenM * 0.5f, hw = widM * 0.5f;
+            var pts = new[]
+            {
+                Off(hl, hw), Off(hl, -hw), Off(-hl, -hw), Off(-hl, hw),
+            };
+            var poly = new Polygon2D
+            {
+                Color = new Color(0.92f, 0.14f, 0.14f, 0.30f),
+                Polygon = pts,
+                // ZIndex 3, NOT 1: the road ribbon owns layers 0 (asphalt), 1
+                // (patches) and 2 (cracks), so a box painted at 1 is buried under
+                // the street - which is how the first version of this overlay drew
+                // nothing at all.
+                ZIndex = 3,
+            };
+            var line = new Line2D
+            {
+                Points = pts,
+                DefaultColor = new Color(0.78f, 0.06f, 0.06f),
+                Width = TrailWidthM,
+                Closed = true,
+                ZIndex = 3,
+            };
+            _world.AddChild(poly);
+            _world.AddChild(line);
+            _flagNodes.Add(poly);
+            _flagNodes.Add(line);
+        }
     }
 
     static (float X, float Y, float Hdg)? ParseFlag(JsonElement root, string key)
@@ -5440,6 +5526,7 @@ public partial class MapRenderer : Node2D
         if (_carMeta.Count > 0)
             foreach (var kv in _carMeta)
             {
+                DrawNoPark(kv.Value.NoPark);        // the wall the search hit
                 DrawParkTarget(kv.Value.ParkTarget);      // under the pennants and the cars
                 DrawFlag(kv.Value.FlagGreen, new Color(0f, 0.784f, 0.314f),
                                          new Color(0f, 0.353f, 0.157f));
