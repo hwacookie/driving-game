@@ -80,6 +80,39 @@ public sealed partial class BicycleNav
     /// reverse is staged (PARK_STAGE_PAST_M overrides). The staging distance used to be
     /// sized from the arcs, which is bay-independent; this is the mouth-relative rule the
     /// working bay was measured at (#62).</summary>
+    /// <summary>The sideways gap this car keeps to the parked row while it drives up
+    /// PAST the mouth, before pivoting into the reverse (#62, owner rule 2026-11-04:
+    /// "relativ dicht an dem geparkten Auto dran stehen" — a driver stands close to the
+    /// car in front, partly so the own NOSE does not stick into the traffic lane while
+    /// backing out). Measured before this rule existed: the approach held v 5.25 m on the
+    /// 6-lane avenue while the row's band is v 8.35 m, i.e. the car pivoted with a 1.35 m
+    /// gap to the flanks' bodies and had to cover the FULL 3.39 m of lateral distance in
+    /// the swing. PARK_ROW_GAP_M overrides.</summary>
+    public static readonly double PARK_ROW_GAP_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_ROW_GAP_M"), out var _rg) ? _rg : 0.50;
+
+    /// <summary>How much of the parking line's tail the run-in toward the row is ramped
+    /// over (PARK_RUNIN_BLEND_M overrides). The shift itself is decided by the claim's
+    /// band; this only shapes HOW it is approached (#62).</summary>
+    /// <summary>Speed of the forward crab leg, metres per second. The same creep the
+    /// reverse itself uses: this leg is inside a tight row, where metres matter more than
+    /// tempo (#62).</summary>
+    public const double PARK_CRAB_SPEED_M = 0.5;
+
+    /// <summary>Also try the crab when a pure reverse DID build a path (off by default,
+    /// PARK_CRAB_TRY_ALL=1 to measure). Measured on the three bays with it ON: the family
+    /// fires (`[PARKCRAB] lock 38° tuck 3.39 m`), and all three get WORSE - bay 24 -16 →
+    /// -17 cm, bay 25 -65 → -71 cm, bay 26 -158 → -194 cm. The reason is the selection
+    /// rule, not the shape: `best` maximises the TUCK, and a forward leg costs metres of
+    /// staging, so among plans that reach the same depth the crab always loses. Choosing it
+    /// needs an objective the search does not have today (swing angle / metres travelled),
+    /// which is why this stays off and the family ships unselected (#62).</summary>
+    public static readonly bool PARK_CRAB_TRY_ALL =
+        Environment.GetEnvironmentVariable("PARK_CRAB_TRY_ALL") == "1";
+
+    public static readonly double PARK_RUNIN_BLEND_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_RUNIN_BLEND_M"), out var _rb) ? _rb : 9.0;
+
     public static readonly double PARK_STAGING_PAST_M = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_STAGE_PAST_M"), out var _psp) ? _psp : 0.65;
     /// <summary>§1c tier 1 (owner decision, 2026-11-02): the free space along the
@@ -880,6 +913,77 @@ public sealed partial class BicycleNav
     /// is not reachable from here, take the deepest one that is - parking a few
     /// centimetres further out is fine, clipping the kerb or straddling the
     /// centreline is not.</summary>
+    private bool _runInLogged;
+    /// <summary>Metres of the current plan's forward leg already driven (#62).</summary>
+    private double _pkCrabDoneM;
+    private bool _crabLogged;
+
+/// <summary>How far the nose may be pushed ALONG the row before the reverse engages
+    /// (PARK_CRAB_MAX_M overrides). The manoeuvre this makes possible is what a driver
+    /// does in a tight gap: drive forward past the rear neighbour until the front corner
+    /// clears it, then back in. 1.6 m is not arbitrary - it is the front overhang plus the
+    /// clearance a corner needs to pass a flank standing at the mouth's rear edge.</summary>
+    public static readonly double PARK_CRAB_MAX_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_CRAB_MAX_M"), out var _cm) ? _cm : 1.60;
+
+    /// <summary>The forward distances the crab is tried at, smallest first: the
+    /// shortest nose-out that clears the flank wins, because every metre forward is a
+    /// metre the staging line has to deliver and a metre the car has to crawl.</summary>
+    public static readonly double[] PARK_CRAB_STEPS_M = ParseCrabSteps(
+        Environment.GetEnvironmentVariable("PARK_CRAB_STEPS_M"));
+
+    /// <summary>The default ladder, and the parser for a measurement run: an empty or
+    /// unset value means NO crab at all, which is how the family is A/B-tested (#62).</summary>
+    static double[] ParseCrabSteps(string? spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec)) return new[] { 0.40, 0.80, 1.20, 1.60 };
+        if (spec.Trim() == "none") return Array.Empty<double>();
+        var parts = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var vals = parts.Select(x => double.TryParse(x, out var v) ? v : double.NaN)
+                        .Where(v => !double.IsNaN(v) && v > 0.0).ToArray();
+        return vals.Length > 0 ? vals : Array.Empty<double>();
+    }
+
+    /// <summary>The same manoeuvre as the other two builders, but starting with a FORWARD
+    /// leg: crab forward along the row by `crabM`, then reverse the turn-in / diagonal /
+    /// counter-turn shape from the pose reached.
+    ///
+    /// Why this family exists (#62). Pulling the staging stop beside the row - the owner's
+    /// rule, and measured to cut the swing from 47.8 deg to 17.4 deg - makes every reverse
+    /// candidate refuse at `arc u -0.0 m`: the car's OWN first point already clips the rear
+    /// flank (`clips parked body #1 at arc u -0.0 m, yaw -5° (that body stands at u 2.3,
+    /// v 8.3)`), because the front corner still overlaps that flank ALONG the row. A
+    /// refusal that names the start pose is a position problem, and the answer is to drive
+    /// out of it: the front corner clears the flank after roughly the front overhang, and
+    /// every metre after that buys a shallower reverse.
+    ///
+    /// The frame is the same as the reverse builders' (u negative = the car moving
+    /// backwards), so a forward leg is a NEGATIVE u: the path starts at u = -crabM and
+    /// returns to u = 0 at the pose the reverse then starts from. `steer` carries the
+    /// forward leg's own wheel (straight, 0) so the executor can tell the two apart.</summary>
+    private (List<(double U, double V, double Psi, double Steer)> Pts, bool Ok)
+        ReverseParkPathWithCrab(double v0, double psi0, double dv, double crabM,
+                                bool diagonal, double ds = 0.02, double? delta = null)
+        {
+            if (crabM <= 1e-6)
+                return diagonal ? ReverseParkPathDiagonal(v0, psi0, dv, ds, delta)
+                                : ReverseParkPath(v0, psi0, dv, ds, delta);
+            // The forward leg is straight, so it changes u only: the reverse starts at the
+            // same lateral and heading, `crabM` further along the row.
+            var (rev, ok) = diagonal
+                ? ReverseParkPathDiagonal(v0, psi0, dv, ds, delta)
+                : ReverseParkPath(v0, psi0, dv, ds, delta);
+            if (!ok || rev.Count == 0) return (rev, ok);
+            var pts = new List<(double U, double V, double Psi, double Steer)>(rev.Count + 80);
+            // Walk the nose forward, u from -crabM up to 0, wheel straight.
+            for (double u = -crabM; u < -1e-9; u += ds)
+                pts.Add((u, v0, psi0, 0.0));
+            pts.Add((0.0, v0, psi0, 0.0));
+            // The reverse part starts at its own u = 0, which is the end of the forward leg.
+            foreach (var q in rev) pts.Add((q.U, q.V, q.Psi, q.Steer));
+            return (pts, true);
+        }
+
     private bool StartReversePark()
     {
         var car = _car;
@@ -908,6 +1012,12 @@ public sealed partial class BicycleNav
         // the car).
         double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry);
         double oPark = Config.ParkOffsetM(seg.Width);
+        // #62, measured twice and REJECTED: aiming the reverse at the claimed row's band
+        // (`ClaimLatM()`, v 8.35 m here) instead of the kerb formula (8.64 m). It arms a
+        // shallower tuck and still lands bay 24 at -226 cm, body 23 deg off parallel,
+        // because `oPark` also owns the kerb/run-out maths below - that 0.29 m is
+        // load-bearing there. The row's band is not a drop-in park target; the lever that
+        // remains is where the reverse STARTS laterally (1.35 m out in the lane today).
         double dvFull = oPark - v0;
         if (dvFull < PARK_REVERSE_MIN_TUCK_M) return false;
         // How far back the car has to travel in total: exactly the distance it
@@ -925,6 +1035,9 @@ public sealed partial class BicycleNav
         // refuse a plan, and "no path clears this bay" without the reason has made
         // four rounds of guessing about the shape (#41).
         var refusals = new List<string>();
+        // How far the winning plan drove its nose forward (0 = a pure back-in). Reported
+        // with the armed plan so a crab is visible in the trace instead of inferred.
+        double crabUsedM = 0.0;
         // The demand, spelled out next to the refusals it produces: which lateral
         // the search was asked to deliver, from which pose, over how much staging.
         Console.WriteLine($"   [PARKASK] v0={v0:F2} m oPark={oPark:F2} m " +
@@ -943,6 +1056,43 @@ public sealed partial class BicycleNav
                 {
                     var (two, twoOk) = ReverseParkPath(v0, psi0, dvT, delta: delta);
                     cand = two; ok = twoOk; useDiag = false;
+                }
+                // Third family, and the one a tight bay needs (#62): when the reverse
+                // refuses at its OWN first point, no reverse geometry can be made to fit -
+                // the pose is the problem. Then the nose goes forward along the row first
+                // and the same search runs from where the flank no longer overlaps it.
+                // Tried only after the pure-reverse shapes, so a bay that works today is
+                // unchanged by it, and deepest-tuck-wins still decides between them.
+                // #62: the crab fires whenever a candidate is not already legal, not only
+                // when no geometry could be built at all. Measured on bay 25: the reverse
+                // DID build a path (peak yaw 51°, rest 14.7° off parallel, rear corner
+                // 0.26 m into the flank), so gating on `!ok` left the family dead in every
+                // bay - the refusals it was written for never happen at these stagings.
+                if (!ok || PARK_CRAB_TRY_ALL)
+                {
+                    // One line per (lock, tuck) that needs it: the whole point of this
+                    // family is to be visible when it fires and when it does not (#62).
+                    if (refusals.Count < 24)
+                    {
+                        string whyC = $"lock {deltaDeg:F0}° tuck {dvT:F2} m: reverse refused " +
+                                      "at its own first point - trying a forward crab";
+                        refusals.Add(whyC);
+                        Console.WriteLine($"   [PARKCRAB] {whyC}");
+                    }
+                    foreach (double crabM in PARK_CRAB_STEPS_M)
+                    {
+                        var (cd, cdOk) = ReverseParkPathWithCrab(v0, psi0, dvT, crabM, true,
+                                                                 delta: delta);
+                        if (!cdOk)
+                            (cd, cdOk) = ReverseParkPathWithCrab(v0, psi0, dvT, crabM, false,
+                                                                 delta: delta);
+                        if (cdOk && cd.Count > 0)
+                        {
+                            cand = cd; ok = true; useDiag = true;
+                            crabUsedM = Math.Max(crabUsedM, crabM);
+                            break;
+                        }
+                    }
                 }
                 // Both families can hand back an EMPTY list when they refuse a
                 // candidate - the code below indexes the last point, so an empty path
@@ -1168,6 +1318,10 @@ public sealed partial class BicycleNav
             Steer = pts.Select(p => p.Steer).ToArray(),
             Psi = pts.Select(p => p.Psi).ToArray(),
             ArcLenM = pts.Count > 1 ? Math.Max(0.0, -pts.Min(q => q.U)) : 0.0,
+            // The forward leg of a crab plan (#62): the car drives FORWARD this far with
+            // the wheel straight before the reverse shape starts. It is not part of
+            // ArcLenM, which is what the reverse itself travels.
+            CrabM = crabUsedM,
             RoadH = roadH,
             VTarget = oPark - (oPark - v0 - dv),   // reached kerb offset
             OPark = oPark,
@@ -1181,6 +1335,10 @@ public sealed partial class BicycleNav
         _pkTravelM = 0.0;
         _pkReverseStarted = false;   // #41: the arc index starts when the REVERSE starts
         _parkShimmy = false;
+        // A fresh path owns its own forward leg: the counter must not carry over from the
+        // previous attempt, or a re-plan would start straight in reverse (#62).
+        _pkCrabDoneM = 0.0;
+        _crabLogged = false;
         _parkShimmyTries = 0;
         _parkShimmyDist = 0.0;
         _parkHeld = false;
@@ -1223,6 +1381,38 @@ public sealed partial class BicycleNav
         var car = _car;
         var refLine = _ref!;
         var st = _reversePark!;
+
+        // --- the forward leg of a crab plan (#62) -------------------------------
+        // The plan asked for the nose to go FORWARD along the row before the reverse
+        // engages, because the search refused every candidate at its own first point:
+        // `clips parked body #1 at arc u -0.0 m` is the pose saying the front corner still
+        // overlaps the rear flank ALONG the row. A driver does exactly this in a tight gap -
+        // pull forward until the nose is past the car behind, then back in. Executed here,
+        // ahead of the reverse's own state machine, so none of the reverse's stop/hold/
+        // shimmy logic sees a forward-moving car.
+        if (st.CrabM > 1e-6 && _pkCrabDoneM < st.CrabM)
+        {
+            double travel = Math.Min(PARK_CRAB_SPEED_M * dt, st.CrabM - _pkCrabDoneM);
+            car.SteerAngle = 0.0;
+            car.TargetSpeed = PARK_CRAB_SPEED_M;
+            _pkCrabDoneM += travel;
+            if (_pkCrabDoneM >= st.CrabM - 1e-6)
+            {
+                car.TargetSpeed = 0.0;
+                car.RecordDecision(_navTime,
+                    $"[PARKPLAN] CRAB done ({_pkCrabDoneM:F2} m forward, nose clear of the " +
+                    "rear flank) - engaging the reverse from here");
+            }
+            else if (!_crabLogged)
+            {
+                _crabLogged = true;
+                car.RecordDecision(_navTime,
+                    $"[PARKPLAN] CRAB: driving {_pkCrabDoneM:F2}/{st.CrabM:F2} m forward with " +
+                    "the wheel straight, to get the front corner past the flank");
+            }
+            return;
+        }
+
         // The reverse creeps 0.80 m/s ≈ 13 mm per substep, so a 1 m window with no
         // fallback looked safe - and was not: inside the tuck's arcs the rear axle's
         // nearest point on the line JUMPS (the arc is tighter than the window), the

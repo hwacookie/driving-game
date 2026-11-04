@@ -28,6 +28,11 @@ public sealed class ReverseParkState
     public double ArcLenM { get; init; }
     public required double VTarget { get; init; }
     public required double OPark { get; init; }
+    /// <summary>Metres the car drives FORWARD, wheel straight, before the reverse shape
+    /// begins (0 = a pure back-in). This is the nose-out that clears a flank whose body
+    /// overlaps our front corner ALONG the row - without it every reverse candidate
+    /// refuses at its own first point. See PARK_CRAB_STEPS_M (#62).</summary>
+    public double CrabM { get; init; }
     public required double Tx { get; init; }
     public required double Ty { get; init; }
     public required double Rx { get; init; }
@@ -400,6 +405,9 @@ public sealed partial class BicycleNav
     /// it never stands beside a window (measured in the three bay scenarios).
     private bool _pkAwaitingClaim;
     private double _claimSOnLineM;
+    /// <summary>The kerb-ward base the FORWARD phase of the current back-in drives on
+    /// (0 = ordinary nominal lane). See <see cref="ParkApproachBaseM"/> (#62).</summary>
+    private bool _rebuiltLogged;
     // §1d: the far end of the row of bays — the last parked car's front end. The
     // scanning drive must be able to come to rest PAST the row, never at the ask:
     // measured, sizing the stop at the ask left the car 0.9 m short of the first
@@ -421,6 +429,9 @@ public sealed partial class BicycleNav
                    _claimRearEndM, _claimFrontEndM;
     private int _claimBehindUid = -1, _claimAheadUid = -1;
     public bool ParkBayClaimed() => _bayClaimed;
+    /// <summary>The claimed row's lateral band, metres from its axis: the depth a
+    /// back-in aims at when this car stands in the row (#62).</summary>
+    public double ClaimLatM() => _claimLatM;
     public bool ParkBayRowAtAsk() => _bayRowAtAsk;
     /// <summary>The claimed mouth as one object: centre (world metres), the row's
     /// heading, the mouth's two ends along the road, and the two cars that define
@@ -751,6 +762,34 @@ public sealed partial class BicycleNav
         _ref = new RefLine(pts);
     }
 
+    /// <summary>The lateral the FORWARD phase of a back-in drives on, measured from the
+    /// centreline like every other offset (positive = kerb-ward). 0 = "no opinion", i.e.
+    /// the ordinary nominal lane.</summary>
+    /// <summary>The lateral a back-in's approach and staging should carry: the claimed
+    /// row's band, less both half-widths, less PARK_ROW_GAP_M — i.e. stand the car
+    /// PARK_ROW_GAP_M beside the parked flank instead of 1.35 m out in the lane (owner
+    /// rule, #62). Returns 0 (no opinion) with no claim, once parked or reversing, or when
+    /// the row's band is unknown; never kerb-ward of the depth the reverse itself aims at.
+    ///
+    /// Derived from the CLAIM, not from the delivered line: an earlier version read the
+    /// value back off the rebuilt polyline, which only exists in the tick AFTER the
+    /// decision, so the plan armed the lane tuck while the car drove toward the row (and
+    /// once, hung the host: `steps=0`, empty suite log).</summary>
+    public double ParkRowBaseM()
+    {
+        if (!_bayClaimed || Parked || _reversePark is not null) return 0.0;
+        if (_claimLatM <= 0.0) return 0.0;
+        var seg = DestSegment();
+        if (seg is null) return 0.0;
+        double nearHalf = 0.0;
+        var near = _car.ParkingNeighbours;
+        if (near is not null)
+            foreach (var n in near)
+                if (n.State == CarState.Parked && n.WidthM / 2.0 > nearHalf) nearHalf = n.WidthM / 2.0;
+        double want = Math.Abs(_claimLatM) - nearHalf - _car.WidthM / 2.0 - PARK_ROW_GAP_M;
+        return Math.Max(0.0, Math.Min(want, Config.ParkOffsetM(seg.Width)));
+    }
+
     private void DecideParkStyle()
     {
         if (Parked || _reversePark is not null) return;
@@ -843,10 +882,24 @@ public sealed partial class BicycleNav
         // The forward position the tuck is planned FROM is where this car
         // actually drives (its nominal line - possibly a spawn offset).
         double oLane = LaneBaseOffset(Config.KerbOffsetM(width));
+        // NOT `ParkRowBaseM()`, which would put this car beside the row: the style is
+        // decided while the car still cruises toward the row, BEFORE any mouth is claimed
+        // (docs §1d - where to park is unknown until a bay is claimed), so at this point
+        // there is no band to aim at and the value is 0. Measured with it wired anyway:
+        // nothing moved at all (-16 cm, staging still v 5.25), because the decision that
+        // sizes the plan happens upstream of the claim.
+        // The approach therefore stays in the lane; what a claim changes is the STAGING
+        // distance, and the reverse's own crab (`PARK_CRAB_STEPS_M`) is what copes with a
+        // pose whose nose overlaps the flank (#62).
         // Reverse-ONLY parking: the forward phase does NOT pull over. The car
         // drives straight past the spot in its lane and stops there; the
         // reverse covers the FULL lateral distance from lane to kerb - the
         // classic back-in.
+        // The base the reverse is planned from. A claimed bay moves it kerb-ward to the
+        // row's side; a plan that finds no geometry there keeps the lane plan rather than
+        // dropping the manoeuvre (measured: aiming the reverse's TARGET at the band,
+        // instead of its START, landed bay 24 at -226 cm - so this changes where the car
+        // stands, never how deep it aims).
         double oFwd = oLane;
         var plan = PlanReverseTuck(width, oFwd);
         if (plan is null)
@@ -857,7 +910,7 @@ public sealed partial class BicycleNav
                                       $"(width={width:F2} oFwd={oFwd:F2} dStop={dStop:F1})");
             return;
         }
-        (double tuck, double stage) = plan.Value;
+        double tuck = plan.Value.TuckM, stage = plan.Value.StageM;
         // Stage BY THE MOUTH, not by the arcs (#62, owner decision 2026-11-04: pull past
         // until the REAR BUMPER is opposite the mouth's near edge, then reverse).
         // The arcs size the stage as `arcs + run-out`, which is the SAME 9.89 m for every
@@ -880,6 +933,8 @@ public sealed partial class BicycleNav
         _parkTuck = tuck;
         _parkStageM = stage;
         _parkStageShort = false;
+        // A changed approach base moves the LINE, so it goes through the same
+        // extension-only gate as a changed stage below (the TELEPORTATION guard).
         _car.RecordDecision(_navTime, $"[PARKPLAN] armed reverse: tuck={tuck:F2} " +
                                   $"stage={stage:F2} claimed={(_bayClaimed ? 1 : 0)} " +
                                   $"dStop={dStop:F1} claimS={_claimSOnLineM:F1}");
