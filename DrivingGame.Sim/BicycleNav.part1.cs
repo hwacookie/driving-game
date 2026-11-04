@@ -858,6 +858,24 @@ public sealed partial class BicycleNav
             return;
         }
         (double tuck, double stage) = plan.Value;
+        // Stage BY THE MOUTH, not by the arcs (#62, owner decision 2026-11-04: pull past
+        // until the REAR BUMPER is opposite the mouth's near edge, then reverse).
+        // The arcs size the stage as `arcs + run-out`, which is the SAME 9.89 m for every
+        // bay - right for the 9.40 m gap (its measured stop is s 155.43 and
+        // 153.78 + 1.00 + 0.65 = 155.43 to the centimetre) and 1.50 m / 2.00 m too far
+        // past the 6.40 m and 5.40 m gaps, where the swing then has to pass a flank only
+        // 1.3 m into its own path: the search refused every tuck at
+        // `arc u 2.4 m, yaw -44°`, armed 1.34 m of the 3.39 m asked, and the bay was
+        // finished 1.65 m short of its own line.
+        // The bias is not invented: 0.65 m is the offset bay 24 was measured at.
+        if (_bayClaimed && _claimRearEndM > 0.0 && _claimFrontEndM > 0.0)
+        {
+            double nearEdgeM = Math.Max(_claimRearEndM, _claimFrontEndM);
+            double rearExtM = Math.Min(0.0, ParkCornerOffsets().Min(c => c.Along));
+            double mouthStageM = nearEdgeM + PARK_STAGING_PAST_M - rearExtM - S;
+            if (mouthStageM >= PARK_REVERSE_MIN_TAIL_M)
+                stage = mouthStageM;
+        }
         ParkStyle = "reverse";
         _parkTuck = tuck;
         _parkStageM = stage;

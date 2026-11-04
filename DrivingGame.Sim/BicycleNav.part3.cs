@@ -76,6 +76,12 @@ public sealed partial class BicycleNav
     /// path, decides where the car rests (m). Unused until the reverse stops on the goal
     /// itself — see <see cref="ParkEndClearM"/> for why that waits for the staging fix.</summary>
     internal const double PARK_GOAL_SLACK_M = 0.60;
+    /// <summary>How far PAST the mouth's near edge the rear bumper stands when the
+    /// reverse is staged (PARK_STAGE_PAST_M overrides). The staging distance used to be
+    /// sized from the arcs, which is bay-independent; this is the mouth-relative rule the
+    /// working bay was measured at (#62).</summary>
+    public static readonly double PARK_STAGING_PAST_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_STAGE_PAST_M"), out var _psp) ? _psp : 0.65;
     /// <summary>§1c tier 1 (owner decision, 2026-11-02): the free space along the
     /// road — gap length minus THIS car's own length — that makes a gap a bay.
     /// A SUM: the split fore/aft is free, 0.30/0.70 is as good as 0.50/0.50.
@@ -837,6 +843,12 @@ public sealed partial class BicycleNav
     /// it legal.</summary>
     public (double TuckM, double StageM)? PlanReverseTuck(double width, double oForward)
     {
+        // NOT the claim's band: aiming the reverse at `_claimLatM` (v 8.35 m) instead of
+        // the width formula (8.64 m) was measured on 2026-11-04 and made bay 24 far
+        // worse (-16 cm -> -226 cm, front -0.16 m) even though it armed the full 3.10 m
+        // tuck - the 0.29 m difference is load-bearing in the kerb/run-out maths that
+        // reads oPark, so the row's band is not a drop-in target. Reverted; the lateral
+        // miss stays open (#62).
         double oPark = Config.ParkOffsetM(width);
         double start = Math.Max(0.0, oForward - PARK_PLAN_START_MARGIN_M);
         (double tuck, double stage)? best = null;
@@ -932,7 +944,21 @@ public sealed partial class BicycleNav
                     var (two, twoOk) = ReverseParkPath(v0, psi0, dvT, delta: delta);
                     cand = two; ok = twoOk; useDiag = false;
                 }
-                if (ok)
+                // Both families can hand back an EMPTY list when they refuse a
+                // candidate - the code below indexes the last point, so an empty path
+                // aborted the host (ArgumentOutOfRangeException in `StartReversePark`,
+                // measured in bay 26 with the staging bias at 1.65 m). An empty
+                // candidate is a refusal like any other, and it now says so.
+                if (ok && cand.Count == 0) ok = false;
+                if (!ok && cand.Count == 0 && refusals.Count < 24)
+                {
+                    string why0 = $"lock {deltaDeg:F0}° tuck {dvT:F2} m: no path geometry " +
+                                  "(neither the turn-in/leg/counter-turn shape nor the " +
+                                  "two-arc shape could be built)";
+                    refusals.Add(why0);
+                    Console.WriteLine($"   [PARKNO] {why0}");
+                }
+                if (ok && cand.Count > 0)
                 {
                     string kerb = ReverseParkWhy(cand, seg.Width);
                     string body = kerb == "" ? PathClearsWhy(cand, bay) : "";
@@ -951,8 +977,8 @@ public sealed partial class BicycleNav
                         if (refusals.Count <= 24) Console.WriteLine($"   [PARKNO] {why}");
                     }
                 }
-                double tooLong = -cand[^1].U;
-                if (ok && tooLong > stage + _parkStageExtM - PARK_REVERSE_MIN_TAIL_M)
+                double tooLong = cand.Count > 0 ? -cand[^1].U : 0.0;
+                if (ok && cand.Count > 0 && tooLong > stage + _parkStageExtM - PARK_REVERSE_MIN_TAIL_M)
                 {
                     ok = false;
                     string why = $"lock {deltaDeg:F0}° tuck {dvT:F2} m via " +
