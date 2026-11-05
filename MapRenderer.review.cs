@@ -1089,7 +1089,15 @@ public partial class MapRenderer : Node2D
         // window was resized (measured: four "readout" title bars after one
         // resize, because macOS steps the size and every step rebuilt the
         // surface). The slots learned the same rule before.
-        BuildReviewReadout();
+        // #90: NOT here. This function is `RebuildReviewSurface`, and macOS steps a
+        // window resize in small increments - so building the readout WINDOW from here ran
+        // it once per step. The first call minted an OS window (title bar + frame) whose
+        // text is only laid out later by `ReviewLabels`, and the guard clamps every one of
+        // them into the top-left corner: a stack of empty frames, ~300x42 each, exactly the
+        // "broken window" reported above the `test` box. Measured in this client's own log:
+        //   WINDOW-PLACEMENT saved #1..#5 during one resize;  REBUILD ... four times in 3 s
+        // The readout is built once at startup instead (see _Ready); a rebuild only re-fits
+        // the existing window, which is what the comment above this line always promised.
         var vpHud = GetViewport().GetVisibleRect();
         _hudBuiltAt = vpHud.Size;
         _hudLayer = new CanvasLayer { Layer = 11 };
@@ -1275,6 +1283,12 @@ public partial class MapRenderer : Node2D
         };
         AddChild(_readoutWin);
         RegisterWindow(_readoutWin);
+        // #90: this is the window that showed up EMPTY in the top-left corner, and the log
+        // never said it existed - which is why the frame could not be attributed from a
+        // transcript. One line per minted window, with its geometry, so "who drew that
+        // frame?" is answered by the log instead of by guessing from a screenshot.
+        GD.Print($"READOUT-WINDOW built at {_readoutWin.Position} size {_readoutWin.Size} " +
+                 $"(review={_review})");
         var rLayer = new CanvasLayer { Layer = 1 };
         _readoutWin.AddChild(rLayer);
         // The panel colour the review surface uses everywhere - the window's
@@ -2451,6 +2465,14 @@ public partial class MapRenderer : Node2D
     private void ReviewLabels()
     {
         if (_reviewLabel == null) return;
+        // #90: the window is BUILT here, once - `BuildReviewReadout` returns immediately
+        // after the first call. It used to be called from `RebuildReviewSurface`, which a
+        // macOS resize runs once per size STEP, so one drag minted several OS windows that
+        // only got their text later: a stack of empty ~300x42 frames in the top-left corner,
+        // reported as "das kaputte Fenster". Building it from the label pass cannot repeat
+        // (the guard is the field itself) and it also fixes the live window, which never
+        // loaded a tape and therefore never built the readout at all.
+        BuildReviewReadout();
         if (_readoutClosed || (_readoutWin != null && !_readoutWin.Visible))
         {
             // The box is closed: the row of slots may come up to the top
@@ -4061,7 +4083,15 @@ public partial class MapRenderer : Node2D
 
     private void FocusAtCursor()
     {
-        if (_tapeFocus.Count == 0) { _focusAtCursor = null; UpdateTestPanel(); return; }
+        if (_tapeFocus.Count == 0)
+        {
+            _focusAtCursor = null;
+            _testShown = "";        // #90: a new tape may well record scenarios - re-arm the
+                                    // panel's change detection, and let this call hide the
+                                    // frame that has nothing to report.
+            UpdateTestPanel();
+            return;
+        }
         long step = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)].Step;
         RvFocus? found = null;
         for (int i = _tapeFocus.Count - 1; i >= 0; i--)
@@ -4346,9 +4376,29 @@ public partial class MapRenderer : Node2D
         sb.ContentMarginLeft = sb.ContentMarginRight = 12;
         sb.ContentMarginTop = sb.ContentMarginBottom = 10;
         _testPanelLabel.AddThemeStyleboxOverride("normal", sb);
+        // #90: this panel reports the SCENARIO UNDER THE CURSOR of a tape, so it belongs to
+        // the reviewer. It was built unconditionally and shown from birth, which in a LIVE
+        // window put an empty `test` frame in the top-right - the second window of that name,
+        // because the viewer's own run surface (`BuildTestInfo`, MapRenderer.cs) is also
+        // called "test". The operator saw two same-named frames and one of them could never
+        // say anything: a live window has no cursor. Hidden until the tape actually has a
+        // scenario to show (UpdateTestPanel), which is the first moment it has content.
+        _testWin.Visible = false;
         _testWin.AddChild(_testPanelLabel);
         AddChild(_testWin);
+        RegisterWindow(_testWin);   // #90: the shared guard owns every window; this one was
+                                    // never registered, so nothing kept it inside the main
+                                    // window or 5 px clear of the others
         _testWin.Size = new Vector2I(600, 132);
+        LayoutTestWindow();   // #90: place it NOW - a window that is visible at (0, 0) for
+                              // even one frame reads as a broken frame in the top-left corner
+        // #90: this is the frame that was reported as "das kaputte Fenster oben links".
+        // `--dump-windows` found it unregistered and never laid out: pos (0, 0) - the top-left
+        // corner, under the main window's own frame - in a REVIEWER, where it has nothing to
+        // say. Its placement belongs to UpdateTestPanel/LayoutTestWindow below, and those ran
+        // later, so between build and first layout it sat at the origin with no text.
+        GD.Print($"TEST-PANEL-WINDOW built (reviewer) size {_testWin.Size} " +
+                 $"pos {_testWin.Position} · laid out on the first panel update");
     }
 
     /// <summary>Rewrite the panel when the scenario under the cursor changes —
@@ -4363,6 +4413,10 @@ public partial class MapRenderer : Node2D
         var res = f == null ? default(RvResult?)
             : _tapeResults.FindLast(r => r.Label == f.Value.Label);
         string key = $"{label}|{res?.Passed.ToString()}|{res?.Reason}";
+        // #90: the visibility decision is NOT behind this early return - scrubbing between two
+        // scenarios switches `f` to null while head/verdict text can stay identical, and an
+        // update that only returned would leave a frame up with no test in it.
+        _testWin.Visible = f != null;
         if (key == _testShown) return;
         _testShown = key;
         string head = label.Length > 0
@@ -4389,6 +4443,11 @@ public partial class MapRenderer : Node2D
             _ => "\nfocus: the primary car (view fitted)",
         };
         _testPanelLabel.Text = head + "\n" + verdict + why + desc + focus;
+        // #90: the panel only earns its frame once there is a scenario under the cursor.
+        // Before that it would be chrome around an empty box - exactly the "broken window"
+        // reported twice, and in a live window forever.
+        _testWin.Visible = f != null;
+        if (f == null) return;   // #90: hidden above; no size and no placement for nothing
         _testWin.Size = new Vector2I(620,
             (int)Math.Ceiling(_testPanelLabel.GetMinimumSize().Y) + 16);
         LayoutTestWindow();
