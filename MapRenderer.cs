@@ -5533,8 +5533,19 @@ public partial class MapRenderer : Node2D
             {
                 rect = stored;
                 _winPlacedBy = "remembered";
-                if (screen >= 0 && screen < DisplayServer.GetScreenCount())
-                    w.CurrentScreen = screen;    // the monitor it was closed on
+                // #90 (owner decision 2026-11-05: NO Space switch, ever): the stored
+                // SCREEN is read and validated but deliberately NOT applied. On macOS
+                // `Window.CurrentScreen` ends in `NSWindow.screen=`, whose collection
+                // behaviour MOVES THE WINDOW TO THAT SCREEN'S SPACE - so restoring "the
+                // monitor I closed it on" exchanged the desktop the user was looking at
+                // for another one, terminal and all. The stored POSITION below already
+                // places the window on that display (screens are one global coordinate
+                // space), so nothing about the remembered layout is lost - only the jump.
+                if (screen >= 0 && screen < DisplayServer.GetScreenCount() &&
+                    screen != w.CurrentScreen)
+                    GD.Print($"WINDOW-PLACEMENT screen {screen} remembered, NOT applied " +
+                             $"(on window {w.CurrentScreen}): #90 no Space switch - the " +
+                             "stored position decides where it lands");
             }
             else
             {
