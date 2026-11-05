@@ -5808,6 +5808,8 @@ public partial class MapRenderer : Node2D
         };
         AddChild(_testInfoWin);
         RegisterWindow(_testInfoWin);
+        GD.Print($"TEST-INFO-WINDOW built at {_testInfoWin.Position} size {_testInfoWin.Size} " +
+                 $"(review={_review})");   // #90: same reason as the readout's line
         var tLayer = new CanvasLayer { Layer = 1 };
         _testInfoWin.AddChild(tLayer);
         _testBg = new ColorRect
