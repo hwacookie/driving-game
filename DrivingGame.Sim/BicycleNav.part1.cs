@@ -526,6 +526,7 @@ public sealed partial class BicycleNav
         _routeKey = null;   // invalidate -> MaybeRebuild re-cuts
         _parkBayAnchored = false;   // a fresh spot: the row beside it may be asked about
         _bayClaimed = false; _bayRowAtAsk = false;   // a fresh ask claims nothing
+        _sweptCells.Clear();
         _pkRowEndX = _pkRowEndY = _pkRowStartX = _pkRowStartY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
@@ -549,6 +550,7 @@ public sealed partial class BicycleNav
         _routeKey = null;
         _parkBayAnchored = false;
         _bayClaimed = false; _bayRowAtAsk = false;   // nothing is asked, nothing claimed
+        _sweptCells.Clear();      // a cancelled job's sweep belongs to no verdict (#62)
         _pkRowEndX = _pkRowEndY = _pkRowStartX = _pkRowStartY = 0.0;
         _bayAsked = false; _bayAskTicks = 0;
         _bayAsked = false;
