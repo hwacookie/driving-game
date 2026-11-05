@@ -1089,7 +1089,15 @@ public partial class MapRenderer : Node2D
         // window was resized (measured: four "readout" title bars after one
         // resize, because macOS steps the size and every step rebuilt the
         // surface). The slots learned the same rule before.
-        BuildReviewReadout();
+        // #90: NOT here. This function is `RebuildReviewSurface`, and macOS steps a
+        // window resize in small increments - so building the readout WINDOW from here ran
+        // it once per step. The first call minted an OS window (title bar + frame) whose
+        // text is only laid out later by `ReviewLabels`, and the guard clamps every one of
+        // them into the top-left corner: a stack of empty frames, ~300x42 each, exactly the
+        // "broken window" reported above the `test` box. Measured in this client's own log:
+        //   WINDOW-PLACEMENT saved #1..#5 during one resize;  REBUILD ... four times in 3 s
+        // The readout is built once at startup instead (see _Ready); a rebuild only re-fits
+        // the existing window, which is what the comment above this line always promised.
         var vpHud = GetViewport().GetVisibleRect();
         _hudBuiltAt = vpHud.Size;
         _hudLayer = new CanvasLayer { Layer = 11 };
@@ -2451,6 +2459,14 @@ public partial class MapRenderer : Node2D
     private void ReviewLabels()
     {
         if (_reviewLabel == null) return;
+        // #90: the window is BUILT here, once - `BuildReviewReadout` returns immediately
+        // after the first call. It used to be called from `RebuildReviewSurface`, which a
+        // macOS resize runs once per size STEP, so one drag minted several OS windows that
+        // only got their text later: a stack of empty ~300x42 frames in the top-left corner,
+        // reported as "das kaputte Fenster". Building it from the label pass cannot repeat
+        // (the guard is the field itself) and it also fixes the live window, which never
+        // loaded a tape and therefore never built the readout at all.
+        BuildReviewReadout();
         if (_readoutClosed || (_readoutWin != null && !_readoutWin.Visible))
         {
             // The box is closed: the row of slots may come up to the top
