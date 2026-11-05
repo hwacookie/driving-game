@@ -4143,6 +4143,17 @@ class TurnTester:
             except requests.exceptions.RequestException:
                 bay = None
         bay_ok = True
+        # The price of the manoeuvre, printed next to the verdict (#62): the road area the
+        # body swept while parking, as m^2 and as a multiple of the car's own standing
+        # footprint. Owner's method 2026-11-06 — push the rectangle along the path like a
+        # piece of chalk. A planned single arc to this bay's depth sweeps 34.40 m^2
+        # (ParkingPatternTests), so the ratio between the two is the executor's own cost.
+        if kerb_check and park_box is not None:
+            swept = float(park_box.get('sweptAreaM2') or 0.0)
+            ratio = float(park_box.get('sweptFootprintRatio') or 0.0)
+            if swept > 0.0:
+                print(f"      ⬛  swept road: {swept:.2f} m^2 = {ratio:.2f} x the car's own "
+                      f"footprint (a single planned arc at this depth needs ~34.4 m^2)")
         if bay is not None:
             bay_ok = bay[0] > 0.0 and bay[1] > 0.0
             print(f"      "

@@ -1509,6 +1509,10 @@ public sealed class SimEngine
         double rr = Math.Radians(bHead);
         double fax = Math.Sin(rr), fay = Math.Cos(rr);
         double fqx = Math.Cos(rr), fqy = -Math.Sin(rr);
+        // The road this car's body actually swept during the job, m^2 (#62). It belongs in
+        // this payload because the bay box and the sweep are read together: the box says
+        // whether the park LANDED, the sweep says what it COST. 0 until a reverse runs.
+        double sweptM2 = nav.ParkSweptAreaM2();
         double lenM = c.LengthM + 2.0 * Config.PARK_BOX_MARGIN_M;
         double widM = c.WidthM + 2.0 * Config.PARK_BOX_MARGIN_M;
 
@@ -1528,6 +1532,12 @@ public sealed class SimEngine
             ["widthM"] = widM,
             ["inside"] = margin >= 0.0,
             ["marginM"] = margin,
+            // What the manoeuvre COST, in road area: the union of every body pose since the
+            // job began (BicycleNav.ParkSweptAreaM2). The box answers "did it land", this
+            // answers "at what price" — 0 until a reverse has run (#62).
+            ["sweptAreaM2"] = Math.Round(sweptM2, 2),
+            ["sweptFootprintRatio"] = c.LengthM * c.WidthM > 0.0
+                ? Math.Round(sweptM2 / (c.LengthM * c.WidthM), 2) : 0.0,
             // Named so a verdict can say WHICH neighbour it ended on (issue 31's rule).
             ["behind_uid"] = uidBehind,
             ["ahead_uid"] = uidAhead,

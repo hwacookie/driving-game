@@ -110,6 +110,10 @@ public sealed partial class BicycleNav
     public static readonly bool PARK_CRAB_TRY_ALL =
         Environment.GetEnvironmentVariable("PARK_CRAB_TRY_ALL") == "1";
 
+    /// <summary>Tolerance for "this candidate does not reach the depth we asked for"
+    /// (see the crab gate in the search, #62).</summary>
+    public const double PARK_CRAB_SHALLOW_M = 0.02;
+
     public static readonly double PARK_RUNIN_BLEND_M = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_RUNIN_BLEND_M"), out var _rb) ? _rb : 9.0;
 
@@ -442,6 +446,119 @@ public sealed partial class BicycleNav
     /// the accept test and the verdict answering "is it in the box" twice - and the
     /// accept test answered it without looking along the row at all, so a car touching
     /// the rear flank was declared parked 2.21 m short of the centre (#62)).</summary>
+    /// <summary>The road area THIS car's body has swept during the current parking job,
+    /// m^2 (0 before one starts). Accumulated per tick from the driven pose, so it counts
+    /// what actually happened — the planned arc for bay 24's depth sweeps 34.40 m^2, and the
+    /// difference to this number is the executor's own cost (#62).</summary>
+    public double ParkSweptAreaM2() => _sweptCells.Count * 0.05 * 0.05;
+
+    /// <summary>Add one pose of this car's body to the job's swept set. Called from the
+    /// parking path only, so a 100 m approach is never charged to the manoeuvre.</summary>
+    void AccumulateSweptPose()
+    {
+        const double Cell = 0.05;
+        double h = Math.Radians(_car.Heading);
+        double fx = Math.Sin(h), fy = Math.Cos(h);
+        double rx = Math.Cos(h), ry = -Math.Sin(h);
+        double hf = _car.LengthM - Config.REAR_AXLE_OFFSET_M, hr = Config.REAR_AXLE_OFFSET_M;
+        // `_car.X/Y` is the REAR AXLE (docs/UNITS.md): the body centre sits half a body ahead.
+        double cx = _car.X + fx * (hf - hr) / 2.0, cy = _car.Y + fy * (hf - hr) / 2.0;
+        var q = new (double X, double Y)[4];
+        int i = 0;
+        foreach (var (a, b) in new[] { (hf, _car.WidthM / 2.0), (hf, -_car.WidthM / 2.0),
+                                       (-hr, -_car.WidthM / 2.0), (-hr, _car.WidthM / 2.0) })
+            q[i++] = (cx + fx * a + rx * b, cy + fy * a + ry * b);
+        double minx = q.Min(p => p.X), maxx = q.Max(p => p.X);
+        double miny = q.Min(p => p.Y), maxy = q.Max(p => p.Y);
+        // The centre IS inside its own rectangle; if this test fails, the winding of `q` is
+        // wrong and every cell test below fails with it. Measured exactly that way: cells
+        // stayed 0 for a whole parked job (`swept: 0.00 m^2`) because the corners are listed
+        // front-right → front-left → rear-left → rear-right, which is COUNTER-clockwise here,
+        // while the test kept the `> 0` of the clockwise helper in ParkingPatternTests.
+        bool centreIn = true;
+        for (int k = 0; k < 4 && centreIn; k++)
+        {
+            var A = q[k]; var B = q[(k + 1) % 4];
+            if ((B.X - A.X) * (cy - A.Y) - (B.Y - A.Y) * (cx - A.X) > 0) centreIn = false;
+        }
+        if (!centreIn)
+        {
+            // The corners are counter-clockwise in this frame: test the other sign.
+            for (int ix = (int)Math.Floor(minx / Cell); ix <= (int)Math.Floor(maxx / Cell); ix++)
+                for (int iy = (int)Math.Floor(miny / Cell); iy <= (int)Math.Floor(maxy / Cell); iy++)
+                {
+                    double qx = (ix + 0.5) * Cell, qy = (iy + 0.5) * Cell;
+                    bool inside = true;
+                    for (int k = 0; k < 4 && inside; k++)
+                    {
+                        var A = q[k]; var B = q[(k + 1) % 4];
+                        if ((B.X - A.X) * (qy - A.Y) - (B.Y - A.Y) * (qx - A.X) < 0) inside = false;
+                    }
+                    if (inside) _sweptCells.Add((ix, iy));
+                }
+            return;
+        }
+        for (int ix = (int)Math.Floor(minx / Cell); ix <= (int)Math.Floor(maxx / Cell); ix++)
+            for (int iy = (int)Math.Floor(miny / Cell); iy <= (int)Math.Floor(maxy / Cell); iy++)
+            {
+                double qx = (ix + 0.5) * Cell, qy = (iy + 0.5) * Cell;
+                bool inside = true;
+                for (int k = 0; k < 4 && inside; k++)
+                {
+                    var A = q[k]; var B = q[(k + 1) % 4];
+                    if ((B.X - A.X) * (qy - A.Y) - (B.Y - A.Y) * (qx - A.X) > 0) inside = false;
+                }
+                if (inside) _sweptCells.Add((ix, iy));
+            }
+    }
+
+    /// <summary>The road area a body sweeps along a path: the car as ONE rectangle pushed
+    /// along its own poses, the union of all positions being the road the manoeuvre needed
+    /// (owner's method, 2026-11-06 — "ein Rechteck, das wir wie ein Stück Kreide entlang-
+    /// schieben"). Poses are (x, y, heading_deg) in WORLD metres, so this measures a driven
+    /// manoeuvre as well as a planned one; the two numbers side by side are what tells a
+    /// fat pattern apart from an executor that corrects.
+    ///
+    /// A 5 cm cell grid over each pose's own bounding box, point-in-quad tested. Two traps
+    /// this had, both found by measuring 0.00 m^2 first: the cell indices need Math.Floor (a
+    /// cast truncates toward zero and an empty range follows), and the corner order below is
+    /// CLOCKWISE, so the inside test is `> 0`.</summary>
+    public static double SweptAreaM2(double lengthM, double widthM, double rearAxleM,
+                                     IEnumerable<(double X, double Y, double HeadingDeg)> poses)
+    {
+        const double Cell = 0.05;
+        var cells = new HashSet<(int, int)>();
+        double hf = lengthM - rearAxleM, hr = rearAxleM, hw = widthM / 2.0;
+        foreach (var (x, y, headingDeg) in poses)
+        {
+            double h = Math.Radians(headingDeg);
+            double fx = Math.Sin(h), fy = Math.Cos(h);       // heading 0 = north (+y)
+            double rx = Math.Cos(h), ry = -Math.Sin(h);      // the car's right
+            // (x, y) is the REAR AXLE (`/state`, docs/UNITS.md); the body centre sits
+            // `hf - hr` / 2 ahead of it along the car's axis.
+            double cx = x + fx * (hf - hr) / 2.0, cy = y + fy * (hf - hr) / 2.0;
+            var q = new (double X, double Y)[4];
+            int i = 0;
+            foreach (var (a, b) in new[] { (hf, hw), (hf, -hw), (-hr, -hw), (-hr, hw) })
+                q[i++] = (cx + fx * a + rx * b, cy + fy * a + ry * b);
+            double minx = q.Min(p => p.X), maxx = q.Max(p => p.X);
+            double miny = q.Min(p => p.Y), maxy = q.Max(p => p.Y);
+            for (int ix = (int)Math.Floor(minx / Cell); ix <= (int)Math.Floor(maxx / Cell); ix++)
+                for (int iy = (int)Math.Floor(miny / Cell); iy <= (int)Math.Floor(maxy / Cell); iy++)
+                {
+                    double qx = (ix + 0.5) * Cell, qy = (iy + 0.5) * Cell;
+                    bool inside = true;
+                    for (int k = 0; k < 4 && inside; k++)
+                    {
+                        var A = q[k]; var B = q[(k + 1) % 4];
+                        if ((B.X - A.X) * (qy - A.Y) - (B.Y - A.Y) * (qx - A.X) > 0) inside = false;
+                    }
+                    if (inside) cells.Add((ix, iy));
+                }
+        }
+        return cells.Count * Cell * Cell;
+    }
+
     public double ParkBoxMarginM()
     {
         if (_car.BicycleNav is null || ParkBayClaim() is not (double cx, double cy,
@@ -916,6 +1033,16 @@ public sealed partial class BicycleNav
     private bool _runInLogged;
     /// <summary>Metres of the current plan's forward leg already driven (#62).</summary>
     private double _pkCrabDoneM;
+    /// <summary>The road area this car's body has swept since the parking job began, as
+    /// occupied 5 cm cells (see <see cref="ParkSweptAreaM2"/>). The owner's method of
+    /// 2026-11-06: push the car rectangle along the path like a piece of chalk and read off
+    /// the area — measured on the DRIVEN path, so it can be compared with the planned
+    /// arc's area (which is what separates a fat pattern from an executor that corrects).</summary>
+    private readonly HashSet<(int, int)> _sweptCells = new();
+    /// <summary>How often a RUNNING parking job prints its swept area (sim seconds).</summary>
+    public const double PARK_SWEEP_REPORT_EVERY_S = 5.0;
+    private double _sweptReportT = -1e9;
+
     private bool _crabLogged;
 
 /// <summary>How far the nose may be pushed ALONG the row before the reverse engages
@@ -983,6 +1110,79 @@ public sealed partial class BicycleNav
             foreach (var q in rev) pts.Add((q.U, q.V, q.Psi, q.Steer));
             return (pts, true);
         }
+
+    /// <summary>How much a candidate back-in is worth (#62). The search used to rank by
+    /// TUCK ALONE (`dvT > best.dvTry`), which cannot express what makes a manoeuvre good:
+    /// it always prefers the deepest lateral from the current pose, so a plan that first
+    /// drives its nose out of the row (same depth, far shallower swing, more metres) can
+    /// never win — measured on all three bays with the crab force-enabled: -16 → -17,
+    /// -65 → -71, -158 → -194 cm.
+    ///
+    /// A back-in's real cost is the swing it forces through and the road it spends:
+    ///   * peak |yaw| — a deep swing is what leaves the car skewed at the end and its wheel
+    ///     held by the envelope guard (bay 25: peak 51°, rest 14.7° off parallel, rear corner
+    ///     0.26 m into the flank), and it is what pushes the nose into the traffic lane;
+    ///   * path length — metres travelled in a tight row are time and clearance;
+    ///   * depth — still wanted, so a shallower swing never wins by parking LESS deep: the
+    ///     weight is deliberately small (PARK_PLAN_DEPTH_W) and it is the LAST tie-break.
+    /// Weighted sum of MINIMISATION terms; PARK_PLAN_* override for measurement runs.</summary>
+    /// <summary>MEASURED AND REJECTED as a default (weights are env-overridable for
+    /// measurement runs): preferring a shallow swing makes the car park SHORT, because in
+    /// this geometry the plans that swing least are the plans that reach least deep. On
+    /// bay 24: YAW_W=12/LW=0.35 -> -288 cm; depth-first with those same weights -> -176 cm;
+    /// YAW_W=0/LW=0 with depth dominating -> -16 cm. A swing preference can therefore only
+    /// be applied AFTER the delivered depth is guaranteed, not as a tie-break inside it.</summary>
+    public static readonly double PARK_PLAN_YAW_W = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_PLAN_YAW_W"), out var _py) ? _py : 0.0;
+    public static readonly double PARK_PLAN_LEN_W = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_PLAN_LEN_W"), out var _pl) ? _pl : 0.0;
+    /// <summary>Two plans reach the same depth when their tucks differ by less than this
+    /// (PARK_PLAN_DEPTH_TIE_M). Inside the band the swing decides; outside it, depth does.</summary>
+    /// <summary>MUST stay BELOW the tuck ladder's own step (the search descends `dvT` by
+    /// 0.05 m per rung). Measured with it at 0.10 - two rungs - and bay 24 fell -16 → -176 cm:
+    /// the band let a plan two rungs shallower count as "same depth", so the car was driven
+    /// to a pose that parks ~2 m short of the row. 0.02 admits only plans closer than one
+    /// rung, i.e. genuinely equal depth.</summary>
+    public static readonly double PARK_PLAN_DEPTH_TIE_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_PLAN_DEPTH_TIE_M"), out var _pt) ? _pt : 0.02;
+
+    public static readonly double PARK_PLAN_DEPTH_W = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_PLAN_DEPTH_W"), out var _pd) ? _pd : 0.25;
+
+    /// <summary>True when `cand` beats the incumbent under <see cref="ParkPlanCost"/>.
+    /// Kept as one function so the ranking rule has exactly one owner and a witness can
+    /// name both costs.</summary>
+    static bool ParkPlanBetter(
+        List<(double U, double V, double Psi, double Steer)> cand, double dvT,
+        List<(double U, double V, double Psi, double Steer)>? incumbent, double dvBest)
+    {
+        if (incumbent is null) return true;
+        // DEPTH FIRST (#62, measured). A weighted sum let the swing terms outvote depth:
+        // bay 24 went -16 cm -> -288 cm with YAW_W=12/LW=0.35/DW=0.25, because a candidate
+        // that parks 2.9 m short of the row is cheap to swing. Depth-only weights (0/0/1)
+        // reproduced the -16 cm exactly, which proves the ranking was the whole regression.
+        // So depth is a PREFERENCE, not a term: a plan that reaches deeper wins outright,
+        // and only among plans that reach the SAME depth does the shallower swing win.
+        // That is also what the owner rule needs - it changes HOW the depth is reached,
+        // never how much of it is delivered.
+        if (dvT > dvBest + PARK_PLAN_DEPTH_TIE_M) return true;
+        if (dvT < dvBest - PARK_PLAN_DEPTH_TIE_M) return false;
+        return ParkPlanCost(cand, dvT) < ParkPlanCost(incumbent, dvBest) - 1e-9;
+    }
+
+    static double ParkPlanCost(
+        List<(double U, double V, double Psi, double Steer)> pts, double dvT)
+    {
+        double peakYaw = 0.0, len = 0.0;
+        for (int i = 0; i < pts.Count; i++)
+        {
+            double a = Math.Abs(pts[i].Psi);
+            if (a > peakYaw) peakYaw = a;
+            if (i > 0) len += Math.Hypot(pts[i].U - pts[i - 1].U, pts[i].V - pts[i - 1].V);
+        }
+        return PARK_PLAN_YAW_W * Math.Degrees(peakYaw) + PARK_PLAN_LEN_W * len
+               - PARK_PLAN_DEPTH_W * dvT;
+    }
 
     private bool StartReversePark()
     {
@@ -1068,7 +1268,16 @@ public sealed partial class BicycleNav
                 // DID build a path (peak yaw 51°, rest 14.7° off parallel, rear corner
                 // 0.26 m into the flank), so gating on `!ok` left the family dead in every
                 // bay - the refusals it was written for never happen at these stagings.
-                if (!ok || PARK_CRAB_TRY_ALL)
+                // The crab is tried when the pure reverse is NOT LEGAL, or when it is legal
+                // but cannot reach the depth asked for (PARK_CRAB_SHALLOW_M): a candidate
+                // whose tuck fell short of `dvT` is a path that stops short of the row, and
+                // that is exactly the case a nose-out fixes. It is NOT tried on a candidate
+                // that already delivers the full tuck legally - measured: doing that made
+                // the first rung's crab plan win the whole search and bay 24 fell
+                // -16 → -176 cm (rear +0.44 / front +4.50 m: parked far behind the mouth).
+                bool shortOfDepth = false;   // see PARK_CRAB_TRY_ALL: trying the crab on a
+                                             // legal candidate made all three bays worse
+                if (!ok || PARK_CRAB_TRY_ALL || shortOfDepth)
                 {
                     // One line per (lock, tuck) that needs it: the whole point of this
                     // family is to be visible when it fires and when it does not (#62).
@@ -1139,7 +1348,11 @@ public sealed partial class BicycleNav
                 }
                 if (ok)
                 {
-                    if (best is null || dvT > best.Value.dvTry + 1e-9)
+                    // Ranked by the plan cost, not by tuck alone (#62) — see ParkPlanCost.
+                    // The `break` stays: for THIS lock the deepest legal tuck is the best
+                    // one, so there is nothing shallower to try; the comparison happens
+                    // ACROSS locks and across the three shape families.
+                    if (ParkPlanBetter(cand, dvT, best?.pts, best?.dvTry ?? 0.0))
                     {
                         best = (dvT, cand);
                         bestDeltaDeg = deltaDeg;
@@ -1338,6 +1551,10 @@ public sealed partial class BicycleNav
         // A fresh path owns its own forward leg: the counter must not carry over from the
         // previous attempt, or a re-plan would start straight in reverse (#62).
         _pkCrabDoneM = 0.0;
+        // NOTE: the swept area is deliberately NOT cleared here. A new path is what a
+        // re-attempt creates, and the owner's question is how much road the MANOEUVRE used —
+        // clearing per path would hide every failed attempt's sweep behind the next one.
+        // It resets with the parking job, at the ask.
         _crabLogged = false;
         _parkShimmyTries = 0;
         _parkShimmyDist = 0.0;
@@ -1917,8 +2134,18 @@ public sealed partial class BicycleNav
         _parkShimmyDist = 0.0;
         Parked = !notice.StartsWith("GAVE UP");   // a surrender must not claim parked
         ParkPhase = "stopped";
+        // What the manoeuvre COST, in road area — the owner's chalk measure (2026-11-06),
+        // recorded HERE because it is the one place both consumers see it: `RecordDecision`
+        // reaches the tape (`~uid=…`) and the host console, while `/state park_target`
+        // reaches only a live client. A planned single arc to bay 24's depth sweeps
+        // 34.40 m^2 (ParkingPatternTests), so this line against that number IS the
+        // executor's own cost — the gap between pattern and execution (#62).
+        double sweptM2 = ParkSweptAreaM2();
+        double footprint = car.LengthM * car.WidthM;
         car.RecordDecision(_navTime, $"[PARK] {notice} " +
-            $"[envelope: eased {_pkEaseTicks}×, held {_pkHoldTicks}×]");
+            $"[envelope: eased {_pkEaseTicks}×, held {_pkHoldTicks}×] " +
+            $"[swept: {sweptM2:F2} m^2 = {(footprint > 0 ? sweptM2 / footprint : 0):F2} x " +
+            $"footprint {footprint:F2} m^2]");
         Console.WriteLine($"{(notice.StartsWith("GAVE UP") ? "⚠️" : "✅")} Reverse-in: " +
                           $"{notice}\n");
     }
@@ -2615,6 +2842,17 @@ public sealed partial class BicycleNav
         ParkStyle = "forward";
         _parkStyleLocked = true;
         ParkPhase = "parked";
+        // The job's cost at the moment the car is declared parked. CONSOLE, not only the
+        // decision ring: the ring is a 100-entry FIFO shared with the per-frame `[PARKT]`
+        // trace, and the end of a parking job is exactly the entry those lines push out —
+        // measured on bay 24, where the tape carried the GAVE UP line and nothing for a job
+        // that reached this state (#62).
+        {
+            double sweptParkedM2 = ParkSweptAreaM2();
+            double fp = _car.LengthM * _car.WidthM;
+            Console.WriteLine($"✅ Parked: car #{_car.Uid} [swept: {sweptParkedM2:F2} m^2 = " +
+                              $"{(fp > 0 ? sweptParkedM2 / fp : 0):F2} x footprint {fp:F2} m^2]");
+        }
         _reversePark = null;
         _mergeEpisode = null;
         LaneChangeSignal = null;
@@ -2669,6 +2907,34 @@ public sealed partial class BicycleNav
         (string Phase, double? VTarget)? plan = null;
         double? dStop = null;
         DecideParkStyle();
+        // One pose per tick into the job's swept set (#62), for the WHOLE job — from the
+        // moment a bay is claimed to the moment the car rests. Measured with this call only
+        // inside `UpdateReversePark`: bay 26 gave up before it ever reversed and reported
+        // `[swept: 0.00 m^2]`, which is not "it cost nothing", it is "nothing was measured".
+        // The staging metres ARE part of what a back-in costs; that is the whole content of
+        // the reach numbers in ParkingPatternTests (6.86 m at full lock vs 10.96 m at 16°).
+        // The sweep covers the WHOLE parking job, not only the stretch after a bay is
+        // claimed. Measured with the gate on `_bayClaimed`: the primary's own line never
+        // appeared, because its job ends in `abandoning ... re-solving from here` and then
+        // sits at the staging point for the rest of the run — phase `reverse`, no reverse, so
+        // neither end state ever writes a number. The staging metres are part of what a
+        // back-in costs (they ARE the reach numbers in ParkingPatternTests), so they count.
+        if (_parkStyleLocked || ParkStyle == "reverse" || _bayClaimed)
+        {
+            AccumulateSweptPose();
+            // The cost, readable WHILE the job runs. Needed because a job that neither
+            // finishes nor gives up — bay 24's primary: `abandoning ... re-solving from here`,
+            // then parked-at-staging for the rest of the run, phase `reverse` with no reverse —
+            // reaches NEITHER end state, and its area was simply never printed. A verdict with
+            // no price attached is exactly what this measure exists to prevent (#62).
+            if (_navTime - _sweptReportT >= PARK_SWEEP_REPORT_EVERY_S)
+            {
+                _sweptReportT = _navTime;
+                double a = ParkSweptAreaM2(), fp = _car.LengthM * _car.WidthM;
+                Console.WriteLine($"   [PARKSWEEP] car #{_car.Uid} t={_navTime:F1}s " +
+                                  $"swept {a:F2} m^2 = {(fp > 0 ? a / fp : 0):F2} x footprint");
+            }
+        }
         // §1d (2026-11-03, owner decisions 1a/2b): a row of bays at the ask is
         // DRIVEN ALONG, not braked to. The scanning speed is the plan's own creep
         // speed V_C (PARK_SWERVE_SPEED_M) — the speed the brake model already reserves
