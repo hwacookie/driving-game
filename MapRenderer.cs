@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;   // PosixSignalRegistration (#88 clean close)
+using System.Threading;                       // Volatile: the signal flag is set off-thread (#88)
 using System.Text.Json;
 
 /// <summary>
@@ -390,6 +392,39 @@ public partial class MapRenderer : Node2D
     private string _godotGen = "";
     private ulong _godotGenLastMs;
 
+    // #88: the other half of a clean close - a SIGNAL that works. Measured on this
+    // machine (Godot 4.7 mono, windowed client): SIGTERM left the process ALIVE for
+    // 18 s with no log line and no crash report, and SIGINT, SIGWINCH and SIGUSR1 were
+    // ignored too - Godot installs a crash handler but no termination path, and this
+    // client had none either. So "never signal Godot" was really "Godot cannot be
+    // closed from outside", which is why every caller reached for the generation file
+    // above - a single global token that therefore closes EVERY window on the machine,
+    // including a review window an unrelated run should never touch.
+    //
+    // `PosixSignalRegistration` is .NET's cross-platform answer: on Windows it maps to
+    // the console CTRL_C / CTRL_BREAK (and CLOSE / LOGOFF) events, and unsupported
+    // signals throw `PlatformNotSupportedException` instead of misbehaving - hence the
+    // per-signal try. The handler runs on a thread-pool thread, so it does NOT call
+    // Godot here; it sets a flag that `_Process` (the main loop) turns into
+    // `GetTree().Quit()`, the same in-app exit --screenshot already uses.
+    private static int _quitRequested;   // 0 = no, 1 = asked by a signal
+    private PosixSignalRegistration? _termReg, _intReg;
+
+    void InstallSignalQuit()
+    {
+        foreach (var (sig, slot) in new[] { (PosixSignal.SIGTERM, "SIGTERM"),
+                                            (PosixSignal.SIGINT, "SIGINT") })
+        {
+            try
+            {
+                var reg = PosixSignalRegistration.Create(sig,
+                    ctx => { ctx.Cancel = true; Volatile.Write(ref _quitRequested, 1); });
+                if (slot == "SIGTERM") _termReg = reg; else _intReg = reg;
+            }
+            catch (PlatformNotSupportedException) { /* this OS has no such signal */ }
+        }
+    }
+
     static string ReadGodotGen()
     {
         try { return File.ReadAllText(GodotGenFile).Trim(); }
@@ -625,6 +660,7 @@ public partial class MapRenderer : Node2D
     public override void _Ready()
     {
         _godotGen = ReadGodotGen();   // baseline for the clean-quit check
+        InstallSignalQuit();          // #88: `kill <pid>` now closes this window in-app
 
         // User args after "--": parsed FIRST - the source selection decides
         // how map + state are fetched. --screenshot <path> saves the viewport
@@ -4966,6 +5002,16 @@ public partial class MapRenderer : Node2D
 
     void UpdateOverlays()
     {
+        // #88: a termination signal (SIGTERM/SIGINT) asks for the same in-app exit the
+        // generation file gets - handled HERE, on the main loop, because Godot's scene
+        // tree must not be touched from the signal's thread-pool thread.
+        if (Volatile.Read(ref _quitRequested) == 1)
+        {
+            Volatile.Write(ref _quitRequested, 0);
+            Console.WriteLine("[godot] termination signal - quitting (clean close)");
+            GetTree().Quit();
+            return;
+        }
         // Stale-window self-quit: the runner bumped the generation file
         // (this window belongs to a finished/previous run) -> quit clean.
         ulong nowMsGen = Time.GetTicksMsec();

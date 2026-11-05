@@ -286,12 +286,15 @@ When the user asks to run the e2e tests:
    re-read or grepped afterwards (long runs can exceed the tool output
    limit).
 
-(Godot self-terminates via `--quit-on-test-done`; if it is still open
-afterwards, say so - **never send Godot a signal**: a SIGTERM kills .NET's
-exit path into an abort and pops a macOS crash-report window. The runner
-closes windows cleanly instead: the client watches
-`/tmp/driving_game_godot_gen` and quits itself when `scripts/run_e2e.sh`
-bumps it.)
+(Godot self-terminates via `--quit-on-test-done`. To close a window from
+outside, send **SIGTERM**: the client handles it in-app (`InstallSignalQuit`
+→ `GetTree().Quit()`, measured ~1 s, no crash report) — decision 2026-11-05.
+The old rule "never signal Godot" recorded an observation that is now dead:
+before that handler a SIGTERM did not even kill the process (alive 18 s, no
+log line), which is why callers bumped the global token
+`/tmp/driving_game_godot_gen` instead — and because that file is one value for
+the whole machine, any run closed every window on it, review windows included.
+The bump remains only as a fallback for a client built without the handler.)
 
 ## Change workflow: issue → branch → fix → test → PR → main
 

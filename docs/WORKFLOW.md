@@ -155,8 +155,12 @@ the exempt commit is still built and unit-tested immediately after landing.
 - **Build gate before any run**: `dotnet build DrivingGame.csproj` must report
   `0 Error(s)` before `run_e2e.sh` is trusted (a stale binary on screen makes a
   whole watched run worthless).
-- **Never signal Godot** (`SIGTERM` kills .NET's exit path into an abort):
-  close windows through the generation file / `scripts/open.sh --close`.
+- **Close a Godot window with SIGTERM** (decision 2026-11-05): the client handles it
+  in-app and quits through `GetTree().Quit()` (~1 s, no crash report). The previous
+  rule — never signal it, bump the generation file instead — was written because a
+  SIGTERM used to abort .NET's exit path; measured on Godot 4.7 mono it did not even
+  kill the process (alive 18 s, no log line). The generation file stays as a fallback
+  for an old client build, and `scripts/open.sh --close` now tries the signal first.
 - **Creep is asked about, not absorbed**: an idea, feature or bug found on the
   way is raised with the user and (on their word) filed as its own issue/branch
   — see "Scope creep: stop, warn, ask".
