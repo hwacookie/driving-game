@@ -4083,7 +4083,15 @@ public partial class MapRenderer : Node2D
 
     private void FocusAtCursor()
     {
-        if (_tapeFocus.Count == 0) { _focusAtCursor = null; UpdateTestPanel(); return; }
+        if (_tapeFocus.Count == 0)
+        {
+            _focusAtCursor = null;
+            _testShown = "";        // #90: a new tape may well record scenarios - re-arm the
+                                    // panel's change detection, and let this call hide the
+                                    // frame that has nothing to report.
+            UpdateTestPanel();
+            return;
+        }
         long step = _tape[Math.Clamp(_cursor, 0, _tape.Count - 1)].Step;
         RvFocus? found = null;
         for (int i = _tapeFocus.Count - 1; i >= 0; i--)
@@ -4368,8 +4376,19 @@ public partial class MapRenderer : Node2D
         sb.ContentMarginLeft = sb.ContentMarginRight = 12;
         sb.ContentMarginTop = sb.ContentMarginBottom = 10;
         _testPanelLabel.AddThemeStyleboxOverride("normal", sb);
+        // #90: this panel reports the SCENARIO UNDER THE CURSOR of a tape, so it belongs to
+        // the reviewer. It was built unconditionally and shown from birth, which in a LIVE
+        // window put an empty `test` frame in the top-right - the second window of that name,
+        // because the viewer's own run surface (`BuildTestInfo`, MapRenderer.cs) is also
+        // called "test". The operator saw two same-named frames and one of them could never
+        // say anything: a live window has no cursor. Hidden until the tape actually has a
+        // scenario to show (UpdateTestPanel), which is the first moment it has content.
+        _testWin.Visible = false;
         _testWin.AddChild(_testPanelLabel);
         AddChild(_testWin);
+        RegisterWindow(_testWin);   // #90: the shared guard owns every window; this one was
+                                    // never registered, so nothing kept it inside the main
+                                    // window or 5 px clear of the others
         _testWin.Size = new Vector2I(600, 132);
         LayoutTestWindow();   // #90: place it NOW - a window that is visible at (0, 0) for
                               // even one frame reads as a broken frame in the top-left corner
@@ -4394,6 +4413,10 @@ public partial class MapRenderer : Node2D
         var res = f == null ? default(RvResult?)
             : _tapeResults.FindLast(r => r.Label == f.Value.Label);
         string key = $"{label}|{res?.Passed.ToString()}|{res?.Reason}";
+        // #90: the visibility decision is NOT behind this early return - scrubbing between two
+        // scenarios switches `f` to null while head/verdict text can stay identical, and an
+        // update that only returned would leave a frame up with no test in it.
+        _testWin.Visible = f != null;
         if (key == _testShown) return;
         _testShown = key;
         string head = label.Length > 0
@@ -4420,6 +4443,11 @@ public partial class MapRenderer : Node2D
             _ => "\nfocus: the primary car (view fitted)",
         };
         _testPanelLabel.Text = head + "\n" + verdict + why + desc + focus;
+        // #90: the panel only earns its frame once there is a scenario under the cursor.
+        // Before that it would be chrome around an empty box - exactly the "broken window"
+        // reported twice, and in a live window forever.
+        _testWin.Visible = f != null;
+        if (f == null) return;   // #90: hidden above; no size and no placement for nothing
         _testWin.Size = new Vector2I(620,
             (int)Math.Ceiling(_testPanelLabel.GetMinimumSize().Y) + 16);
         LayoutTestWindow();
