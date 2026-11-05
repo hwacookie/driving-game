@@ -1283,6 +1283,12 @@ public partial class MapRenderer : Node2D
         };
         AddChild(_readoutWin);
         RegisterWindow(_readoutWin);
+        // #90: this is the window that showed up EMPTY in the top-left corner, and the log
+        // never said it existed - which is why the frame could not be attributed from a
+        // transcript. One line per minted window, with its geometry, so "who drew that
+        // frame?" is answered by the log instead of by guessing from a screenshot.
+        GD.Print($"READOUT-WINDOW built at {_readoutWin.Position} size {_readoutWin.Size} " +
+                 $"(review={_review})");
         var rLayer = new CanvasLayer { Layer = 1 };
         _readoutWin.AddChild(rLayer);
         // The panel colour the review surface uses everywhere - the window's
