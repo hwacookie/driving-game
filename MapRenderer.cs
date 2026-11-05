@@ -2351,9 +2351,14 @@ public partial class MapRenderer : Node2D
                 // Below the readout's box - at the very top edge the title
                 // bar hid behind the review label and the window read as an
                 // anonymous frame.
-                Position = new Vector2I(
-                    (int)(GetViewport().GetVisibleRect().Size.X
-                          - mmBox.X - 2 * MinimapNode.Margin), 64),
+                // #90 follow-up: the FIRST map build runs while the main window is still
+                // at Godot's default size, so a position computed from the viewport right
+                // now lands far outside the window once it reaches its remembered size -
+                // the inset then sits in the empty band to the left of the frame and reads
+                // as a broken window (measured: main 3104 px wide, this x ~ 2735). The
+                // corner is applied when the map is built AND whenever the viewport size
+                // changes (see PinMinimapToCorner), so it cannot be stale.
+                Position = MinimapCorner(mmBox),
                 // Frame = inset + the caption row under it, nothing more: a
                 // window taller than its content shows an empty band.
                 Size = MmWindowSize(mmBox),
@@ -2527,6 +2532,20 @@ public partial class MapRenderer : Node2D
     /// 2026-10-22: "make the minimap content fit in the window", and the
     /// position/zoom line under the inset is what had to go).</summary>
     static Vector2I MmWindowSize(Vector2 box) => new((int)box.X, (int)box.Y);
+
+    /// <summary>The minimap's top edge. It must be BELOW the review instrument (the strip
+    /// along the top that carries zoom/speed/flow): measured on a #90 screenshot, that
+    /// strip reaches y ~64 at this window size, and a frame placed at 64 had its title bar
+    /// hidden behind it with only an empty band showing - which is what read as a broken
+    /// window in the top-left. 12 px of clear gap keeps both readable.</summary>
+    const int MinimapTopY = 76;
+
+    /// <summary>The minimap's corner: top-right of the main window, inset by its own
+    /// width. Measured wrong once (#90): computed against a viewport that was not yet the
+    /// window the user sees, which pushed the inset off-frame.</summary>
+    Vector2I MinimapCorner(Vector2 mmBox) => new(
+        (int)(GetViewport().GetVisibleRect().Size.X - mmBox.X - 2 * MinimapNode.Margin),
+        MinimapTopY);
 
     // ------------------------------------------- static marking geometry
 
@@ -4910,8 +4929,10 @@ public partial class MapRenderer : Node2D
         var sz = GetViewport().GetVisibleRect().Size;
         if (sz == _mmPinVp) return;
         _mmPinVp = sz;
-        _mmWin.Position = ClampWindowPos(_mmWin,
-                                         new Vector2(sz.X - _minimap.Size.X, _mmWin.Position.Y));
+        // #90: re-derive BOTH coordinates from the current viewport - this is the pass
+        // that runs once the window has its remembered size, and it is what pulls an inset
+        // built against a smaller viewport back into frame.
+        _mmWin.Position = ClampWindowPos(_mmWin, MinimapCorner(MmBoxFor(_bounds)));
     }
 
     /// <summary>Stack the readouts UNDER the map window, in the main window:
