@@ -12,12 +12,15 @@
 #     the tape's own map= header and binds no API port (issue #2). To review
 #     against a host instead (a ground on another machine), add --source http.
 #   scripts/open.sh --external         # attach to a host you started yourself (HTTP mode)
-#   scripts/open.sh --close            # close the window this script opened (clean, no signal)
+#   scripts/open.sh --close            # close the window this script opened (clean)
 #
-# Quit rule of the project (AGENTS.md): Godot is NEVER sent a signal - a
-# SIGTERM kills .NET's exit path into an abort and pops a macOS crash report.
-# `--close` bumps /tmp/driving_game_godot_gen, which the client watches and
-# answers by quitting itself.
+# Clean close (#88): the client handles SIGTERM in-app and quits through
+# GetTree().Quit() - measured ~1 s, no macOS crash report. The old rule "never
+# signal Godot" described an OBSERVATION that is now dead: before that handler a
+# SIGTERM did not even kill the process (alive 18 s, no log line), so `--close`
+# bumped /tmp/driving_game_godot_gen instead - and that token is GLOBAL, so one
+# run closed every window on the machine, review windows included. The bump stays
+# as a fallback for a client built without the handler.
 
 set -uo pipefail
 
@@ -62,10 +65,13 @@ client_running() {
 
 if [ "$CLOSE_ONLY" -eq 1 ]; then
   if pid=$(client_running); then
-    echo "==> closing the viewer (pid $pid) by generation bump - it quits itself"
+    echo "==> closing the viewer (pid $pid) with SIGTERM - it quits in-app"
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do kill -0 "$pid" 2>/dev/null || { echo "==> closed"; exit 0; }; sleep 0.5; done
+    echo "==> still up after 5 s - falling back to the generation bump ($GEN)"
     echo $RANDOM > "$GEN"
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || { echo "==> closed"; exit 0; }; sleep 0.5; done
-    echo "!! pid $pid is still up after 10 s - it is not watching $GEN (a run_e2e.sh client, or one started by hand); close it from its own window"
+    for _ in $(seq 1 10); do kill -0 "$pid" 2>/dev/null || { echo "==> closed"; exit 0; }; sleep 0.5; done
+    echo "!! pid $pid is still up - it neither handles SIGTERM nor watches $GEN; close it from its own window"
     exit 1
   fi
   echo "==> no viewer of mine is running"; exit 0

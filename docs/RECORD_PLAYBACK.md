@@ -93,9 +93,12 @@ rewrite ~12 MB/s; appending one line per substep is ~15–20 KB/s with one flush
 per second. "On every crash" needs disambiguating too: `CrashDumper.Dump` is
 called from `CarCollisions.cs:2562` — that is a **collision inside the sim**, a
 good moment to flush (the evidence is on disk the instant cars touch) but not
-process death. There is no `UnhandledException`/exit handler in the tree, and a
-SIGTERM aborts .NET's exit path (AGENTS.md, the never-signal rule), so **the
-≤ 1 s flush is the actual guarantee** and the collision hook is its fast path.
+process death. There is no `UnhandledException`/exit handler in the tree, and until
+2026-11-05 a SIGTERM could not be used either (the client ignored it — see the
+`InstallSignalQuit` note in `docs/WORKFLOW.md`), so **the ≤ 1 s flush is the actual
+guarantee** and the collision hook is its fast path. A SIGTERM now quits the client
+in-app, but a tape must not depend on being flushed by a signal: the flush stays the
+guarantee.
 
 Three consequences that come with (a) and (b):
 

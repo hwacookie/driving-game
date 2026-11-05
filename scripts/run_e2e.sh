@@ -113,24 +113,27 @@ cleanup() {
     echo ""
     echo "==> --keep-window: Godot window (pid ${GODOT_PID:-n/a}) and host "
     echo "   (pid ${GAME_PID:-n/a}) stay up."
-    echo "   Close the window cleanly:  echo \$RANDOM > $GODOT_GEN_FILE"
+    echo "   Close the window cleanly:  kill -TERM \$GODOT_PID   (or: echo \$RANDOM > $GODOT_GEN_FILE)"
     echo "   Stop the host:             pkill -f DrivingGame.Server"
     return
   fi
-  # Close our Godot client window CLEANLY (bump the generation file - the
-  # client quits itself; never a signal). On failure the C# host stays up,
-  # so the frozen scene can be re-opened in a new window.
+  # Close our Godot client window CLEANLY: SIGTERM, which the client now handles
+  # in-app (#88 - `MapRenderer.InstallSignalQuit` turns it into GetTree().Quit(),
+  # measured ~1 s, no crash report). The generation file used to be the only channel
+  # and it is GLOBAL, so a run closed every window on the machine, review windows
+  # included; it stays as the fallback for a client built before that handler.
   if [ -n "$GODOT_PID" ] && kill -0 "$GODOT_PID" 2>/dev/null; then
     echo ""
     echo "==> Closing Godot window (pid $GODOT_PID)..."
-    echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"
+    kill -TERM "$GODOT_PID" 2>/dev/null || true
     for i in $(seq 1 10); do
       kill -0 "$GODOT_PID" 2>/dev/null || break
+      [ "$i" -eq 5 ] && echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"   # old client: fall back
       sleep 1
     done
     if kill -0 "$GODOT_PID" 2>/dev/null; then
       echo "!! Godot window (pid $GODOT_PID) did not close - close it"
-      echo "   manually (no signal: it pops a macOS crash-report window)."
+      echo "   manually (this build predates the signal handler and does not watch $GODOT_GEN_FILE)."
     fi
   fi
   # On failure, keep the C# host alive too so the frozen crash scene stays
@@ -150,15 +153,20 @@ pkill -f "DrivingGame.Server" 2>/dev/null || true
 pkill -f "src.main" 2>/dev/null || true
 sleep 1
 
-# Close any stale Godot window CLEANLY: never signal Godot (a SIGTERM
-# kills .NET's exit path into an abort and pops a macOS crash-report
-# window). Bump the generation file - the client quits itself - then wait.
-# Bounded: if it does not exit within 10 s, abort rather than pile on.
+# Close any stale Godot window CLEANLY with SIGTERM: the client handles it in-app
+# (#88) and quits through GetTree().Quit() - measured ~1 s, no macOS crash report.
+# The old rule "never signal Godot" came from an OBSERVATION, not a preference, and
+# that observation is now dead: before the handler, SIGTERM did not even kill the
+# process (it sat there alive for 18 s with no log line), which is why the global
+# generation file was used instead - and that file closes EVERY window on the box.
+# Bounded: if it does not exit within 12 s, abort rather than pile on.
 if G_PIDS=$(pgrep -f "$GODOT_BIN"); then
   echo "==> Closing stale Godot instance(s): $(echo $G_PIDS | tr '\n' ' ')"
-  echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"
-  for i in $(seq 1 10); do
+  # shellcheck disable=SC2086
+  kill -TERM $G_PIDS 2>/dev/null || true
+  for i in $(seq 1 12); do
     pgrep -f "$GODOT_BIN" > /dev/null || break
+    [ "$i" -eq 6 ] && echo "$RANDOM$RANDOM" > "$GODOT_GEN_FILE"   # old client: fall back
     sleep 1
   done
   if pgrep -f "$GODOT_BIN" > /dev/null 2>&1; then

@@ -565,10 +565,13 @@ Overlay text (English, per the project's language rule):
   capped); wait for the condition, never a blind fixed sleep
 - **the port may change**: reconnect means re-discovering the host, not
   assuming the old port — the runner takes a free port for a second client
-- **its own generation file**: `scripts/run_e2e.sh` closes Godot windows by
-  bumping `/tmp/driving_game_godot_gen`; the reviewer must not watch the same
-  one, or every e2e run would shut it down. Never a signal — a SIGTERM pops a
-  macOS crash report
+- **it closes on SIGTERM, not on the shared generation file**: `scripts/run_e2e.sh`
+  used to close Godot windows by bumping `/tmp/driving_game_godot_gen` — one value for
+  the whole machine, so every e2 run shut the reviewer down too. Since 2026-11-05 the
+  client handles SIGTERM in-app (`InstallSignalQuit` → `GetTree().Quit()`, ~1 s, no
+  crash report), so a run closes the window it launched **by pid** and leaves an
+  unrelated review window alone; the generation bump survives only as a fallback for a
+  client built without that handler.
 
 ## The readout label (binding user decision, 2026-10-21; format re-read from the code 2026-10-23)
 
