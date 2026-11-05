@@ -4371,6 +4371,15 @@ public partial class MapRenderer : Node2D
         _testWin.AddChild(_testPanelLabel);
         AddChild(_testWin);
         _testWin.Size = new Vector2I(600, 132);
+        LayoutTestWindow();   // #90: place it NOW - a window that is visible at (0, 0) for
+                              // even one frame reads as a broken frame in the top-left corner
+        // #90: this is the frame that was reported as "das kaputte Fenster oben links".
+        // `--dump-windows` found it unregistered and never laid out: pos (0, 0) - the top-left
+        // corner, under the main window's own frame - in a REVIEWER, where it has nothing to
+        // say. Its placement belongs to UpdateTestPanel/LayoutTestWindow below, and those ran
+        // later, so between build and first layout it sat at the origin with no text.
+        GD.Print($"TEST-PANEL-WINDOW built (reviewer) size {_testWin.Size} " +
+                 $"pos {_testWin.Position} · laid out on the first panel update");
     }
 
     /// <summary>Rewrite the panel when the scenario under the cursor changes —

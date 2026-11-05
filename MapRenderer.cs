@@ -109,6 +109,7 @@ public partial class MapRenderer : Node2D
     // car-detail paths a hand would take, fired from the script, so "does a
     // click on a car open the menu in the LIVE viewer, and does the live frame
     // feed an open slot?" is answerable without a finger on the mouse.
+    private bool _winDump;              // --dump-windows: name every live Window once
     private int _testCarHook;           // 1 = the menu, 2 = open a slot, 3 = a click on a
                                         // NAMED car (window 0's rebind, measured)
     private long _testCarClickUid;      // --test-car-click <uid>
@@ -867,6 +868,12 @@ public partial class MapRenderer : Node2D
                 _motionLogPath = args[i + 1];
             else if (args[i] == "--perf-probe")
                 _perfProbe = true;
+            else if (args[i] == "--dump-windows")
+                // #90: the top-left frame could not be attributed because nothing in the log
+                // enumerated the windows that EXIST. `RegisterWindow` only covers the guarded
+                // ones, so this walks the scene tree instead and prints every live Window -
+                // registered or not, with size, position and parent.
+                _winDump = true;
             else if (args[i] == "--run-test" && i + 1 < args.Length)
                 _autoRunTest = int.Parse(args[i + 1]);
             else if (args[i] == "--source" && i + 1 < args.Length)
@@ -1294,6 +1301,18 @@ public partial class MapRenderer : Node2D
             // second. Each step prints the state it claims to have caused.
             GetTree().CreateTimer(2.0).Timeout += () => DetailProbe();
         }
+        if (_winDump)
+            GetTree().CreateTimer(3.0).Timeout += () =>
+            {
+                GD.Print($"WIN-DUMP main vp={GetViewport().GetVisibleRect().Size} " +
+                         $"registered={_windows.Count}");
+                foreach (var n in GetTree().Root.FindChildren("*", "", true, false))
+                    if (n is Window w && w != GetTree().Root)
+                        GD.Print($"WIN-DUMP WINDOW '{w.Name}' title='{w.Title}' " +
+                                 $"visible={w.Visible} pos={w.Position} size={w.Size} " +
+                                 $"popup={w.Popup} registered={_windows.Contains(w)} " +
+                                 $"parent={w.GetParent()?.Name}");
+            };
         if (_testPanProbe)
         {
             // DIAGNOSTIC ONLY — it changes no state a normal run sees. The
