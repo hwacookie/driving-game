@@ -152,6 +152,16 @@ public static class RunTape
     // writing into the previous run's file.
     private static string _autoSavePath = null;
     private static long _lastAutoSaveStep = -1;
+    // #99: the map the tape was recorded on, captured ONCE from the RoadNetwork
+    // that Record() already receives. Without it the geometry and signs live
+    // only in C# code (TestMaps), which a cold reader cannot run - the tape
+    // would reference a world it does not describe.
+    private static List<string> _mapDesc = null;
+    // #99: time-varying rule changes (future traffic lights, temporary limits).
+    // Event-sourced like decisions: state at step N = static map records plus
+    // the fold of these up to N. Nothing emits them yet - SignType is
+    // {Yield, Priority}, both static.
+    private static readonly List<(long Step, string Text)> _ruleChanges = new();
 
     /// <summary>The car-field grammar, declared ONCE: `Save` writes it as a
     /// header line, a tip hop answers with it, and every reader decides the
@@ -367,7 +377,7 @@ public static class RunTape
                     // filesystem mtime round-trip needed.
                     ["name"] = f.FullName.Split("/")[^1],
                 };
-                // "# DGTAP1 map=basic dt_fixed=0.016667 steps=828"
+                // "# DGTAP2 map=basic dt_fixed=0.016667 steps=828"
                 foreach (var tok in head.Split(" "))
                 {
                     int eq = tok.IndexOf('=');
@@ -441,7 +451,9 @@ public static class RunTape
                                 namesLoaded[ParseL(kv2[0], -1L)] = kv2[1];
                         }
                     }
-                    if (line.Contains("caropts=") && line.StartsWith("# DGTAP1"))
+                    // Both magics: DGTAP2 tapes carry map records, DGTAP1 the
+                    // older shape - a reader must not lose caropts across the bump.
+                    if (line.Contains("caropts=") && line.StartsWith("# DGTAP"))
                     {
                         // uid:detail=on+tracks=off+color=c62828 - the per-car
                         // view options the test declared (issues #9 and #10). An
@@ -710,6 +722,8 @@ public static class RunTape
             DtFixedS = dtFixedS > 0.0 ? dtFixedS : 1.0 / 60.0;
             _autoSavePath = null;          // a new tape has no autosave target yet
             _lastAutoSaveStep = -1;
+            _mapDesc = null;               // #99: re-capture the map for this tape
+            _ruleChanges.Clear();
         }
     }
 
@@ -756,6 +770,8 @@ public static class RunTape
             // them behind would give the NEXT tape another run's repaints - and
             // Clear() is what a fresh run calls, so the leak would be silent.
             _carOptEvents.Clear();
+            _mapDesc = null;               // #99: same as in Start()
+            _ruleChanges.Clear();
         }
     }
 
@@ -828,6 +844,10 @@ public static class RunTape
                 return;
             }
             _frames.Add(f);
+            // #99: capture the world once (first non-null network) so Save can
+            // write the map records - a tape that describes its own map.
+            if (_mapDesc == null && network != null)
+                _mapDesc = MapDescriptionLines(network);
             // #92: flush the durable target while we are here — every ~0.5 s of sim
             // time, a full rewrite (cheap at our tape sizes: a full suite ≈ 3 MB),
             // which always leaves ONE consistent file: header + every frame up to
@@ -842,6 +862,40 @@ public static class RunTape
 
     /// <summary>~0.5 s of sim time, expressed in substeps (30 at the fixed 60 Hz).</summary>
     static int AutoSaveEverySteps() => Math.Max(1, (int)Math.Round(0.5 / DtFixedS));
+
+    /// <summary>#99: one greppable line per segment and per sign - the map in
+    /// the file itself (DGTAP2). Segments are straight polylines in metres;
+    /// a cold reader needs no host, no repo checkout, no TestMaps run.</summary>
+    static List<string> MapDescriptionLines(RoadNetwork net)
+    {
+        var md = new List<string>(net.Segments.Count + 4);
+        for (int i = 0; i < net.Segments.Count; i++)
+        {
+            var s = net.Segments[i];
+            md.Add($"# M seg={i} name={s.Name} x1={s.X1:F2} y1={s.Y1:F2} " +
+                   $"x2={s.X2:F2} y2={s.Y2:F2} w={s.Width:F2} lanes={s.Lanes} " +
+                   $"shoulder={s.Shoulder:F2} level={s.Level} " +
+                   $"oneway={(s.Oneway ? 1 : 0)} parklane={s.ParkingLaneWidth:F2}");
+        }
+        foreach (var kv in net.Signs)
+        {
+            var (segIdx, nodeId) = kv.Key;
+            string pos = net.Nodes.TryGetValue(nodeId, out var p)
+                ? $"x={p.X:F2} y={p.Y:F2}" : "x=? y=?";
+            md.Add($"# S seg={segIdx} node={nodeId} type={kv.Value} {pos}");
+        }
+        return md;
+    }
+
+    /// <summary>#99: a TIME-VARYING rule changed at this substep (a traffic
+    /// light flipping, a temporary limit activating). The tape is event-sourced
+    /// for rules the way it already is for decisions: state at step N is the
+    /// static map records plus the fold of R-records up to N - indexed on
+    /// load, never replayed from zero (the /tape/index principle).</summary>
+    public static void NoteRuleChange(long step, string text)
+    {
+        lock (Lock) _ruleChanges.Add((step, text ?? ""));
+    }
 
     /// <summary>The frame at a substep (-1 = the last one). Null if the tape
     /// does not reach that far - a caller must not invent one. Frames are
@@ -967,13 +1021,20 @@ public static class RunTape
                         bits.Add($"color={kv.Value.Color!.Replace("#", "").ToLowerInvariant()}");
                     if (bits.Count > 0) carOptParts.Add($"{kv.Key}:{string.Join("+", bits)}");
                 }
-                lines.Add($"# DGTAP1 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
+                lines.Add($"# DGTAP2 map={_mapName} map_hash={_mapHash} dt_fixed={DtFixedS:F6} steps={_frames.Count}" +
                           (nameParts.Count > 0 ? $" names={string.Join(",", nameParts)}" : "") +
                           (kindParts.Count > 0 ? $" kinds={string.Join(",", kindParts)}" : "") +
                           (carOptParts.Count > 0 ? $" caropts={string.Join(",", carOptParts)}" : ""));
                 lines.Add(FrameLegend);
+                // #99: the map this tape was recorded on - geometry and signs,
+                // so a cold reader has the world without running TestMaps.
+                if (_mapDesc != null) lines.AddRange(_mapDesc);
                 foreach (var fn in _focus) lines.Add(fn.ToHeaderLine());
                 foreach (var rn in _results) lines.Add(rn.ToHeaderLine());
+                // #99: rule changes (time-varying rules; nothing emits these
+                // yet - no lights exist), folded in step order.
+                foreach (var rc in _ruleChanges.OrderBy(r => r.Step))
+                    lines.Add($"# R step={rc.Step} {rc.Text}");
                 // Option CHANGES, after the staged declarations: the header says
                 // how the cast was born, these say what it became (#10).
                 foreach (var ce in _carOptEvents) lines.Add(ce.Line);
