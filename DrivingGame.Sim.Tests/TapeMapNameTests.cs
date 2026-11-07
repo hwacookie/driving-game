@@ -45,7 +45,7 @@ public class TapeMapNameTests : IDisposable
     /// <summary>First header line as written to disk — the file is the contract,
     /// since that is what a reviewer of an old tape reads.</summary>
     string HeaderOf(string path) =>
-        File.ReadAllLines(path).First(l => l.StartsWith("# DGTAP1"));
+        File.ReadAllLines(path).First(l => l.StartsWith("# DGTAP2"));
 
     [Fact]
     public void Engine_StampsTheMapNameItWasGiven()

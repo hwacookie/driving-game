@@ -295,6 +295,82 @@ def tape_file(path: str, uid: int = -1, from_step: int = -1,
 
 
 @mcp.tool()
+def road_context(path: str, x: float, y: float) -> str:
+    """The world around a point, from the tape's OWN map records (#99, DGTAP2):
+    the nearest segment (id, name, level), the distance to each road edge,
+    the lateral position relative to the centreline (which side, and a lane
+    estimate only when the segment carries lanes > 1), and the signs that
+    apply on that segment. Cold - no host required; any DGTAP2 tape works.
+
+    Pair with tape_file: pull the car's pose at step N, feed it in here, and
+    'which road, which lane, how much room' is answered from the file alone."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as e:
+        return f"cannot read {path}: {e}"
+
+    segs, signs = [], {}
+    for line in lines:
+        if line.startswith("# M seg="):
+            kv = dict(t.split("=", 1) for t in line.split()[1:] if "=" in t)
+            segs.append({k: (float(v) if k not in ("name",) else v)
+                         for k, v in kv.items()})
+        elif line.startswith("# S seg="):
+            kv = dict(t.split("=", 1) for t in line.split()[1:] if "=" in t)
+            signs.setdefault(int(kv["seg"]), []).append(
+                f"{kv['type']} at node {kv.get('node', '?')}")
+    if not segs:
+        return ("no map records in this tape - it predates DGTAP2 "
+                "(#99); re-record or use a newer file")
+
+    def dist_to_seg(px, py, s):
+        ax, ay, bx, by = s["x1"], s["y1"], s["x2"], s["y2"]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0,
+              ((px - ax) * dx + (py - ay) * dy) / l2))
+        cx, cy = ax + t * dx, ay + t * dy
+        return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5, t, (dx, dy)
+
+    best, bd, bt, bdir = None, None, None, None
+    for s in segs:
+        d, t, dirv = dist_to_seg(x, y, s)
+        if bd is None or d < bd:
+            best, bd, bt, bdir = s, d, t, dirv
+
+    # signed lateral offset: + = LEFT of the segment's direction of travel
+    # (cross product of segment dir and point offset, normalised by length)
+    dx, dy = bdir
+    seglen = (dx * dx + dy * dy) ** 0.5 or 1.0
+    o = ((x - best["x1"]) * dy - (y - best["y1"]) * dx) / seglen
+    half = best["w"] / 2.0
+    side = "left" if o >= 0 else "right"
+    out = [f"segment {int(best['seg'])} '{best.get('name', '?')}' "
+           f"level={int(best['level'])} w={best['w']:.1f}m "
+           f"oneway={int(best['oneway'])}"]
+    if bd > half:
+        out.append(f"  OFF ROAD: {bd - half:.2f} m past the {side} "
+                   f"edge (centreline {bd:.2f} m)")
+    else:
+        out.append(f"  centreline {bd:.2f} m; {o:+.2f} m ({side}); "
+                   f"to right edge {half - o if o >= 0 else half + o:.2f} m, "
+                   f"to left edge {half + o:.2f} m")
+        lanes = int(best.get("lanes", 0))
+        if lanes > 1:
+            total = lanes if best["oneway"] else 2 * lanes
+            lw = best["w"] / total
+            n = max(1, min(lanes, int(abs(o) / lw) + (1 if o < 0 else 0)))
+            out.append(f"  lane {n} of {lanes} on the {side} side "
+                       f"(lane width ~{lw:.2f} m)")
+        if best.get("parklane", 0) > 0:
+            out.append(f"  parking lane {best['parklane']:.1f} m at each kerb")
+    for sgn in signs.get(int(best["seg"]), []):
+        out.append(f"  sign: {sgn}")
+    return "\n".join(out)
+
+
+@mcp.tool()
 @_guard
 def car_decisions(uid: int) -> str:
     """A car's decision log (the [PARK]/[PARKEND]/avoidance lines the driver

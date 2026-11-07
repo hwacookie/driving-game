@@ -66,7 +66,7 @@ public class TapeCarOptionEventsTests : IDisposable
         // The staged header is NOT rewritten by a change: it stays the birth
         // state, so the fold (header → events) is the only place the two meet.
         Assert.Contains($"caropts={car.Uid}:detail=on+tracks=on+color=2e7d32",
-                        lines.First(l => l.StartsWith("# DGTAP1")));
+                        lines.First(l => l.StartsWith("# DGTAP2")));
     }
 
     [Fact]
