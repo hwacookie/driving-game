@@ -179,6 +179,122 @@ def car_trace(uid: int, from_step: int = -1, to_step: int = -1,
 
 
 @mcp.tool()
+def tape_file(path: str, uid: int = -1, from_step: int = -1,
+              to_step: int = -1, max_rows: int = TRACE_ROWS_MAX) -> str:
+    """Cold query on a RECORDED tape file - no host required (#96). Since #92
+    the file is the durable record: this answers 'what was going on at frame N
+    of run T_196' long after the host that recorded it is gone.
+
+    uid >= 0: that car's pose rows (step, x, y, heading deg, speed km/h,
+    cumulative distance m, active cap key) over [from_step, to_step] (absolute
+    substeps, -1 = last 600), subsampled to max_rows; the car's own decision
+    events ride along as '!' rows. uid == -1: a snapshot of ALL cars at one
+    step (to_step, default newest) plus that step's events - the cast picture
+    of a frame. Header facts (map, dt, cast names/kinds) and any focus/result
+    notes are always shown first.
+
+    Works on any file in tests/ or docs/tapes/, including aborted runs."""
+    import re as _re
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as e:
+        return f"cannot read {path}: {e}"
+
+    meta, aux, frames = {}, [], []
+    for line in raw.splitlines():
+        if not line:
+            continue
+        if line.startswith("# DGTAP1"):
+            for kv in line.split()[1:]:
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    meta[k] = v
+        elif line.startswith("#"):
+            if line.startswith("# step;"):   # the legend - grammar, not content
+                continue
+            aux.append(line[2:].strip())   # focus / result / caropt notes
+            continue
+        parsed = _parse_line(line)
+        if parsed is not None:
+            frames.append(parsed)
+    if not frames:
+        return f"no frame lines in {path} (is it a tape?)"
+
+    first, head = frames[0][0], frames[-1][0]
+    cast = meta.get("names", "")
+    out = [f"tape: {path.split('/')[-1]} map={meta.get('map', '?')} "
+           f"dt={meta.get('dt_fixed', '?')} steps {first}..{head}"
+           + (f" cast={cast}" if cast else "")]
+    for a in aux[:3]:   # a full-suite tape carries dozens of notes; the pose
+        out.append(f"  note: {a[:120]}")   # rows are the answer, not the header
+
+    # events per step, from the '~uid=msg~' tail of frame lines
+    events = {}
+    for line in raw.splitlines():
+        if line.startswith("#") or ";~" not in line:
+            continue
+        try:
+            st = int(line.split(";", 1)[0])
+        except ValueError:
+            continue
+        for ev in line.rsplit(";", 1)[1].lstrip(";").split("~"):
+            if "=" in ev:
+                euid, _, msg = ev.partition("=")
+                if euid.isdigit():
+                    events.setdefault(st, []).append((int(euid), msg))
+
+    if uid < 0:
+        step = to_step if to_step >= 0 else head
+        row = next(((s, c) for s, c in frames if s == step), None)
+        if row is None:
+            return f"step {step} not in tape (covers {first}..{head})"
+        _, cars = row
+        out.append(f"--- all cars at step {step}:")
+        names = dict(p.split(":", 1) for p in cast.split(",") if ":" in p)
+        for u in sorted(cars):
+            c = cars[u]
+            name = names.get(str(u), "")
+            out.append(f"  uid={u} ({c['x']:.2f},{c['y']:.2f}) hdg={c['hdg']:.1f}"
+                       f" v={c['v']*3.6:.1f}km/h crashes={c['crashes']}"
+                       + (f" cap={c['cap']}" if c["cap"] else "")
+                       + (f" [{name}]" if name else ""))
+        for euid, msg in events.get(step, []):
+            out.append(f"  ! uid={euid}: {msg}")
+        return "\n".join(out)
+
+    to = to_step if to_step >= 0 else head
+    frm = from_step if from_step >= 0 else max(first, to - 600)
+    frm, to = max(frm, first), min(to, head)
+    if frm > to:
+        return f"empty range (tape covers {first}..{head})"
+    span = to - frm + 1
+    stride = max(1, span // max(1, max_rows))
+    rows, dist, prev = [], None, None
+    for s, cars in frames:
+        if not (frm <= s <= to) or s % stride or uid not in cars:
+            continue
+        c = cars[uid]
+        if prev is not None and dist is not None:
+            dist += ((c["x"] - prev[0]) ** 2 + (c["y"] - prev[1]) ** 2) ** 0.5
+        else:
+            dist = 0.0
+        prev = (c["x"], c["y"])
+        rows.append(f"  {s:>6} ({c['x']:8.2f},{c['y']:8.2f}) hdg={c['hdg']:5.1f} "
+                    f"v={c['v']*3.6:5.1f}km/h d={dist:7.2f}m"
+                    + (f" cap={c['cap']}" if c["cap"] else ""))
+        for euid, msg in events.get(s, []):
+            if euid == uid:
+                rows.append(f"  ! {s}: {msg}")
+    if not rows:
+        return f"uid={uid} does not appear in steps {frm}..{to}"
+    first_step_shown = rows[0].split()[0]
+    header = (f"--- uid={uid} steps {first_step_shown}..{to} "
+              f"(stride {stride}, tape {first}..{head}):")
+    return "\n".join(out + [header] + rows)
+
+
+@mcp.tool()
 @_guard
 def car_decisions(uid: int) -> str:
     """A car's decision log (the [PARK]/[PARKEND]/avoidance lines the driver
