@@ -430,6 +430,17 @@ LOG_FILE=$(echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin)
 ( tail -n 0 -F "$LOG_FILE" 2>/dev/null ) &
 TAIL_PID=$!
 
+# #92: start the DURABLE tape save NOW (next to the run log, same naming), not
+# only after the suite finished: from this moment on the host rewrites the file
+# every ~0.5 s of sim time, so a Ctrl-C at the wait loop below leaves a usable
+# partial recording instead of nothing.
+TAPE_FILE=$(echo "$LOG_FILE" | sed 's|run_test_|tape_|; s|\.log$|.txt|')
+if [ -n "$TAPE_FILE" ]; then
+  TAPE_SAVE=$(curl -sf -X POST "$API/tape/save" -H "Content-Type: application/json" \
+                 -d "{\"path\": \"$TAPE_FILE\"}") || true
+  echo "==> Tape autosave on -> ${TAPE_FILE}"
+fi
+
 echo "==> Waiting for the suite to finish (Ctrl-C aborts)..."
 TEST_EXIT=1
 while :; do
@@ -453,12 +464,11 @@ else
   [ "$RUN_GODOT" -eq 1 ] && HOLD_OPEN=1
 fi
 
-# Save the tape NEXT TO the run log: one file per run, same naming, so a
-# report and its frames stay a pair months later.
-TAPE_FILE=$(echo "$LOG_FILE" | sed 's|run_test_|tape_|; s|\.log$|.txt|')
-if [ -n "$TAPE_FILE" ]; then
+# Final flush (#92): the autosave above has kept the file current every ~0.5 s;
+# this guarantees the LAST frame is on disk before the host goes down.
+if [ -n "${TAPE_FILE:-}" ]; then
   TAPE_SAVE=$(curl -sf -X POST "$API/tape/save" -H "Content-Type: application/json" \
-                 -d "{\"path\": \"$TAPE_FILE\"}")
+                 -d "{\"path\": \"$TAPE_FILE\"}") || true
   if [ -n "$TAPE_SAVE" ]; then
     echo "==> Tape saved: $(echo "$TAPE_SAVE" | tr -d ' ' | cut -c1-160)"
   else
