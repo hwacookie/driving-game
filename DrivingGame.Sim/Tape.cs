@@ -145,6 +145,13 @@ public static class RunTape
     private static bool _recording;
     private static string _mapName = "";
     private static string _mapHash = "";   // the map's GEOMETRY, not just its name
+    // #92: the DURABLE autosave target. A /tape/save is a request that outlives
+    // the call — while this tape records, the file on disk follows it every ~0.5 s
+    // of sim time, so an aborted run (Ctrl-C, host death) leaves a usable partial
+    // recording instead of nothing. Cleared by Start(): a new tape must not keep
+    // writing into the previous run's file.
+    private static string _autoSavePath = null;
+    private static long _lastAutoSaveStep = -1;
 
     /// <summary>The car-field grammar, declared ONCE: `Save` writes it as a
     /// header line, a tip hop answers with it, and every reader decides the
@@ -701,6 +708,8 @@ public static class RunTape
             _mapName = SanitiseMapName(mapName);
             _mapHash = mapHash ?? "";
             DtFixedS = dtFixedS > 0.0 ? dtFixedS : 1.0 / 60.0;
+            _autoSavePath = null;          // a new tape has no autosave target yet
+            _lastAutoSaveStep = -1;
         }
     }
 
@@ -819,8 +828,20 @@ public static class RunTape
                 return;
             }
             _frames.Add(f);
+            // #92: flush the durable target while we are here — every ~0.5 s of sim
+            // time, a full rewrite (cheap at our tape sizes: a full suite ≈ 3 MB),
+            // which always leaves ONE consistent file: header + every frame up to
+            // this step. SaveCore, not Save(): we already hold Lock.
+            if (_autoSavePath != null && step - _lastAutoSaveStep >= AutoSaveEverySteps())
+            {
+                _lastAutoSaveStep = step;
+                SaveCore(_autoSavePath);
+            }
         }
     }
+
+    /// <summary>~0.5 s of sim time, expressed in substeps (30 at the fixed 60 Hz).</summary>
+    static int AutoSaveEverySteps() => Math.Max(1, (int)Math.Round(0.5 / DtFixedS));
 
     /// <summary>The frame at a substep (-1 = the last one). Null if the tape
     /// does not reach that far - a caller must not invent one. Frames are
@@ -919,10 +940,16 @@ public static class RunTape
     /// Returns the path on success, null on a disk error.</summary>
     public static string Save(string path)
     {
-        lock (Lock)
+        lock (Lock) return SaveCore(path);
+    }
+
+    /// <summary>The write itself, WITHOUT the lock: Record() calls it while holding
+    /// Lock for the autosave (#92), and C#'s lock is not reentrant. A successful
+    /// save also REGISTERS the path as the durable autosave target.</summary>
+    static string SaveCore(string path)
+    {
+        try
         {
-            try
-            {
                 var lines = new List<string>(_frames.Count + 2);
                 var nameParts = new List<string>();
                 foreach (var kv in _names) nameParts.Add($"{kv.Key}:{kv.Value}");
@@ -953,6 +980,9 @@ public static class RunTape
                 foreach (var f in _frames)
                     lines.Add(FrameLine(f));
                 File.WriteAllText(path, string.Join("\n", lines) + "\n");
+                // #92: the request is durable from this moment on.
+                _autoSavePath = path;
+                _lastAutoSaveStep = _frames.Count > 0 ? _frames[^1].Step : -1;
                 return path;
             }
             catch (Exception e)
@@ -968,7 +998,6 @@ public static class RunTape
                                         $"{e.GetType().Name}: {e.Message}");
                 return null;
             }
-        }
     }
 
     public static Dictionary<string, object?> StatusPayload()
@@ -984,6 +1013,7 @@ public static class RunTape
                 ["map"] = _mapName,
                 ["map_hash"] = _mapHash,
                 ["events"] = _events.Count,
+                ["autosave"] = _autoSavePath,
             };
     }
 
