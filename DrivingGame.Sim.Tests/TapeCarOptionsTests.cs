@@ -59,7 +59,7 @@ public class TapeCarOptionsTests : IDisposable
         // The line on disk is what a reviewer of an OLD file reads, so the shape
         // is part of the contract: uid:detail=on+tracks=on+livery=rrggbb, comma
         // between cars, no '#' (the token is space- and comma-separated).
-        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP1"));
+        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP2"));
         Assert.Contains(
             $"caropts={on.Uid}:detail=on+tracks=on+color=c62828,{off.Uid}:detail=off+tracks=on",
             header);
@@ -91,7 +91,7 @@ public class TapeCarOptionsTests : IDisposable
 
         // A paint is a decision on its own: it must not invent detail/tracks
         // facts the test never stated.
-        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP1"));
+        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP2"));
         Assert.Contains($"caropts={c.Uid}:color=4eb7cc", header);
         Assert.DoesNotContain("detail=", header);
         Assert.DoesNotContain("tracks=", header);
@@ -117,7 +117,7 @@ public class TapeCarOptionsTests : IDisposable
         var path = RunTape.Save(Path.Combine(_dir, "plain.txt"));
         Assert.NotNull(path);
 
-        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP1"));
+        var header = File.ReadAllLines(path!).First(l => l.StartsWith("# DGTAP2"));
         Assert.DoesNotContain("caropts=", header);
         Assert.Contains("names=", header);       // the cast is still there
 
