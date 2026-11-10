@@ -106,8 +106,12 @@ public sealed class LaneGuard
 
         var seg = network.Segments[car.SegIdx];
 
-        // One-way streets have no opposing lane - skip silently.
-        if (seg.Oneway) return false;
+        // One-way streets have no opposing lane - skip silently. An OPEN AREA
+        // (#86) is skipped for the same reason and a stronger one: it has no
+        // centreline and no opposing half at all, so a car circling in it is not
+        // on the wrong side of anything - "it's allowed to drive around there in
+        // circles" (owner, 2026-11-03).
+        if (seg.Oneway || seg.OpenArea) return false;
 
         // One measurement, used twice: the distance test needs the magnitude,
         // the crossing counter needs the side. (The old code asked the geometry

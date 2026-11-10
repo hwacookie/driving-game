@@ -311,12 +311,18 @@ public static class RoadNetworkGeometry
     public static Dictionary<(string Highway, double Width), List<List<(double X, double Y)>>>
         MergeAndRoundLines(RoadNetwork network, bool onlyTwoWay = false,
             bool skipMultiLane = false, bool stopAtJunctions = false,
-            HashSet<int>? excludeSegs = null)
+            HashSet<int>? excludeSegs = null, bool skipOpenAreas = false)
     {
         var groups = new Dictionary<(string, double), List<RoadSegment>>();
         for (int si = 0; si < network.Segments.Count; si++)
         {
             var seg = network.Segments[si];
+            // An OPEN AREA (#86) is paved, not painted: it declares no centreline,
+            // so the paint path must not invent one down the middle of a field.
+            // The geometry path (GetRoundedLines - spawn placement, path fitting)
+            // still sees the area, which is why this is an option and not a
+            // blanket skip.
+            if (skipOpenAreas && seg.OpenArea) continue;
             // Consumed by a width-varying ribbon/centreline (drawn from the
             // continuous chain spline instead) - skip the per-width piece.
             if (excludeSegs != null && excludeSegs.Contains(si)) continue;

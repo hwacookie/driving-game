@@ -142,6 +142,10 @@ public partial class MapRenderer : Node2D
     // (centre, radius). The sim decides where they are (RoadNetwork.
     // GetCrossingMarkers); this only paints them.
     private readonly List<(Vector2 C, float R)> _crossingDots = new();
+    /// <summary>A stated parking space the MAP paints (see
+    /// RoadNetwork.ParkingSpaces): centre, axis, size in metres. Drawn as a
+    /// green rectangle so the space is visible while the map is.</summary>
+    private List<(Vector2 C, float HdgDeg, float LenM, float WidM)> _parkingSpaces = new();
     // The meshes holding zoom-culled paint (centre + halt lines): kept so
     // _Process can switch them off together below MarkingMinZoom.
     private readonly List<MeshInstance2D> _farMarkings = new();
@@ -2238,6 +2242,13 @@ public partial class MapRenderer : Node2D
                 _crossingDots.Add((W(d[0].GetSingle(), d[1].GetSingle()),
                                    d[2].GetSingle()));
 
+        // --- A stated parking space (issue #86): a rectangle the MAP paints
+        // on an open area. Its size comes from the payload, so what is drawn IS
+        // what the map says - a 3 m x 6 m space cannot become 4 m on screen.
+        if (root.TryGetProperty("parking_spaces", out var spaces))
+            foreach (var sp in spaces.EnumerateArray())
+                DrawStatedSpace(sp);
+
         // --- Arrows + painted P marks (z 2): plain polygons.
         foreach (var key in new[] { "oneway_arrows", "parking_marks" })
             if (root.TryGetProperty(key, out var arr))
@@ -4256,6 +4267,50 @@ public partial class MapRenderer : Node2D
     /// the picture and the e2e verdict can never disagree (owner decision 2026-11-01:
     /// "the test passes when the car's outer dimensions are inside the rectangle").
     /// Green while the body is inside it, amber while it is not.</summary>
+    /// <summary>A stated parking space paints EXACTLY the rectangle the map
+    /// declares — same shape as the acceptance box above (this is the same
+    /// green the client uses for a box the car IS inside), so a 3 m x 6 m
+    /// space cannot read any wider or longer on screen.</summary>
+    /// <summary>A stated parking space paints EXACTLY the rectangle the map
+    /// declares — same shape as the acceptance box above (this is the same
+    /// green the client uses for a box the car IS inside), so a 3 m x 6 m
+    /// space cannot read any wider or longer on screen. It is map paint, so it
+    /// is added ONCE with the map (unlike a car's own `park_target`, which is
+    /// repainted every frame and freed in between - a stated space freed there
+    /// was invisible in a static field).</summary>
+    private void DrawStatedRect(float xM, float yM, float hdgDeg, float lenM, float widM)
+    {
+        float rad = Mathf.DegToRad(hdgDeg);
+        float fx = Mathf.Sin(rad), fy = Mathf.Cos(rad);   // forward (as DrawFlag)
+        float rx = Mathf.Cos(rad), ry = -Mathf.Sin(rad); // right
+        // Lengths are added in METRES before W - W takes metres and only flips
+        // y; the metre->pixel scale is the camera's (see DrawParkTarget's note).
+        Vector2 Off(float along, float side) =>
+            W(xM + fx * along + rx * side, yM + fy * along + ry * side);
+        float hl = lenM * 0.5f, hw = widM * 0.5f;
+        var pts = new List<Vector2> { Off(hl, hw), Off(hl, -hw), Off(-hl, -hw), Off(-hl, hw) };
+        AddPolygon(pts, new Color(0f, 0.85f, 0.35f, 0.34f), 2);
+        var line = new Line2D
+        {
+            Points = pts.ToArray(),
+            DefaultColor = new Color(0f, 0.62f, 0.24f),
+            Width = TrailWidthM,
+            Closed = true,
+            ZIndex = 2,
+        };
+        _world.AddChild(line);
+    }
+
+    void DrawStatedSpace(JsonElement sp)
+    {
+        if (!sp.TryGetProperty("x", out var vx) || !sp.TryGetProperty("y", out var vy) ||
+            !sp.TryGetProperty("heading_deg", out var vh) ||
+            !sp.TryGetProperty("length_m", out var vl) || !sp.TryGetProperty("width_m", out var vw))
+            return;
+        DrawStatedRect((float)vx.GetDouble(), (float)vy.GetDouble(),
+                       (float)vh.GetDouble(), (float)vl.GetDouble(), (float)vw.GetDouble());
+    }
+
     void DrawParkTarget((float X, float Y, float Hdg, float LenM, float WidM, bool Inside)? b)
     {
         if (b == null) return;
