@@ -928,6 +928,9 @@ public sealed partial class BicycleNav
             double nearEdgeM = Math.Max(_claimRearEndM, _claimFrontEndM);
             double rearExtM = Math.Min(0.0, ParkCornerOffsets().Min(c => c.Along));
             double mouthStageM = nearEdgeM + PARK_STAGING_PAST_M - rearExtM - S;
+            Console.WriteLine($"   [PARKSTAGE] nearEdge={nearEdgeM:F2} rearExt={rearExtM:F2} " +
+                              $"S={S:F2} mouthStage={mouthStageM:F2} (min {PARK_REVERSE_MIN_TAIL_M}) " +
+                              $"stopAt={(nearEdgeM + PARK_STAGING_PAST_M - rearExtM):F2}");
             if (mouthStageM >= PARK_REVERSE_MIN_TAIL_M)
                 stage = mouthStageM;
         }

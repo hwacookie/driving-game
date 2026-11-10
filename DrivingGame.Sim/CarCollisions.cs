@@ -558,6 +558,7 @@ public static class CarCollisions
 
     // TEMPORARY debug hook (remove after use)
     public static List<string> DebugLog = new();
+    private static DateTime PinWitnessT;   // TEMP #62
 
     // Decision-log debounce: pending threat replacements per car uid and how
     // many CONSECUTIVE substeps they have won the cap (see the final pass in
@@ -3332,6 +3333,13 @@ public static class CarCollisions
                 {
                     var p = prevPose[k];
                     var car = k == c.Uid ? c : o;
+                    // TEMP #62: who is pinning the parking car?
+                    if (k == 1)
+                    {
+                        var now = DateTime.Now;
+                        if ((now - PinWitnessT).TotalSeconds > 0.5) { PinWitnessT = now;
+                            Console.WriteLine($"   [PIN] car#1 rolled back vs #{o.Uid} at ({car.X:F2},{car.Y:F2}) h={car.Heading:F1}"); }
+                    }
                     car.X = p.X; car.Y = p.Y; car.Heading = p.Heading;
                     car.Speed = 0.0;
                     contacted.Add(k);

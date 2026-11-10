@@ -117,8 +117,32 @@ public sealed partial class BicycleNav
     public static readonly double PARK_RUNIN_BLEND_M = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_RUNIN_BLEND_M"), out var _rb) ? _rb : 9.0;
 
+    // Measured on bay 24 (9.40 m gap, #62): at 0.65 the winning plan overshoots the
+    // goal axle by 0.48 m and must be trimmed with its heading still swinging (-5 cm
+    // box miss); at 0.90 it overshoots 0.21 m - inside the small-overshoot exemption,
+    // so the counter-turn completes on its own tail and the car rests near-parallel
+    // (box +0 cm, kerb 23/18 cm). At 1.20 the overshoot grows to 1.14 m and the miss
+    // returns: the sweet spot is narrow, which is why this stays a constant.
     public static readonly double PARK_STAGING_PAST_M = double.TryParse(
-        Environment.GetEnvironmentVariable("PARK_STAGE_PAST_M"), out var _psp) ? _psp : 0.65;
+        Environment.GetEnvironmentVariable("PARK_STAGE_PAST_M"), out var _psp) ? _psp : 0.90;
+
+    /// <summary>#62: a tight bay's full tuck cannot clear from the lane base - measured on
+    /// the two-arc family against BOTH flanks, bay 25 (6.40 m gap) needs the reverse to
+    /// START at v ~5.7 and bay 26 (5.40 m) at ~6.25, while the approach stops at ~5.25.
+    /// The only place the car can move kerb-ward is during the approach, before it has
+    /// passed the flanks - so when the lane base cannot reach the box line, the
+    /// destination aims at the drifted lateral instead of the road base. The scan reuses
+    /// the planner's own path + clearance check against flank bodies grown by this much;
+    /// the live envelope is a snug overlap test (no pad), so a plan with positive
+    /// clearance is executable and the margin covers tracking error.</summary>
+    public static readonly double PARK_DRIFT_MARGIN_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_DRIFT_MARGIN_M"), out var _dm) ? _dm : 0.10;
+
+    /// <summary>#62: if the scan finds a clearing start at or below this lateral, the bay is
+    /// not tight - leave the destination on the road base and the approach exactly as it
+    /// was (bay 24 must not move).</summary>
+    public static readonly double PARK_DRIFT_FREE_V0_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_DRIFT_FREE_V0"), out var _df) ? _df : 5.30;
     /// <summary>§1c tier 1 (owner decision, 2026-11-02): the free space along the
     /// road — gap length minus THIS car's own length — that makes a gap a bay.
     /// A SUM: the split fore/aft is free, 0.30/0.70 is as good as 0.50/0.50.
@@ -135,6 +159,10 @@ public sealed partial class BicycleNav
 
     private double _parkStallT;
     private double _pkTravelM;
+    private double _pkStandWitnessT = -1e9;   // TEMP #62
+    private double _pkEndWitnessT = -1e9;     // TEMP #62
+    private double _pkBoxLatchT = -1e9;       // #62: debounce for the in-box latch
+    private double _pkBoxWitnessT = -1e9;     // TEMP #62
     private bool _pkReverseStarted;
     private double _parkShimmyDist;
     private int _parkAttempts;
@@ -149,6 +177,28 @@ public sealed partial class BicycleNav
     /// that is already near its bay line (measured 1.5 m rung: off=-0.30 m at yaw 20.0 deg).
     public static readonly double PARK_SHIMMY_OFF_M = double.TryParse(
         Environment.GetEnvironmentVariable("PARK_SHIMMY_OFF_M"), out var _smo) ? _smo : 0.60;
+    /// <summary>Settle creep (#25, T_203): the reverse can end with the angle nearly
+    /// closed while the body still stands a few decimetres outside its box — the pose at
+    /// which neither the shimmy (it unwinds an OPEN angle) nor the give-up ladder (it
+    /// re-arms a 0.3 m micro-reverse that worsens the yaw) can help. Measured in the 6.4 m
+    /// gap: rest pose 3.0° off, eOff 0.01 m, worst corner 0.43 m past the box edge, and the
+    /// only free direction forward (2.6 m to the far flank). One bounded creep toward the
+    /// box centre; the existing in-box latch finishes the job.</summary>
+    public static readonly double PARK_SETTLE_PSI_DEG = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_SETTLE_PSI"), out var _psd) ? _psd : 6.0;
+    /// <summary>How far outside its box a standing car may be (worst corner, m) and still
+    /// be worth settling: beyond this the pose is not "almost in" and the normal ladder
+    /// applies.</summary>
+    public static readonly double PARK_SETTLE_MAX_MARGIN_M = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_SETTLE_MARGIN"), out var _psm) ? _psm : 0.75;
+    /// <summary>How long one settle creep may run before it gives the pose back to the
+    /// normal ladder (s): bounded, because an unbounded creep is the livelock this file
+    /// has already been burned by (#36).</summary>
+    public static readonly double PARK_SETTLE_TIMEOUT_S = double.TryParse(
+        Environment.GetEnvironmentVariable("PARK_SETTLE_TIMEOUT"), out var _pto) ? _pto : 4.0;
+    private bool _pkSettle;
+    private double _pkSettleT;
+    private int _pkSettleTries;
     private bool _parkRetried;
     // The envelope's veto, carried from the steering section (where the geometry is
     // known) to the longitudinal section of the NEXT tick (where the demand lives).
@@ -214,7 +264,12 @@ public sealed partial class BicycleNav
         double psiMin = psi0 - th;
         var pts = new List<(double U, double V, double Psi, double Steer)>();
         double u = 0.0, v = v0, psi = psi0;
-        pts.Add((u, v, psi, MAX_STEER));
+        // The stored steer is the LOCK THE ARC WAS BUILT WITH, not MAX_STEER: the
+        // executor drives `Steer[]` open-loop, and a plan solved at 25° lock that
+        // carried 38° made the car swing ~5° past the planned arc (measured on bay
+        // 24: peak 47.5° vs the plan's 42.9°, nose clipping the flank corner the
+        // plan cleared by 0.96 m).
+        pts.Add((u, v, psi, delta.Value));
         // Arc 1: reversing with the wheels on full RIGHT lock swings the rear
         // towards the kerb and the nose away from it (signed-speed bicycle
         // kinematics: dpsi/dt = (v/L) tan(delta), v < 0).
@@ -223,7 +278,7 @@ public sealed partial class BicycleNav
             psi -= k * ds;
             u -= Math.Cos(psi) * ds;
             v -= Math.Sin(psi) * ds;
-            pts.Add((u, v, psi, MAX_STEER));
+            pts.Add((u, v, psi, delta.Value));
         }
         // Arc 2: counter-lock, straightening back out to parallel.
         while (psi < 0.0)
@@ -231,7 +286,7 @@ public sealed partial class BicycleNav
             psi += k * ds;
             u -= Math.Cos(psi) * ds;
             v -= Math.Sin(psi) * ds;
-            pts.Add((u, v, psi, -MAX_STEER));
+            pts.Add((u, v, psi, -delta.Value));
         }
         return (pts, true);
     }
@@ -257,7 +312,7 @@ public sealed partial class BicycleNav
         double yaw = PARK_REVERSE_YAW_DEG;
         var pts = new List<(double U, double V, double Psi, double Steer)>();
         double u = 0.0, v = v0, psi = psi0;
-        pts.Add((u, v, psi, MAX_STEER));
+        pts.Add((u, v, psi, delta.Value));   // the actual lock, not MAX_STEER (see ReverseParkPath)
         // The swing target in this car's own terms: psi sweeps away from parallel to
         // `-yaw`; a pose already steeper than that has no first arc to make.
         double psiSwung = Math.Min(-yaw, psi0 - 1e-4);
@@ -269,18 +324,20 @@ public sealed partial class BicycleNav
             double dvStep = -Math.Sin(psi) * ds;   // lateral towards the kerb
             v += dvStep;
             gainArcs += dvStep;
-            pts.Add((u, v, psi, MAX_STEER));
+            pts.Add((u, v, psi, delta.Value));
         }
-        var arc2 = new List<(double U, double V, double Psi, double Steer)>();
-        double psi2 = psiSwung, u2 = u, v2 = v, g2 = 0.0;
+        // g2 is the counter-turn's lateral GAIN - a function of psiSwung and the lock
+        // alone, so it can be computed before the leg; the arc's POSITIONS cannot:
+        // they must start where the leg ENDS. The old code built arc2 from the pre-leg
+        // position and appended it after the leg, so every diagonal path jumped back to
+        // its own pre-leg point mid-path and ended at the pure two-arc endpoint no matter
+        // how deep `dv` asked (#62, measured 2026-11-06: dv=3.10 armed, path ended at
+        // v 7.28 = the 45 deg swing's own gain, bay 25 parked -65 cm on a "full tuck").
+        double psi2 = psiSwung, g2 = 0.0;
         while (psi2 < 0.0)
         {
             psi2 += k * ds;
-            u2 -= Math.Cos(psi2) * ds;
-            double dvStep = -Math.Sin(psi2) * ds;
-            v2 += dvStep;
-            g2 += dvStep;
-            arc2.Add((u2, v2, psi2, -MAX_STEER));
+            g2 += -Math.Sin(psi2) * ds;
         }
         double left = dv - gainArcs - g2;
         double perMetre = -Math.Sin(psiSwung);      // lateral per metre at the swung yaw
@@ -290,10 +347,17 @@ public sealed partial class BicycleNav
         {
             u -= Math.Cos(psiSwung) * ds;
             v += perMetre * ds;
-            pts.Add((u, v, psiSwung, MAX_STEER));    // the wheel stays at the entry
+            pts.Add((u, v, psiSwung, delta.Value));  // the wheel stays at the entry
                                                      // arc's lock through the diagonal
         }
-        foreach (var p in arc2) pts.Add(p);
+        psi2 = psiSwung;
+        while (psi2 < 0.0)
+        {
+            psi2 += k * ds;
+            u -= Math.Cos(psi2) * ds;
+            v += -Math.Sin(psi2) * ds;
+            pts.Add((u, v, psi2, -delta.Value));
+        }
         return (pts, true);
     }
 
@@ -782,6 +846,10 @@ public sealed partial class BicycleNav
         }
         if (latN < 2 || ub < 0 || ua < 0) return false;   // a mouth nobody brackets
         double mid = (rearEndM + frontEndM) / 2.0;
+        // TEMP #25 witness: the claim's own inputs, once per job - which flanks
+        // bracketed the mouth, where the mouth ends sit, and where dest lands.
+        var _flankDesc = string.Join(" ",
+            flanks.Select(p => $"#{p.Item4}@u{p.Item1:F2}/L{p.Item2:F2}").ToArray());
         _claimRearEndM = rearEndM;
         _claimFrontEndM = frontEndM;
         _claimMidM = mid;
@@ -792,6 +860,79 @@ public sealed partial class BicycleNav
         _claimX = seg.X1 + tx * mid + rx * _claimLatM;
         _claimY = seg.Y1 + ty * mid + ry * _claimLatM;
         double nx = seg.X1 + tx * mid, ny = seg.Y1 + ty * mid;
+        // #62: a tight bay's full tuck cannot clear from the lane base (measured: bay 25
+        // needs the reverse to start at v ~5.7, bay 26 at ~6.25, while the approach stops
+        // at ~5.25). The only place the car can move kerb-ward is during the approach,
+        // before it has passed the flanks - so when the lane base cannot reach the box
+        // line, aim the destination at the drifted lateral instead of the road base. The
+        // scan reuses the planner's own path + clearance check against flank bodies grown
+        // by PARK_DRIFT_MARGIN_M; the executor re-solves from the ACTUAL stop pose, so an
+        // approach that falls short degrades to today's partial tuck rather than clipping.
+        double v0NeedM = 0.0;
+        {
+            double rearExtM = Math.Min(0.0, ParkCornerOffsets().Min(c => c.Along));
+            double anchorAlongM = Math.Max(rearEndM, frontEndM) + PARK_STAGING_PAST_M - rearExtM;
+            double lineM = Math.Min(Config.ParkOffsetM(seg.Width), _claimLatM);
+            var scanBodies = new List<(double U, double V, double Psi, double Length, double Width)>();
+            foreach (var o in near)
+            {
+                if (o.State != CarState.Parked) continue;
+                var (bcx, bcy) = o.BodyCenter();
+                double u = (bcx - seg.X1) * tx + (bcy - seg.Y1) * ty;
+                double v = (bcx - seg.X1) * rx + (bcy - seg.Y1) * ry;
+                if (v <= 0.0) continue;
+                scanBodies.Add((u - anchorAlongM, v, 0.0,
+                                o.LengthM + 2 * PARK_DRIFT_MARGIN_M,
+                                o.WidthM + 2 * PARK_DRIFT_MARGIN_M));
+            }
+            Console.WriteLine($"   [PARKDRIFT] scan: rearEnd={rearEndM:F2} frontEnd={frontEndM:F2} " +
+                              $"rearExt={rearExtM:F2} anchor={anchorAlongM:F2} line={lineM:F2} " +
+                              $"bodies={scanBodies.Count}");
+            foreach (var b in scanBodies)
+                Console.WriteLine($"      flank u {b.U - b.Length / 2:F2}..{b.U + b.Length / 2:F2} " +
+                                  $"v {b.V - b.Width / 2:F2}..{b.V + b.Width / 2:F2}");
+            for (double v0c = 4.75; v0c < lineM - 0.30 && scanBodies.Count > 0; v0c += 0.25)
+            {
+                double dvC = lineM - v0c;
+                if (dvC < PARK_REVERSE_MIN_TUCK_M) continue;
+                bool clears = false;
+                string why = "";
+                foreach (double lockDeg in new[] { 38.0, 30.0 })
+                {
+                    // diagonal first: it is the family the search actually arms - the
+                    // two-arc swing is too long for a tight gap and clips the near flank
+                    // on its way out (measured: the scan saw no clear v0 while the
+                    // armed diagonal tuck cleared at 2.60 m).
+                    var (pts, ok) = ReverseParkPathDiagonal(v0c, 0.0, dvC,
+                                                            delta: Math.Radians(lockDeg));
+                    if (!ok)
+                        (pts, ok) = ReverseParkPath(v0c, 0.0, dvC,
+                                                    delta: Math.Radians(lockDeg));
+                    if (!ok) { why = $"lock {lockDeg:F0}: no geometry"; continue; }
+                    var w = PathClearsWhy(pts, scanBodies);
+                    if (w == "") { clears = true; break; }
+                    why = $"lock {lockDeg:F0}: {w}";
+                }
+                Console.WriteLine($"      v0={v0c:F2} dv={dvC:F2}: {(clears ? "CLEAR" : why)}");
+                if (clears) { v0NeedM = v0c; break; }
+            }
+        }
+        if (v0NeedM > PARK_DRIFT_FREE_V0_M)
+        {
+            // Raise the PULL-OVER offset, not the destination: the forward line runs at
+            // LaneOffsetOverrideM (measured: a straight approach at v 5.25 with no lateral
+            // convergence), so aiming _dest elsewhere does not move the car - the lane
+            // base does. The line shifts kerb-ward under the car and pure pursuit drifts
+            // it there over the remaining approach (a ~4 deg bend at crawl, measured
+            // 0.75 m over ~10 m for bay 25).
+            double ovr = _car.LaneOffsetOverrideM ?? 0.0;
+            if (v0NeedM > ovr + 0.05)
+            {
+                _car.LaneOffsetOverrideM = v0NeedM;
+                Console.WriteLine($"   [PARKDRIFT] the full tuck needs the reverse to start at " +
+                                  $"v {v0NeedM:F2} m, not from the lane base ({ovr:F2}) - pulling over there");
+            }
+        }
         _dest = (nx, ny);                       // the ask moves to the claim
         _parkBayShiftM = Math.Max(_parkBayShiftM, Math.Hypot(nx - oldDx, ny - oldDy));
         _parkBayAnchored = true;   // the spot is a real gap now (the old observable)
@@ -1212,13 +1353,46 @@ public sealed partial class BicycleNav
         // the car).
         double v0 = ((car.X - seg.X1) * rx + (car.Y - seg.Y1) * ry);
         double oPark = Config.ParkOffsetM(seg.Width);
-        // #62, measured twice and REJECTED: aiming the reverse at the claimed row's band
-        // (`ClaimLatM()`, v 8.35 m here) instead of the kerb formula (8.64 m). It arms a
-        // shallower tuck and still lands bay 24 at -226 cm, body 23 deg off parallel,
-        // because `oPark` also owns the kerb/run-out maths below - that 0.29 m is
-        // load-bearing there. The row's band is not a drop-in park target; the lever that
-        // remains is where the reverse STARTS laterally (1.35 m out in the lane today).
-        double dvFull = oPark - v0;
+        // #62, the lateral miss, fixed properly this time. The width formula is a KERB
+        // line: park flush against the kerb (width/2 - half car - clearance). A CLAIMED BAY
+        // is not at the kerb - it sits in a row of parked cars, and its box centreline is
+        // where the body must REST (ParkBoxMarginM judges the accept against that box).
+        // Measured on bay 24: the formula says v 8.64, the box line is v 8.34 - so a car
+        // that parks "flush" rests 0.30 m outboard of the box and its corner sticks 16 cm
+        // past the edge, forever failing the accept.
+        // The earlier attempt at this (2026-11-04, twice) failed for a different reason
+        // than the one it diagnosed: it moved the search target but left `OPark` on the
+        // kerb formula, so the executor converged to a line 0.3 m outboard of its own
+        // path's tail - the two owners fought and the car rested 23 deg off parallel.
+        // The fix is therefore TWO half-lines that must agree:
+        //   1. the search aims at the REST LINE: the midpoint of the sliver where the
+        //      box rule and the kerb rule both hold (measured 2026-11-06 - aiming at
+        //      the box centreline rested 43 cm off the kerb and failed the kerb check),
+        //   2. `OPark` is set to the winning plan's ACTUAL terminal lateral below, not to
+        //      the target it was asked for - the executor converges where the path ends.
+        // #62 (2026-11-06): the search aims at the REST LINE, not the box centreline.
+        // Measured on bay 24 (row width 19.4, kerb at v 9.70): box centre v 8.35,
+        // kerb-flush formula line v 8.64. A body resting AT the box centre sits 43 cm
+        // off the kerb (parking lane 2.7 m wide, car 1.8) and fails the kerb check
+        // (limit 0.30); at the formula line it rests 1 cm from the box's kerb-side edge
+        // - inside, but on the noise boundary. The sliver satisfying BOTH owners: axle v
+        // in [oPark-(MAX-CLEAR), claimCentre+BOX_MARGIN] = [8.50, 8.65]; aim its
+        // MIDPOINT (8.575) so a few cm of execution noise cannot flip either check.
+        // The executor's OPark stays the winning plan's ACTUAL tail (v0+dv): with the
+        // aim on the rest line, tail and target agree again - the invariant that kept
+        // the 2026-11-04 attempt from fighting itself (23 deg off parallel).
+        double oParkTarget = oPark;
+        if (ParkBayClaim() is (double gcx0, double gcy0, _, _, _, _, _))
+        {
+            double claimCentreV = (gcx0 - seg.X1) * rx + (gcy0 - seg.Y1) * ry;
+            double lowerV = oPark - (Config.PARK_KERB_MAX_GAP_M - Config.PARK_KERB_CLEARANCE_M);
+            double upperV = claimCentreV + Config.PARK_BOX_MARGIN_M;
+            if (lowerV < upperV)
+                oParkTarget = (lowerV + upperV) / 2.0;   // sliver midpoint: both owners hold
+            else
+                oParkTarget = Math.Min(oPark, claimCentreV);   // no sliver: old fallback
+        }
+        double dvFull = oParkTarget - v0;
         if (dvFull < PARK_REVERSE_MIN_TUCK_M) return false;
         // How far back the car has to travel in total: exactly the distance it
         // was staged past its parking spot, so the front bumper ends up on the
@@ -1241,13 +1415,74 @@ public sealed partial class BicycleNav
         // The demand, spelled out next to the refusals it produces: which lateral
         // the search was asked to deliver, from which pose, over how much staging.
         Console.WriteLine($"   [PARKASK] v0={v0:F2} m oPark={oPark:F2} m " +
-                          $"(tuck asked {oPark - v0:F2} m) psi0={Math.Degrees(psi0):F1} deg " +
+                          $"(aim {oParkTarget:F2} m, tuck asked {oParkTarget - v0:F2} m) " +
+                          $"psi0={Math.Degrees(psi0):F1} deg " +
                           $"stage={stage:F2} m row width={seg.Width:F2} m " +
                           $"flanks={bay?.Count ?? 0}");
+        // World coordinates of every actor in this decision, so a frame question is
+        // answered by reading one line instead of reconstructing it from a tape (#62).
+        {
+            var (dcx, dcy) = _dest ?? (0.0, 0.0);
+            Console.WriteLine($"   [PARKANCHOR] anchor=({car.X:F2},{car.Y:F2}) " +
+                              $"dest=({dcx:F2},{dcy:F2})");
+            if (bay is not null)
+            {
+                double carAlong = (car.X - seg.X1) * tx + (car.Y - seg.Y1) * ty;
+                foreach (var b in bay)
+                {
+                    double along = carAlong + b.U, lat = b.V;
+                    Console.WriteLine($"      body u={b.U:F2} v={b.V:F2} " +
+                                      $"world=({seg.X1 + tx * along + rx * lat:F2},"
+                                      + $"{seg.Y1 + ty * along + ry * lat:F2})");
+                }
+            }
+        }
+        // Which START LATERAL clears the full tuck, from THIS pose's frame? The staging
+        // stop is fixed by the mouth; if no v0 at the lane base clears, a kerb-ward
+        // pre-position (crab/jog) before the reverse is what makes the bay reachable
+        // (#62). Engine's own path + clearance, snug bodies - no pads.
+        if (bay is not null && bay.Count > 0)
+        {
+            var v0rows = new List<string>();
+            for (double v0c = v0; v0c <= oParkTarget - PARK_REVERSE_MIN_TUCK_M + 1e-9; v0c += 0.25)
+            {
+                double dvC = oParkTarget - v0c;
+                var row = new List<string>();
+                foreach (double lockDeg in new[] { 38.0, 30.0, 25.0 })
+                {
+                    var (candPts, candOk) = ReverseParkPathDiagonal(v0c, 0.0, dvC,
+                        delta: Math.Radians(lockDeg));
+                    if (!candOk)
+                    {
+                        var (two, twoOk) = ReverseParkPath(v0c, 0.0, dvC,
+                            delta: Math.Radians(lockDeg));
+                        candPts = two; candOk = twoOk;
+                    }
+                    row.Add(candOk ? PathClearsWhy(candPts, bay) : "no-geom");
+                }
+                v0rows.Add($"v0={v0c:F2}: {row[0]} | {row[1]} | {row[2]}");
+            }
+            Console.WriteLine("   [PARKV0] full-tuck clearance from this frame " +
+                              "(lock 38 | 30 | 25):\n     " +
+                              string.Join("\n     ", v0rows));
+        }
+        // Where the reverse has to END along the axis (#62): the claim centre projected
+        // on the row axis behind the pose, minus the axle-to-body-centre offset (the
+        // state carries the REAR AXLE). Computed BEFORE the candidate search because a
+        // candidate's legality now depends on it: a plan whose counter-turn only settles
+        // AFTER this point cannot be trimmed (see PARK_TRIM_MAX_CROSS_DEG) and its
+        // endpoint would rest metres past the box.
+        double goalAxleM = double.NaN;
+        if (_dest is (double dgx, double dgy))
+        {
+            var (qcx, qcy) = car.BodyCenter();
+            goalAxleM = ((dgx - car.X) * tx + (dgy - car.Y) * ty)
+                      - ((qcx - car.X) * tx + (qcy - car.Y) * ty);
+        }
         foreach (double deltaDeg in REVERSE_STEER_CANDIDATE_DEGS)
         {
             double delta = Math.Radians(deltaDeg);
-            double dvT = oPark - v0;
+            double dvT = oParkTarget - v0;
             while (dvT >= PARK_REVERSE_MIN_TUCK_M - 1e-9)
             {
                 bool useDiag = true;
@@ -1334,6 +1569,40 @@ public sealed partial class BicycleNav
                         // of the tape entirely (#62). Capped, or one search buries the log
                         // (measured: 428 lines for three bays).
                         if (refusals.Count <= 24) Console.WriteLine($"   [PARKNO] {why}");
+                    }
+                }
+                // #62: a plan whose counter-turn only settles AFTER the goal axle is not
+                // parkable, however legal its sweep: the trim refuses crossings swung
+                // harder than PARK_TRIM_MAX_CROSS_DEG, and keeping the endpoint instead
+                // rests the car metres PAST the box (measured in bay 24: the dv 3.32
+                // winner crossed at -12.7°, the trim refused, corner read -204 cm). The
+                // search must reject it here so a shape that settles on or before the
+                // goal can win; if none exists at this tuck, the loop steps down.
+                // A SMALL overshoot (<= 0.30 m) is exempt: there the counter-turn has
+                // essentially completed (yaw ~ 0 at the natural endpoint), and trimming
+                // it back to the goal axle would lock in the executor's heading lag as
+                // the rest yaw (measured bay 24: trim at -1.5° plan -> 5.3° rest).
+                if (ok && cand.Count > 1 && !double.IsNaN(goalAxleM) &&
+                    cand[^1].U < goalAxleM - 0.30)
+                {
+                    double crossPsi = double.NaN;
+                    for (int i = 0; i < cand.Count - 1; i++)
+                        if (cand[i].U >= goalAxleM && cand[i + 1].U <= goalAxleM)
+                        {
+                            double f = (cand[i].U - goalAxleM) / (cand[i].U - cand[i + 1].U);
+                            crossPsi = cand[i].Psi + f * (cand[i + 1].Psi - cand[i].Psi);
+                            break;
+                        }
+                    if (!double.IsNaN(crossPsi) &&
+                        Math.Abs(Math.Degrees(crossPsi)) > Config.PARK_TRIM_MAX_CROSS_DEG)
+                    {
+                        ok = false;
+                        string why = $"lock {deltaDeg:F0}° tuck {dvT:F2} m via " +
+                                     $"{(useDiag ? "diag" : "two")}: crosses the goal axle " +
+                                     $"at {Math.Degrees(crossPsi):F1}° (> {Config.PARK_TRIM_MAX_CROSS_DEG:F0}°) - " +
+                                     "settles after the box, cannot be trimmed there";
+                        if (refusals.Count < 24) refusals.Add(why);
+                        Console.WriteLine($"   [PARKNO] {why}");
                     }
                 }
                 double tooLong = cand.Count > 0 ? -cand[^1].U : 0.0;
@@ -1449,23 +1718,60 @@ public sealed partial class BicycleNav
         // Measured in the 2.5 m bay: goal -6.02 m ⇒ axle target -7.30 m, while the old
         // run-out ended the path at -9.89 m (the whole staging distance): 2.59 m past
         // the goal, the car touching the rear flank and 2.21 m short of the box centre.
-        double goalAxleM = double.NaN;
-        if (_dest is (double dgx, double dgy))
+        // (goalAxleM itself is computed before the candidate search above.)
+        // #62: when the arcs OVERSHOOT the goal along the axis (uEnd < goalAxle), a tail
+        // can only push the endpoint deeper - away from the box. Measured in the 6.4 m
+        // gap: arcs ended at u -5.97 with the goal axle at -5.43, the 0.30 m tail carried
+        // the rest pose 0.84 m past the goal, and the rear corner read -30 cm outside.
+        // The endpoint belongs ON the goal: truncate the path where it crosses
+        // u = goalAxle. There the body centre sits exactly on the claim centre (all four
+        // corners inside by construction) and the crossing yaw is small enough to rest at
+        // - which is why the trim is refused when the crossing still swings hard.
+        bool trimmedToGoalM = false;
+        // Only a LARGE overshoot gets trimmed: a small one (<= 0.30 m) leaves the
+        // natural endpoint, where the counter-turn finished and the heading has room
+        // to converge before the stop (see the matching search-side exemption).
+        if (dv != 0.0 && !double.IsNaN(goalAxleM) && uEnd < goalAxleM - 0.30)
         {
-            var (qcx, qcy) = car.BodyCenter();
-            goalAxleM = ((dgx - car.X) * tx + (dgy - car.Y) * ty)
-                      - ((qcx - car.X) * tx + (qcy - car.Y) * ty);
+            // Scans the adjacent pairs from the end: the LAST crossing of the goal axle
+            // is where a reversed car would meet it. (Starts at Count-2: the pair is
+            // (i, i+1), and the gate above guarantees the last point sits past the goal.)
+            for (int i = pts.Count - 2; i > 0; i--)
+            {
+                if (!(pts[i].U >= goalAxleM && pts[i + 1].U <= goalAxleM)) continue;
+                double f = (pts[i].U - goalAxleM) / (pts[i].U - pts[i + 1].U);
+                var a = pts[i];
+                var b = pts[i + 1];
+                double psiAt = a.Psi + f * (b.Psi - a.Psi);
+                if (Math.Abs(Math.Degrees(psiAt)) > Config.PARK_TRIM_MAX_CROSS_DEG)
+                {
+                    car.RecordDecision(_navTime,
+                        $"[PARKTRIM] crossing the goal axle at {Math.Degrees(psiAt):F1}° - " +
+                        "too swung to rest there, keeping the endpoint");
+                    break;
+                }
+                pts.RemoveRange(i + 1, pts.Count - i - 1);
+                pts.Add((goalAxleM, a.V + f * (b.V - a.V), psiAt, b.Steer));
+                trimmedToGoalM = true;
+                Console.WriteLine($"   [PARKTRIM] arcs overshoot the goal axle by " +
+                                  $"{-uEnd + goalAxleM:F2} m - truncating at u {goalAxleM:F2} " +
+                                  $"(yaw {Math.Degrees(psiAt):F1}°, v {a.V + f * (b.V - a.V):F2}) so the rest pose sits on the claim centre");
+                break;
+            }
+            if (trimmedToGoalM) { uEnd = pts[^1].U; vEnd = pts[^1].V; }
         }
         // The goal's own position on the line is computed once the line exists - see
         // ReverseParkState.GoalS - because the executor stops on that arc-length, not on
         // the plan's u (#62: two fixes aimed at the plan's own axis were wrong, the
         // second of them stopping the reverse the moment the LATERAL error closed).
-        double tail = dv == 0.0
-            ? Math.Min(PARK_REVERSE_TAIL_M, PARK_BACKUP_MAX_M)
-            : double.IsNaN(goalAxleM)
-                ? Math.Max(PARK_REVERSE_MIN_TAIL_M, stage + uEnd)   // no goal: the old rule
-                : Math.Max(PARK_REVERSE_MIN_TAIL_M, uEnd - goalAxleM);
-        if (dv != 0.0 && !double.IsNaN(goalAxleM) &&
+        double tail = trimmedToGoalM
+            ? 0.0   // the endpoint IS the goal: a tail would only move it off again
+            : dv == 0.0
+                ? Math.Min(PARK_REVERSE_TAIL_M, PARK_BACKUP_MAX_M)
+                : double.IsNaN(goalAxleM)
+                    ? Math.Max(PARK_REVERSE_MIN_TAIL_M, stage + uEnd)   // no goal: the old rule
+                    : Math.Max(PARK_REVERSE_MIN_TAIL_M, uEnd - goalAxleM);
+        if (dv != 0.0 && !double.IsNaN(goalAxleM) && !trimmedToGoalM &&
             uEnd - goalAxleM < PARK_REVERSE_MIN_TAIL_M - 1e-9)
             car.RecordDecision(_navTime,
                 $"[PARKPLAN] arcs overshoot the goal by " +
@@ -1537,7 +1843,12 @@ public sealed partial class BicycleNav
             CrabM = crabUsedM,
             RoadH = roadH,
             VTarget = oPark - (oPark - v0 - dv),   // reached kerb offset
-            OPark = oPark,
+            // The line the executor converges to: where THIS plan's tail actually runs
+            // (v0 + the winning tuck). The search now aims at the rest line (see above),
+            // so a full-tuck plan ends ON it; a legality-reduced tuck ends short of it,
+            // and the re-solve from the actual pose bridges the remainder with a small
+            // tuck that lands exactly on the line - measured, eOff +0.02 at rest.
+            OPark = v0 + dv,
             Tx = tx, Ty = ty, Rx = rx, Ry = ry,
             Seg = car.SegIdx,
         };
@@ -1648,7 +1959,15 @@ public sealed partial class BicycleNav
         var seg = _network.Segments[st.Seg];
         double vCar = ((car.X - seg.X1) * st.Rx + (car.Y - seg.Y1) * st.Ry);
         double eOff = vCar - st.OPark;
-        bool converged = Math.Abs(eOff) < 0.06 && Math.Abs(psiCar) < Math.Radians(1.5);
+        // The band is the NOISE BUDGET of the rest pose: on the parking avenue the
+        // box gives 30 cm per side and the kerb sliver [8.50, 8.65] sits inside it,
+        // so a rest line at the sliver midpoint (8.575) tolerates only ~7.5 cm of
+        // lateral error before a box corner leaves. Measured: the pursuit settles
+        // +2..+4 cm KERB-WARD of OPark, so a 6 cm band let the front kerb-side
+        // corner rest 6.5 cm outside the box (corner lat +1.265 vs limit 1.20) while
+        // reporting eOff +0.04 "converged". A 3 cm band keeps both owners holding at
+        // any point of it: worst case v 8.605 -> kerb gap 0.195 / box +4.5 cm.
+        bool converged = Math.Abs(eOff) < 0.03 && Math.Abs(psiCar) < Math.Radians(1.5);
         // --- longitudinal: creep backwards; the progressive roll-out (dRem/tau)
         // brakes to a stop exactly at the end of the line. Do NOT stop on
         // `converged` alone: with a shallow tuck the pose converges at the END
@@ -1686,14 +2005,89 @@ public sealed partial class BicycleNav
         double boxMarginM = ParkBoxMarginM();
         bool inBay = psiDeg <= PARK_ACCEPT_PSI_DEG && Math.Abs(eOff) <= PARK_ACCEPT_OFF_M &&
                      (double.IsNaN(boxMarginM) || boxMarginM >= 0.0);
+        // #62 owner rule: the bay rectangle is the goal - every corner of the body
+        // inside it means parked, whatever the residual yaw. Measured in the 9.4 m
+        // gap at real time: the reverse ended with all four corners +2 cm inside but
+        // ~8° off the kerb, so `inBay` (yaw-gated) refused to finish, the shimmy took
+        // over and the job never latched `parked` while the car sat correctly in the
+        // box. Containment has one owner - ParkBoxMarginM - and it outranks the yaw.
+        bool inBox = !double.IsNaN(boxMarginM) && boxMarginM >= 0.0;
+        // #62 owner rule as a STANDING invariant, not an exit condition: the body is
+        // fully inside the claimed box and the car has effectively stopped - that IS
+        // parked, whatever the phase bookkeeping says. Measured in the 9.4 m gap: the
+        // first rest pose sat -49 cm outside, a partial shimmy creep then carried the
+        // body INTO the box between standstills, and no exit branch ever re-checked
+        // containment - the car sat correctly parked while the phase stayed `reverse`
+        // until the scenario timed out. Containment has one owner (ParkBoxMarginM);
+        // this is where that ownership outranks the bookkeeping.
+        // dRem <= 0.3: only near the path's end, where the driver also sees
+        // "at destination" (measured latching mid-path: the driver then re-accelerated
+        // toward the still-ahead flag and the suite's brake-to-stop never saw <1 km/h).
+        // No dRem gate, no speed gate: stopping is always safe (a body fully
+        // inside its own box cannot collide by standing still), and `Update()`
+        // keeps a Parked car parked for good - the driver never re-arms. Measured
+        // with a dRem<=0.3 gate: the body crossed into the box at dRem 1.05 m on a
+        // re-solved short path, the latch refused, and the finish waited out the 5 s
+        // stall timer - after the suite's own 6 s standstill timeout had ended the
+        // episode: trace ['driving','parking'] on a car inside the box.
+        // The eOff gate is the one that matters for QUALITY: measured latching at
+        // raw box entry, the body crossed in ~0.25 m short of the bay line and the
+        // run failed "parked too far from the kerb: right flank 41/43 cm (limit 30)"
+        // - inside the box, wrong place. The witness shows the same car passing
+        // through inBox=true at eOff +0.02 m on its way in; latching THERE puts the
+        // flank ~16-20 cm off the kerb and both checks pass. A body inside the box
+        // but off the line keeps working (shimmy / stall ladder) instead of being
+        // declared parked in a bad pose.
+        // TEMP #62 witness: every tick near the box boundary.
+        if (boxMarginM > -0.15 && _navTime - _pkBoxWitnessT >= 0.5)
+        {
+            _pkBoxWitnessT = _navTime;
+            Console.WriteLine($"[PARKBOX] S={S:F2} dRem={dRem:F2} margin={boxMarginM:F3} " +
+                              $"psi={psiDeg:F1} eOff={eOff:F2} sp={car.Speed:F3} inBox={inBox}\n");
+        }
+        // Yaw-gated: latching while the heading is still unwinding locks in a swung
+        // rest pose (measured bay 24: latched at 5.3° -> kerb front station 50 cm).
+        // With the gate, execution keeps converging until it is near-parallel or the
+        // path ends - the path-end finish still accepts inBox unconditionally.
+        if (inBox && Math.Abs(eOff) <= 0.15 && Math.Abs(psiDeg) <= 3.0 &&
+            _navTime - _pkBoxLatchT > 0.5)
+        {
+            _pkBoxLatchT = _navTime;
+            FinishReversePark($"standing in the bay at {psiDeg:F1}° - all four corners " +
+                              $"inside the box, {dRem:F2} m from path end, eOff {eOff:F2} m (#62)");
+            return;
+        }
         // #36: converged (the planner's exact point) OR standing in the bay within the
         // tolerances above. Not replacing the old condition — a car that hits it is
         // still finished — but a car that cannot reach it any more stops being held.
-        bool acceptable = converged || inBay;
+        bool acceptable = converged || inBay || inBox;
         if (_parkShimmy)
             vTarget = Math.Min(PARK_REVERSE_CREEP_M_S, PARK_SHIMMY_M - _parkShimmyDist);
+        else if (_pkSettle)
+        {
+            // SETTLE: forward into the box; the timeout below gives a pinned creep back
+            // to the normal ladder instead of letting it run on.
+            vTarget = PARK_REVERSE_CREEP_M_S;
+            _pkSettleT += dt;
+            if (_pkSettleT >= PARK_SETTLE_TIMEOUT_S)
+            {
+                _pkSettle = false;
+                car.RecordDecision(_navTime,
+                    "[PARK] SETTLE timed out - the body is still outside its box, so the " +
+                    "normal ladder takes over");
+            }
+        }
         else if (dRem <= 0.05) vTarget = 0.0;
         else vTarget = -Math.Min(PARK_REVERSE_CREEP_M_S, dRem / PARK_STOP_TAU);
+        // TEMP #62: the last metres of the reverse, tick by tick.
+        if (dRem < 0.3 && _navTime - _pkEndWitnessT >= 0.5)
+        {
+            _pkEndWitnessT = _navTime;
+            Console.WriteLine($"   [PARKEND] S={S:F2} tot={refLine.Total:F2} dRem={dRem:F3} " +
+                              $"sp={car.Speed:F3} vt={vTarget:F3} eOff={eOff:F2} psi={Math.Degrees(psiCar):F1} " +
+                              $"held={_parkHeld} shimmy={_parkShimmy} shimD={_parkShimmyDist:F2} " +
+                              $"contact=#{car.ContactWith} inContact={car.InContact} crash={car.CrashEpisodes}");
+        }
         if (_navTime - _pkLastRecT >= 1.0)
         {
             _pkLastRecT = _navTime;
@@ -1799,6 +2193,21 @@ public sealed partial class BicycleNav
             double psiPlan = Math.Abs(rp.Psi[idx]);
             if (Math.Abs(psiCar) > psiPlan + Math.Radians(PARK_PSI_FOLLOW_TOL_DEG))
                 delta = psiCar >= 0.0 ? Math.Max(0.0, delta) : Math.Min(0.0, delta);
+        }
+        if (_pkSettle)
+        {
+            // SETTLE steering: pure pursuit of the box centre — mild proportional steer
+            // on the direction error, bounded well below MAX_STEER so the creep stays a
+            // nudge, not a swing. Placed AFTER the plan-follow guard on purpose: the armed
+            // micro-line's arc asks for a wheel this pose does not need. The collision cap
+            // and the envelope easing below still own safety.
+            if (ParkBayClaim() is (double ccx, double ccy, _, _, _, _, _))
+            {
+                var (bcx, bcy) = car.BodyCenter();
+                double want = Math.Atan2(ccx - bcx, ccy - bcy);
+                double err = Math.Radians(Math.WrapDeg(Math.Degrees(want) - car.Heading));
+                delta = Math.Max(-0.26, Math.Min(0.26, 1.5 * err));
+            }
         }
         delta = Math.Max(-MAX_STEER, Math.Min(MAX_STEER, delta));
         // The feedback trajectory is NOT the checked two-arc path, so enforce
@@ -1962,8 +2371,38 @@ public sealed partial class BicycleNav
                 Console.WriteLine($"[RVWARN] corner out of envelope: [{worstK:F2}, {worstO:F2}] " +
                                   $"lims [{centreLim:F2}, {kerbLim:F2}]");
         }
+        // TEMP #62 witness: the standstill that ends (or should end) the reverse.
+        if (Math.Abs(car.Speed) < PARK_STANDSTILL_M_S + 0.01 &&
+            _navTime - _pkStandWitnessT >= 2.0)
+        {
+            _pkStandWitnessT = _navTime;
+            Console.WriteLine($"   [PARKSTOP] S={S:F2} tot={refLine.Total:F2} dRem={dRem:F2} " +
+                              $"eOff={eOff:F2} psi={psiDeg:F1} inBay={inBay} margin={boxMarginM:F2} " +
+                              $"held={_parkHeld} shimmy={_parkShimmy} retried={_parkRetried}");
+        }
+        // SETTLE (T_203/T_204): any standstill with the angle nearly closed and the body
+        // just outside its box. Placed BEFORE both the end-of-line block and the hold/stall
+        // ladder on purpose: T_204's rest pose was pinned MID-LINE by the envelope (dRem
+        // 0.6 m, held 296×), so a line-end-only trigger never saw it — the pose is defined
+        // by the box and the angle, not by where the car sits on its line.
+        if (Math.Abs(car.Speed) < PARK_STANDSTILL_M_S && !_pkSettle && _pkSettleTries < 1 &&
+            !inBox && !inBay && Math.Abs(psiDeg) <= PARK_SETTLE_PSI_DEG &&
+            boxMarginM > -PARK_SETTLE_MAX_MARGIN_M)
+        {
+            _pkSettleTries++;
+            _pkSettle = true;
+            _pkSettleT = 0.0;
+            car.RecordDecision(_navTime,
+                $"[PARK] SETTLE #{_pkSettleTries} - standing at {psiDeg:F1}° with the " +
+                $"body {-boxMarginM * 100:F0} cm outside its box: creep forward toward " +
+                "the box centre and let the latch finish");
+            return;
+        }
         if ((acceptable || dRem <= 0.05) && Math.Abs(car.Speed) < PARK_STANDSTILL_M_S)
         {
+            // SETTLE owns its pose until its own timeout exits it: the ladder below would
+            // otherwise spend the attempt counter on a pose the creep is already fixing.
+            if (_pkSettle) return;
             if (_parkRetried && _parkAttempts < PARK_MAX_ATTEMPTS)
             {
                 // The backup WAS the second attempt's first half: hand the manoeuvre
@@ -1994,7 +2433,7 @@ public sealed partial class BicycleNav
             // saturates (`sat=True`, yaw pinned at 22.9°), the body reaches the bay
             // line (off=-0.26 m) with dRem=1.1 m of reverse left, and this branch then
             // FINISHED the job at 9.8° off the kerb.
-            if (!inBay && _parkShimmyTries < PARK_SHIMMY_TRIES &&
+            if (!inBox && !inBay && _parkShimmyTries < PARK_SHIMMY_TRIES &&
                 Math.Abs(eOff) <= PARK_ACCEPT_OFF_M + PARK_SHIMMY_OFF_M)
             {
                 _parkShimmyTries++;
@@ -2007,7 +2446,9 @@ public sealed partial class BicycleNav
                     "angle, then back in (§1b)");
                 return;
             }
-            FinishReversePark(converged ? "standing at the kerb" :
+            FinishReversePark(inBox ?
+                $"standing in the bay at {psiDeg:F1}° - all four corners inside the box (#62)" :
+                converged ? "standing at the kerb" :
                 $"standing in the bay, {psiDeg:F1}° off the kerb - accepted within " +
                 $"{PARK_ACCEPT_PSI_DEG:F0}° (#36)");
             return;
@@ -2041,7 +2482,13 @@ public sealed partial class BicycleNav
             // cannot sweep further, the front neighbour is not the blocker, and 13 deg of
             // angle are all that stands between this pose and the accepted 7 deg.
             // Unwind first, and only then fall through to the abandon / give-up ladder.
-            if (_parkShimmyTries < PARK_SHIMMY_TRIES && psiDeg > PARK_ACCEPT_PSI_DEG &&
+            // `!_parkShimmy`: a shimmy that is ALREADY running but pinned (measured in
+            // the 6.4 m gap: the forward creep sits nose-to-nose with the far flank and
+            // the avoidance cap holds speed at 0 every substep) must not re-trigger
+            // itself off this same stall - two resets per job, a fresh pair of tries per
+            // re-solved job, and the car shimmied in place until the scenario timed out.
+            if (!_parkShimmy &&
+                _parkShimmyTries < PARK_SHIMMY_TRIES && psiDeg > PARK_ACCEPT_PSI_DEG &&
                 Math.Abs(eOff) <= PARK_ACCEPT_OFF_M + PARK_SHIMMY_OFF_M)
             {
                 _parkShimmyTries++;
@@ -2069,8 +2516,9 @@ public sealed partial class BicycleNav
                                   $"{psiDeg:F1}° off the kerb, " +
                                   $"{Math.Abs(eOff):F2} m off the bay line");
             }
-            else if (inBay)
+            else if (inBay || inBox)
             {
+                Console.WriteLine($"[PARKBOX] LADDER-FINISH margin={boxMarginM:F3} inBox={inBox} inBay={inBay}\n");
                 FinishReversePark($"held at {psiDeg:F1}° for {PARK_STALL_S:0} s - inside " +
                                   $"the bay's tolerances, so it is parked");
             }

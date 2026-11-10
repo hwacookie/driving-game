@@ -3605,6 +3605,16 @@ class TurnTester:
                     elif t_now - stand_sim >= 1.5 and (
                             state.get('state') == 'parked' or t_now - stand_sim >= 6.0):
                         reached_expected_segment = True
+                        if state.get('state') == 'parked':
+                            # This break exits BEFORE the flag-arrival path can run its
+                            # brake-to-stop confirmation, so without this the run failed
+                            # "never came to a clean stop" on a car that sat at <0.4 km/h
+                            # for 1.5 s with the sim declaring it parked. Sustained rest
+                            # plus the sim's own `parked` IS the clean stop, verified by
+                            # this detector instead of _brake_to_stop. The 6 s timeout
+                            # branch stays False: a car that rests without ever parking
+                            # did not stop clean.
+                            stopped_ok = True
                         print(f"\n   \U0001f7e9 [{_wts()}] Standing in the bay at sim "
                               f"t={t_now:.1f} s - the bay rectangle is the goal, so the "
                               "drive is over here")
