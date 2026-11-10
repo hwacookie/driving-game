@@ -507,6 +507,13 @@ public static class TestMaps
         b.Road("cross_w", "cross_center");
         b.Road("cross_center", "cross_e");
         b.Start("crossroads_from_north", "cross_n");
+        // issue #87: `fig8_row_short` moved HERE (same name, a different arm):
+        // the test became a COMPLETED pass with a place rule, and it needs ~105 m
+        // of ONE straight chord into a real mouth - this arm is 180.0 m of a single
+        // chord into the degree-4 crossroads cross_center. The fig-8 diagonal it
+        // used to start on bends every ~40 m, so a legal cycle does not exist on
+        // it (see the stage note in tests/test_turning.py).
+        b.Start("fig8_row_short", "cross_n", facing: "cross_center");
         b.Start("crossroads_from_south", "cross_s");
         b.Start("crossroads_from_west", "cross_w");
         b.Start("crossroads_from_east", "cross_e");
@@ -752,7 +759,13 @@ public static class TestMaps
         // It gets its own start name on purpose: a scenario's identity IS its
         // start point (tests/test_turning.py, the anchor note), and two tests
         // on one name would share one results slot and one role lookup.
-        b.Start("fig8_row_short", "xing_n31", facing: "xing_n32");
+        // (issue #87) this row test no longer starts here: a legal cycle needs
+        // ≥ ~79 m of room before a mouth, and the fig-8 diagonal bends every ~40 m
+        // (xing_n31→…→xing_c is 29.0+34.0+38.6+41.9+43.7 m of separate chords),
+        // so a borrow anywhere on it ends up flagged wrong-side at a bend. It now
+        // starts on the crossroads arm ("cross_n", see the note in that tile) -
+        // the start name stays the scenario's, only the road moves.
+        // b.Start("fig8_row_short", "xing_n31", facing: "xing_n32");
 
         // --- Tile (3,3): Un-signed figure-8 (real degree-4 crossing) ---
         // Same geometry as tile (2,3) but with NO signs at the crossing, so

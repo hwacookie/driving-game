@@ -352,6 +352,44 @@ public class Car
     /// it wrong-side. A world point has no such seam.</summary>
     public double PassX { get; internal set; }
     public double PassY { get; internal set; }
+    /// <summary>The FAR end of what is being passed - the front vehicle of a row
+    /// (docs §9, "the obstruction is a train"). <see cref="PassX"/> names the car I
+    /// follow and decides when the borrow may BEGIN; the borrow ENDS when the body
+    /// has cleared this one. They are two different cars whenever the obstruction is
+    /// a row, and using the near car for both bounds killed the commitment while the
+    /// car was still behind the row's rear (measured on fig8_row: the named car was
+    /// the front tractor 24 m ahead, the IN bound of a 10 km/h car is 20 m, so
+    /// "not yet time to leave my lane" voided a borrow that was already 3 m out).</summary>
+    public double PassFrontX { get; internal set; }
+    public double PassFrontY { get; internal set; }
+    public double PassFrontLengthM { get; internal set; }
+    /// <summary>R32 (owner decision 2026-11-04): the speed a pass this car is
+    /// committed to is PLANNED and DRIVEN at - <see cref="CruiseMemoryMps"/> plus
+    /// the overtaking allowance. 0 = no pass running. The nav reads it as a speed
+    /// DEMAND (its speed profile can only cut the cruise ceiling down, never raise
+    /// it), and it is asked again from nothing every substep, so a car that stops
+    /// passing stops demanding on that tick. The avoidance caps still run after
+    /// the driver's own logic (SimEngine), so an unsafe pass is braked by them -
+    /// this field only ever says what the driver is asking for.</summary>
+    public double PassDemandMps { get; internal set; }
+    /// <summary>The speed this driver drives when NOTHING is in its way: the fastest
+    /// speed it has held recently, slipping away slowly (see the update in
+    /// <see cref="Update"/>). Why a memory and not a limit: this sim has no road
+    /// speed limit at all - <c>Config</c> keeps a maximum per VEHICLE MODEL and R25
+    /// clamps to that - so "the maximum allowed speed" read literally lets a Mercedes
+    /// pass at 200 km/h (measured, this branch: it left the road). What a driver
+    /// passing a tractor wants is the speed it came with. A road <c>maxspeed</c> from
+    /// the map would replace this the day the map carries one, and R32's pass speed is
+    /// the only reader - so that swap stays one expression.</summary>
+    public double CruiseMemoryMps { get; internal set; }
+    /// <summary>Why this car is not committing a pass right now ("r38:mouth",
+    /// "r32:7", "r37:4", "" = committing). On the car, not in a per-call map,
+    /// because CarCollisions runs once per SUBSTEP and R20's "record when it
+    /// CHANGES" has to survive the tick boundary to change anything.</summary>
+    public string R32Why { get; internal set; } = "";
+    /// <summary>The guest car R39 last spoke about - the same dedup pair as
+    /// <see cref="R32Why"/>, one line per change of the situation.</summary>
+    public int R39GuestUid { get; internal set; } = -1;
     /// <summary>Monotonic count of CRASH EPISODES this car has been part of
     /// (one per contact episode, the same event that logs the "[R2] CRASH"
     /// decision). InContact is transient - it is only set while the pair is
@@ -404,6 +442,12 @@ public class Car
 
     // --- Main Update ---
 
+    /// <summary>How fast <see cref="CruiseMemoryMps"/> forgets: 1 m/s per 10 s spent
+    /// below it. Slow enough that a 20 s crawl behind a tractor does not talk the
+    /// driver out of the pass it came for; fast enough that a genuinely slow vehicle
+    /// (a tractor staged at 10 km/h) never demands a pass speed it cannot hold.</summary>
+    internal const double CruiseMemoryDecayMpsPerS = 0.1;
+
     public void Update(double dt, RoadNetwork network, ControlInput control)
     {
         // Update visual state
@@ -421,6 +465,14 @@ public class Car
         {
             UpdateFreeMode(dt, control, network);
         }
+
+        // R32's memory of the unobstructed speed (see CruiseMemoryMps): hold the
+        // fastest recent speed and let it slip at a walking rate. Clamped to the
+        // car's own ceiling, because it feeds the pass demand and the allowance
+        // would otherwise compound itself upward tick after tick.
+        CruiseMemoryMps = Math.Min(EffectiveTopMps,
+                                   Math.Max(Speed, CruiseMemoryMps
+                                                    - CruiseMemoryDecayMpsPerS * dt));
 
         // Update trail
         if (TrailEnabled)
