@@ -26,10 +26,25 @@ if [ "$PRIMARY" != "$HERE" ]; then
   cd "$PRIMARY"
   echo "==> landing in the primary worktree: $PWD"
 fi
+# Flags come FIRST: `--force` used to be read from $2, so `merge.sh 90 --force`
+# worked only by accident and any other second argument was silently ignored.
+FORCE=""
+while [ "${1:-}" = "--force" ]; do FORCE=1; shift; done
 N="${1:-$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')}"
 if [ -n "${1:-}" ]; then
-  BR=$(gh pr list --state open --head "fix-$1" --json headRefName -q '.[0].headRefName // empty')
-  [ -n "$BR" ] || { echo "!! no open PR for issue #$1"; exit 1; }
+  # `gh pr list --head <name>` matches the head ref EXACTLY (measured on gh
+  # 2.102.0): "fix-90", "fix-90*" and "*fix-90*" all answer nothing while the
+  # open PR's head is `fix-90-no-space-switch-on-launch`. So the issue number
+  # cannot be turned into a branch by prefix - list the open PRs as JSON and
+  # match our own naming rule (`fix-<n>-…`, or exactly `fix-<n>`) here. The
+  # issues/N/pulls endpoint is NOT an alternative: it 404s even for an issue
+  # whose PR was merged (measured: issues/90/pulls -> 404).
+  N="$1"
+  BR=$(gh pr list --state open --json headRefName,number \
+       | tr -d '\n' | grep -oE '"headRefName":"fix-'"$N"'(-[^"]*)?"' \
+       | head -1 | sed 's/.*:"//; s/"$//')
+  [ -n "$BR" ] || { echo "!! no open PR for issue #$N (no open branch matching fix-$N[-slug])"; exit 1; }
+  echo "==> issue #$N -> open PR branch $BR"
 fi
 [ "$BR" != "main" ] || { echo "!! nothing to merge from main"; exit 1; }
 # --- the CI gate: never land a PR that GitHub did not build and unit-test.
@@ -37,9 +52,25 @@ fi
 # "godot client tests"; --watch blocks until they report. A PR with NO checks
 # at all means the workflow has not run yet (or protection is off) - that is
 # said out loud rather than treated as a pass.
-FORCE="${2:-}"
-if [ "$FORCE" != "--force" ]; then
+if [ -z "$FORCE" ]; then
   echo "==> CI gate on $BR: waiting for the required checks (build + unit tests)..."
+  # Wait for the run to REGISTER before watching. A fix branch must be current
+  # with main to merge at all (branch protection refuses otherwise: "the head
+  # branch is not up to date with the base branch"), so a rebase + force-push is
+  # the normal path into this script - and right after such a push the new
+  # workflow run has not appeared yet, `gh pr checks` answers "no checks
+  # reported", exits non-zero, and the gate below would refuse a PR that turns
+  # green a minute later. Poll the PLAIN form (it prints pending rows without
+  # blocking) until something is reported, then hand over to --watch.
+  for i in $(seq 1 12); do
+    probe=$(gh pr checks "$BR" 2>&1 || true)
+    if printf '%s' "$probe" | grep -qi "pending\|pass\|fail"; then
+      echo "    CI registered after $((i * 5))s: $(printf '%s' "$probe" | awk -F'\t' '{printf "%s=%s ", $1, $2}')"
+      break
+    fi
+    [ "$i" = "12" ] && echo "    no CI run seen after 60s - the gate below will say so"
+    sleep 5
+  done
   if ! out=$(gh pr checks "$BR" --watch --interval 20 2>&1); then
     printf '%s\n' "$out" | tail -12
     if printf '%s' "$out" | grep -qi "no checks\|none found"; then
