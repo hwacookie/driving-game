@@ -156,10 +156,17 @@ Rebased-onto: $BASE" "$BR"
     grep -q '^gh-issue:' "$f" && { echo "!! $f already published: $(grep -m1 '^gh-issue:' "$f")"; exit 1; }
     TITLE=$(head -1 "$f" | sed 's/^# L[0-9]* · //')
     BODY=$(tail -n +2 "$f")
-    url=$(gh issue create --title "$TITLE" --body "$BODY" --json number,url --jq '"#\(.number) \(.url)"')
-    echo "==> published $f as $url"
-    printf '\ngh-issue: %s\n' "${url%% *}" >> "$f"
-    echo "    now: scripts/fix.sh ${url:#}  then cherry-pick / re-apply the recorded change,"
+    # Same defect as scripts/issue.sh (#43): `gh issue create` has no --json/--jq in
+    # the installed gh, so this died with "unknown flag: --json". The plain command
+    # prints one line - the new issue's URL, ending in its number.
+    url=$(gh issue create --title "$TITLE" --body "$BODY")
+    num=${url##*/}
+    case "$num" in
+      ''|*[!0-9]*) echo "!! could not read an issue number from: $url" >&2; exit 1 ;;
+    esac
+    echo "==> published $f as #$num $url"
+    printf '\ngh-issue: #%s\n' "$num" >> "$f"
+    echo "    now: scripts/fix.sh $num  then cherry-pick / re-apply the recorded change,"
     echo "    and let scripts/pr.sh + scripts/merge.sh run it through real CI."
     ;;
 
