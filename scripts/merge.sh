@@ -34,10 +34,37 @@ if [ "$PRIMARY" != "$HERE" ]; then
   cd "$PRIMARY"
   echo "==> landing in the primary worktree: $PWD"
 fi
-# Flags come FIRST: `--force` used to be read from $2, so `merge.sh 90 --force`
-# worked only by accident and any other second argument was silently ignored.
+# Flags may come in ANY position. The first fix for this ("flags come FIRST", #106) only
+# moved the problem: `while [ "${1:-}" = --force ]` still dropped the flag when it followed
+# the number — which is the exact form THIS script's own error message tells the user to
+# type ("Land it anyway with: scripts/merge.sh 103 --force"). Measured on #113: that form
+# entered the CI gate and exited rc=1 printing NOTHING (#115).
 FORCE=""
-while [ "${1:-}" = "--force" ]; do FORCE=1; shift; done
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    -*)
+      # An unknown option is refused BY NAME. Read as a positional it became the issue
+      # number: `merge.sh --froce 99` set N=--froce, built the pattern
+      # "headRefName":"fix---froce…" and died in silence (#115).
+      echo "!! unknown option: $a"
+      echo "   usage: scripts/merge.sh [issue-number | fix-<n>-branch] [--force]"
+      exit 1
+      ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+# A bare `--force` must not merge whatever branch happens to be checked out. With no
+# argument, BR comes from HEAD and N is scraped out of it, so on main there is nothing to
+# land - yet the script sailed past the CI gate. (Measured while testing this very fix: a
+# fake-gh self-test ran `merge.sh --force` in its own worktree and deleted its own branch.)
+if [ -n "$FORCE" ] && [ "${#ARGS[@]}" -eq 0 ] && [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+  echo "!! --force without a target on main: there is nothing to land here."
+  echo "   usage: scripts/merge.sh <issue-number | fix-<n>-branch> --force"
+  exit 1
+fi
 N="${1:-$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')}"
 # The argument is an ISSUE NUMBER. A branch name given as the argument must not
 # be treated as one: `merge.sh fix-62-bay-claim-as-park-target` used to build the
@@ -57,8 +84,12 @@ elif [ -n "${1:-}" ]; then
   # issues/N/pulls endpoint is NOT an alternative: it 404s even for an issue
   # whose PR was merged (measured: issues/90/pulls -> 404).
   N="$1"
+  # The `{ grep … || true; }` is load-bearing, not decoration: under `set -euo pipefail`
+  # a grep that matches NOTHING fails the whole substitution, and `set -e` kills the script
+  # BEFORE the assignment completes — so the message below never printed and a refused merge
+  # looked like a crash (measured: rc=1, empty output; #115).
   BR=$(gh pr list --state open --json headRefName,number \
-       | tr -d '\n' | grep -oE '"headRefName":"fix-'"$N"'(-[^"]*)?"' \
+       | tr -d '\n' | { grep -oE '"headRefName":"fix-'"$N"'(-[^"]*)?"' || true; } \
        | head -1 | sed 's/.*:"//; s/"$//')
   [ -n "$BR" ] || { echo "!! no open PR for issue #$N (no open branch matching fix-$N[-slug])"; exit 1; }
   echo "==> issue #$N -> open PR branch $BR"
@@ -102,7 +133,7 @@ if [ -z "$FORCE" ]; then
     printf '%s\n' "$out" | tail -12
     if printf '%s' "$out" | grep -qi "no checks\|none found"; then
       echo "!! CI reported no checks for this PR - the workflow did not run."
-      echo "   Land it anyway with: scripts/merge.sh ${1:-} --force"
+      echo "   Land it anyway with: scripts/merge.sh <issue> --force"
       exit 1
     fi
     echo "!! CI is not green - refusing to merge (docs/WORKFLOW.md)."
