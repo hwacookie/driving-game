@@ -25,6 +25,9 @@ public sealed class MapBuilder
     private readonly Dictionary<string, (double X, double Y)> _nodesM = new();
     private readonly List<RoadSegment> _segments = new();
     private readonly List<(int SegIdx, string NodeId, SignType Type)> _signs = new();
+    // Stated parking spaces in the SAME metre frame as the nodes (Build shifts
+    // both together). See MapBuilder.Space.
+    private readonly List<ParkingSpace> _spaces = new();
     private int _nextSegId = 1;
     // name -> (node_id, lateral_offset_m, facing); degree-1 nodes or loops
     // with an explicit facing neighbour.
@@ -43,7 +46,8 @@ public sealed class MapBuilder
     /// order/style and keep cars on different levels from colliding.</summary>
     public void Road(string n1, string n2, string highway = "residential",
         bool oneway = false, double? width = null, int lanes = 0,
-        double shoulder = 0.0, double parkingLaneWidth = 0.0, int level = 0)
+        double shoulder = 0.0, double parkingLaneWidth = 0.0, int level = 0,
+        bool openArea = false)
     {
         var (x1M, y1M) = _nodesM[n1];
         var (x2M, y2M) = _nodesM[n2];
@@ -67,6 +71,7 @@ public sealed class MapBuilder
             StartNode = n1,
             EndNode = n2,
             ParkingLaneWidth = parkingLaneWidth,
+            OpenArea = openArea,
             Length = Math.Sqrt(Math.Pow(x2M - x1M, 2) + Math.Pow(y2M - y1M, 2)),
             Lanes = lanes,
             Shoulder = shoulder,
@@ -104,7 +109,15 @@ public sealed class MapBuilder
     public void Start(string name, string nodeId, double lateralOffsetM = 0.0, string? facing = null)
         => _startPoints[name] = (nodeId, lateralOffsetM, facing);
 
-    /// <summary>Finalize and return the RoadNetwork.</summary>
+    /// <summary>A STATED PARKING SPACE on an open area (issue #86): the
+    /// rectangle itself is given — where it is, the axis a car is asked to end
+    /// up on, and its own width/length in metres. Unlike a kerb bay there is
+    /// nothing to derive it from (no kerb offset, no parked flanks), so the
+    /// map states it and the client draws it (green).</summary>
+    public void Space(string name, double xM, double yM, double headingDeg,
+                     double lengthM, double widthM)
+        => _spaces.Add(new ParkingSpace(name, xM, yM, headingDeg, lengthM, widthM));
+
     public RoadNetwork Build(double marginM = 50.0)
     {
         // ── Shift so world starts at (0, 0) — handle negative coords ──
@@ -128,6 +141,14 @@ public sealed class MapBuilder
             {
                 seg.X1 -= sdx; seg.Y1 -= sdy;
                 seg.X2 -= sdx; seg.Y2 -= sdy;
+            }
+            // Stated parking spaces are authored in the same frame as the nodes,
+            // so they take the same shift (a space left unshifted would sit
+            // metres away from the area it was authored on).
+            for (int i = 0; i < _spaces.Count; i++)
+            {
+                var sp = _spaces[i];
+                _spaces[i] = sp with { X = sp.X - sdx, Y = sp.Y - sdy };
             }
         }
 
@@ -221,6 +242,7 @@ public sealed class MapBuilder
             maxX, maxY, nodeConnections, nodeDegree, nodeInfo);
         foreach (var kv in startPoints) net.StartPoints[kv.Key] = kv.Value;
         foreach (var (idx, nodeId, type) in _signs) net.Signs[(idx, nodeId)] = type;
+        foreach (var sp in _spaces) net.ParkingSpaces.Add(sp);
         return net;
     }
 }
@@ -233,9 +255,43 @@ public static class TestMaps
     {
         ["basic"] = BuildBasicTestMap,
         ["swatch"] = BuildSwatchMap,
+        ["lot"] = BuildLotMap,
     };
 
     /// <summary>Build a named synthetic test map.</summary>
+    /// <summary>The practice field of issue #86: ONE open area, 50 x 50 m of
+    /// asphalt with a kerb around it and nothing painted on it. The owner asked
+    /// (2026-11-03): "twenty by twenty … like a huge parking lot … one very big
+    /// street", then "a new type of road which is actually a parking space - you
+    /// are allowed to drive in any direction, there is no oncoming traffic, there
+    /// is no right side, no left side, it's just a patch of asphalt", then "make
+    /// it 50 by 50" and "a kerb around it, no road markings … it's allowed to
+    /// drive around there in circles". 50 m is the size that makes the field
+    /// actually useful for the lesson it is for: this car's own turning circle
+    /// is 2 x wheelbase/tan(lock) = 6.9 m, so a 20 m field fits two circles
+    /// across and a 50 m field fits seven - room to see a circle, not one pinch
+    /// point. One segment, two kerbed edges, starts at both ends; no junction,
+    /// no sign, no parking lane.</summary>
+    public static RoadNetwork BuildLotMap()
+    {
+        var b = new MapBuilder();
+        b.Node("lot_s", 25.0, 0.0);    // south kerb line, mid of the south edge
+        b.Node("lot_n", 25.0, 50.0);   // north kerb line
+        // The surface: 50 m long, 50 m wide -> the drawn ribbon IS a 50 x 50 m
+        // square (x 0..50, y 0..50). `openArea` is the flag that says there is no
+        // road inside it: no centreline, no lane lines, no arrows, no P marks.
+        b.Road("lot_s", "lot_n", width: 50.0, openArea: true);
+        b.Start("lot", "lot_s");          // south end, heading north
+        b.Start("lot_reverse", "lot_n");  // north end, heading south
+        // The owner's scene (2026-11-03): "put a car … at the edge in the middle,
+        // then … a green rectangle … 15 m distance, parallel to that car" — 3 m
+        // wide, 6 m long. The car above stands at (25,0) facing north, so this
+        // box sits 15 m along the kerb at the SAME heading: centre (40,3),
+        // 3 m across x (38.5..41.5) and 6 m along y (0..6), inside the field.
+        b.Space("pad_15m", 40.0, 3.0, headingDeg: 0.0, lengthM: 6.0, widthM: 3.0);
+        return b.Build();
+    }
+
     public static RoadNetwork BuildTestMap(string name)
     {
         if (!Registry.TryGetValue(name, out var build))

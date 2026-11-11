@@ -39,6 +39,19 @@ public class RoadSegment
     /// kerb). Drives painted P marks + parking-lane boundary line, which end
     /// &gt;= Config.PARK_LANE_END_GAP_M before any junction.</summary>
     public double ParkingLaneWidth;
+    /// <summary>An OPEN AREA (issue #86): a patch of asphalt with a kerb around
+    /// it and no road painted on it. The segment's length is one side of the
+    /// patch and `Width` the other, so the drawn ribbon is the field itself - a
+    /// 50 m segment at width 50 m is a 50 x 50 m square. What the flag means is
+    /// "this surface declares no road": no centreline, no lane lines, no
+    /// direction of travel, no oncoming half, no parking lane - a car may drive
+    /// anywhere inside the kerb, circles included (owner decision 2026-11-03,
+    /// "a new type of road which is actually a parking space … no oncoming
+    /// traffic, no right side, no left side … it's allowed to drive around there
+    /// in circles"). Deliberately NOT modelled as a one-way: one-way is a claim
+    /// about a direction of travel, and an area makes no such claim - the rules
+    /// that read lane structure ask about this flag instead.</summary>
+    public bool OpenArea;
 
     public RoadSegment Clone() => (RoadSegment)MemberwiseClone();
 }
@@ -58,6 +71,13 @@ public sealed record PolygonRing(List<(double X, double Y)> Exterior,
 
 /// <summary>A color group of road polygons for rendering.</summary>
 public sealed record RoadPolygonGroup((int R, int G, int B) Color, List<PolygonRing> Rings);
+
+/// <summary>A stated parking space: where the rectangle is, the axis the car is
+/// asked to finish on, and the rectangle's own size in metres (along = the
+/// driving axis, side = across it). See RoadNetwork.ParkingSpaces for what
+/// makes this different from the acceptance box of a kerb bay.</summary>
+public sealed record ParkingSpace(string Name, double X, double Y, double HeadingDeg,
+                                 double LengthM, double WidthM);
 
 /// <summary>Road sign types. Yield = "Vorfahrt gewähren": a car driving
 /// on the signed segment toward the signed node must yield to traffic on
@@ -103,6 +123,17 @@ public class RoadNetwork
     public Dictionary<string, (double HalfWidth, string Highway)> NodeMaxWidth { get; private set; } = new();
     /// <summary>name → (x, y, heading, seg_idx, forward, lateral_offset_m).</summary>
     public Dictionary<string, (double X, double Y, double Heading, int SegIdx, bool Forward, double LateralOffsetM)> StartPoints { get; } = new();
+    /// <summary>A STATED PARKING SPACE (issue #86): a rectangle someone painted
+    /// on a surface - world position, the axis the car is asked to end up on,
+    /// and the rectangle's own size. Unlike the acceptance box a kerb bay gets
+    /// (§1c: the car's own outer dims grown by PARK_BOX_MARGIN_M, which the
+    /// SIM derives from the bay and publishes as `park_target`), this box is
+    /// given, not derived: an open area states no kerb and has no parked flanks,
+    /// so nothing could be derived from. The owner asked for exactly this shape
+    /// on 2026-11-03 ("a green rectangle … 3 m wide, 6 m long … 15 m from the
+    /// car, parallel to it"). Authored by MapBuilder.Space, published by the
+    /// map payload, drawn by the client.</summary>
+    public List<ParkingSpace> ParkingSpaces { get; private set; } = new();
 
     // Lazy caches (the road network never changes at runtime).
     public SmoothGeometry.SmoothedNetwork? SmoothedCache { get; set; }
@@ -829,7 +860,8 @@ public class RoadNetwork
         // would diverge from the smoothly-curved ribbon centre).
         var (covered, chainCls) = RoadNetworkGeometry.WidthVaryingCenterlines(this);
         var groups = RoadNetworkGeometry.MergeAndRoundLines(this, onlyTwoWay: true,
-            skipMultiLane: true, stopAtJunctions: true, excludeSegs: covered);
+            skipMultiLane: true, stopAtJunctions: true, excludeSegs: covered,
+            skipOpenAreas: true);
         var out_ = new List<(string, List<(double X, double Y)>)>();
         void Emit(List<(double X, double Y)> coords)
         {

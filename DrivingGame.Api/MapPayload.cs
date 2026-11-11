@@ -181,6 +181,18 @@ public static class MapPayload
             }).ToList(),
             ["oneway_arrows"] = net.GetOnewayArrows().Select(M).ToList(),
             ["parking_marks"] = net.GetParkingMarks().Select(M).ToList(),
+            // A STATED PARKING SPACE (issue #86): a rectangle the map SAYS
+            // exists - 3 m wide, 6 m long, at this spot on this axis. Unlike
+            // `parking_marks` (a painted P symbol on a road's parking lane) and
+            // unlike `park_target` (the acceptance box the SIM derives for one
+            // car from a kerb bay), this box is given by the map, so every car
+            // and every viewer sees the same rectangle on the asphalt.
+            ["parking_spaces"] = net.ParkingSpaces.Select(sp => new Dictionary<string, object?>
+            {
+                ["name"] = sp.Name,
+                ["x"] = sp.X, ["y"] = sp.Y, ["heading_deg"] = sp.HeadingDeg,
+                ["length_m"] = sp.LengthM, ["width_m"] = sp.WidthM,
+            }).ToList(),
             ["signs"] = signs,
             ["stop_lines"] = stopLines,
             ["crossing_markers"] = crossingMarkers,
@@ -195,6 +207,15 @@ public static class MapPayload
                 ["stop_line_width_m"] = Config.STOP_LINE_WIDTH_M,
             },
             ["start_points"] = startPoints,
+            // Stated parking spaces (see RoadNetwork.ParkingSpaces): the
+            // rectangles this map PAINTS on an open area. Metres, like every
+            // other coordinate here.
+            ["parking_spaces"] = net.ParkingSpaces.Select(sp => new Dictionary<string, object?>
+            {
+                ["name"] = sp.Name,
+                ["x"] = sp.X, ["y"] = sp.Y, ["heading_deg"] = sp.HeadingDeg,
+                ["length_m"] = sp.LengthM, ["width_m"] = sp.WidthM,
+            }).ToList(),
             // The ground's OWN stamp, so a client can check a tape's map
             // REFERENCE against what this host actually serves: the tape
             // names its ground (`map=` + `map_hash=`) rather than carrying

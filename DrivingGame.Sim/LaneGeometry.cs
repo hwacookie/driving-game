@@ -58,6 +58,16 @@ public sealed class LaneGeometry
     private static LaneStrip StripOf(RoadSegment seg)
     {
         double halfWidth = Math.Max(0.0, seg.Width / 2.0);
+        // An OPEN AREA (#86) declares no road at all, so it has no lane structure
+        // to state: the whole surface between the kerbs is drivable and there is
+        // one driving line, down the middle of the field - not a lane per side
+        // and not a lane per direction, because the surface makes no claim about
+        // a direction of travel. Reporting it as the one-way full-width case is
+        // what the consumers of this strip need (kerb at ±half, no centreline,
+        // lane centre at 0), and it is reported rather than assumed downstream:
+        // RoadSegment.OpenArea is the flag the lane guard reads next.
+        if (seg.OpenArea)
+            return new LaneStrip(true, 1, halfWidth, halfWidth * 2.0, halfWidth * 2.0, 0.0);
         double parking = Math.Max(0.0, Math.Min(seg.ParkingLaneWidth, halfWidth));
 
         if (seg.Oneway)
