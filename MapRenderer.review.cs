@@ -1706,6 +1706,13 @@ public partial class MapRenderer : Node2D
             _tape.RemoveAt(0);
             _tipGap++;
         }
+        // The event index has to follow the frames it points at (issue #101).
+        // `BuildTapeIndex` stores WINDOW INDICES, and a roll moves the floor out
+        // from under every one of them - so an incremental append would go stale
+        // the first time the window rolls. Rebuilding over the window is bounded
+        // (TipWindowFrames = 9 000 lines, one pass per hop of <= 24-600 frames)
+        // and keeps a live run's index identical in shape to a file review's.
+        BuildTapeIndex();
         _tapeFirstStep = _tape[0].Step;
         _deliveredStep = _tape[^1].Step;
         _tapeHead = head;
@@ -3464,7 +3471,12 @@ public partial class MapRenderer : Node2D
     /// step; an empty list is honest where a stale one would lie.</summary>
     private void UpdateDetailsLive()
     {
-        if (_tape.Count > 0) return;     // a review refreshes through UpdateDetails
+        // A FILE review refreshes through UpdateDetails. A live run does have a
+        // tape - the host's tip feeds it - but its cursor is pinned at index 0
+        // (`if (_tapeLive && _cursor < 0) _cursor = 0`), so routing a live window
+        // by "is there a tape" showed the FIRST frame of the run, not the newest.
+        // That was #101's real cause: the events were reachable all along.
+        if (_tape.Count > 0 && !_tapeLive) return;
         // The OPENING ask runs above the "is a window open" gate: with the gate
         // first, a test's detail_window could never open the FIRST window -
         // measured as no DETAIL-AUTO line at all in a live run where /state
@@ -3586,6 +3598,10 @@ public partial class MapRenderer : Node2D
         if (at == uid) d.Lockdown = HasLockdownNote(uid);
 
         BuildDetailRows(uid, d);
+        if (_tapeLive && d.Rows.Count > 0)
+            // No cursor to centre on: the event the car is acting under now is
+            // the newest one. The reviewer keeps its own anchor (the cursor).
+            d.AnchorIndex = d.Rows.Count - 1;
         return d;
     }
 
