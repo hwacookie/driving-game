@@ -10,7 +10,15 @@ HERE=$(pwd)
 # worktree would pretend the repo is online (or offline) while the primary tree
 # says the opposite. Ask git where its state lives; the marker is repo-wide, so
 # the shared git dir is the right place (docs/WORKFLOW.md, worktree habit).
-GITSTATE=$(git rev-parse --git-common-path)
+# `--git-common-path` is NOT a git option (measured with git 2.54.0: `git
+# rev-parse --git-common-path` prints the flag back, literally
+# "--git-common-path", exit 0). So `[ -f "$GITSTATE/offline-mode" ]` tested
+# `-f --git-common-path/offline-mode` and never fired - in ANY tree, primary or
+# worktree - which means offline mode was silently ignored by this script. The
+# spelling that exists is `--git-common-dir`; the absolute form needs
+# `--path-format=absolute` (plain `--git-common-dir` answers ".git" in the
+# primary tree and a FILE path in a linked worktree).
+GITSTATE=$(git rev-parse --path-format=absolute --git-common-dir)
 if [ -f "$GITSTATE/offline-mode" ]; then
   echo "!! offline mode is on (.git/offline-mode) - this step needs GitHub."
   echo "   Land the fix locally instead: scripts/offline.sh land  (docs/WORKFLOW.md)"
@@ -31,7 +39,16 @@ fi
 FORCE=""
 while [ "${1:-}" = "--force" ]; do FORCE=1; shift; done
 N="${1:-$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')}"
-if [ -n "${1:-}" ]; then
+# The argument is an ISSUE NUMBER. A branch name given as the argument must not
+# be treated as one: `merge.sh fix-62-bay-claim-as-park-target` used to build the
+# pattern "fix-fix-62-…" and answer "no open PR", which cost a merge that had to
+# go through `gh pr merge` by hand (measured on PR #107). If the argument already
+# looks like a branch, use it as one.
+if [ -n "${1:-}" ] && printf '%s' "$1" | grep -qE '^fix-[0-9]'; then
+  BR="$1"
+  N=$(printf '%s' "$BR" | sed -n 's/^fix-\([0-9][0-9]*\).*/\1/p')
+  echo "==> branch given directly: $BR (issue #$N)"
+elif [ -n "${1:-}" ]; then
   # `gh pr list --head <name>` matches the head ref EXACTLY (measured on gh
   # 2.102.0): "fix-90", "fix-90*" and "*fix-90*" all answer nothing while the
   # open PR's head is `fix-90-no-space-switch-on-launch`. So the issue number
@@ -71,6 +88,16 @@ if [ -z "$FORCE" ]; then
     [ "$i" = "12" ] && echo "    no CI run seen after 60s - the gate below will say so"
     sleep 5
   done
+  # The grace period has passed. Ask ONE more time in the plain form before
+  # watching: `--watch` can answer "no checks reported" immediately when there is
+  # nothing registered, and that must be named as "the workflow did not run"
+  # rather than falling into the generic "CI is not green" (#103).
+  final=$(gh pr checks "$BR" 2>&1 || true)
+  if printf '%s' "$final" | grep -qi "no checks\|none found"; then
+    echo "!! CI reported no checks for $BR even after the grace period - the workflow did not run."
+    echo "   Push a commit or re-run it (gh run list --branch $BR); land anyway with --force."
+    exit 1
+  fi
   if ! out=$(gh pr checks "$BR" --watch --interval 20 2>&1); then
     printf '%s\n' "$out" | tail -12
     if printf '%s' "$out" | grep -qi "no checks\|none found"; then
