@@ -2058,6 +2058,22 @@ public sealed partial class BicycleNav
                 brakeRate = Math.Min(brakeRate, A_PARK);
             }
         }
+        // R32 (owner decision 2026-11-04): a committed pass is DRIVEN at the speed
+        // it was planned at - the car's ceiling plus the overtaking allowance. This
+        // is also the answer to oncoming traffic found mid-pass: the way out of a
+        // borrowed lane is the throttle, and whether that is allowed is decided by
+        // the caps in CarCollisions, which run after the driver and still hold the
+        // final word (SimEngine applies them to the speed this produces).
+        // Only where the profile is not itself what limits the car: the profile is
+        // the ceiling cut down by curvature and by a signalled junction, and a pass
+        // has no business over-steering a corner to gain 10 km/h. A car with no
+        // throttle asked for at all (a leftover car coasting to rest) is not a car
+        // that is passing.
+        if (accel && car.PassDemandMps > vTarget && vTarget >= V_MAX - 0.05)
+        {
+            vTarget = car.PassDemandMps;
+            accel = true;
+        }
         if (brake)
         {
             // External brake (keyboard S / API safety net) always wins.
@@ -2181,7 +2197,12 @@ public sealed partial class BicycleNav
                 braked = true;
             }
         }
-        car.Speed = Math.Max(0.0, Math.Min(V_MAX, car.Speed));
+        // R25's ceiling is the maximum this car may go - and a pass is the one
+        // situation the owner allowed it to exceed that by the overtaking
+        // allowance (R32, 2026-11-04). The allowance arrives only through
+        // PassDemandMps, which is 0 whenever no pass is on, so every other car is
+        // still clamped to the ceiling exactly as before.
+        car.Speed = Math.Max(0.0, Math.Min(Math.Max(V_MAX, car.PassDemandMps), car.Speed));
 
         // #36: the speed can only be born in the easing above, and `accelScale` (which
         // falls to ZERO as the steering demand grows) is a multiplier inside it. Sample

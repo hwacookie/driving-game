@@ -107,6 +107,65 @@ public static class CarCollisions
     /// gain, and that is physics, not a disposition.</summary>
     public static double MinAcceptableGainMps(double eagerness) =>
         DriverModelMaxGainMps * (1.0 - Math.Clamp(eagerness, 0.0, 1.0));
+    /// <summary>The slowest a leader may go and STILL be worth a pass to this driver,
+    /// i.e. the speed at which `MinAcceptableGainMps` is exactly met. R37 re-asks its
+    /// decision when a declined leader drops below it (#87: a car that aborted for
+    /// oncoming traffic ends up behind a 10 km/h tractor and must be able to want the
+    /// pass again - see the re-ask in the intent branch).</summary>
+    public static double LeadWorthMps(Car c) =>
+        Math.Max(0.0, c.EffectiveTopMps - MinAcceptableGainMps(c.DriverEagerness));
+    /// <summary>R32 (owner decision 2026-11-04): the speed a pass is PLANNED and
+    /// DRIVEN at - the speed this driver had when nothing was in its way
+    /// (<see cref="Car.CruiseMemoryMps"/>) plus an overtaking allowance of 10 km/h.
+    /// Until now a pass spoke about itself in the car's CURRENT speed, and with a
+    /// slow vehicle ahead that speed is the obstruction's, which made the whole
+    /// manoeuvre circular: the following rule held the overtaker at the row's
+    /// 10 km/h, so it never got beside the row, so the exemption that releases the
+    /// cap ("beside = not my lead") never fired, so the plan it judged at 10 km/h
+    /// never looked feasible either. Measured on fig8_row: <c>avoid#6</c> for 20 s
+    /// at the tractor's speed, the borrow taken at 9.5 km/h, the pass abandoned.
+    /// Why not the vehicle's ceiling: this sim keeps a maximum per VEHICLE MODEL and
+    /// no limit per ROAD (R25 clamps to the model's), so ceiling + 10 km/h sent a
+    /// Mercedes past 200 km/h and off the road - measured on this branch the same
+    /// evening. A map <c>maxspeed</c> would take the memory's place here.</summary>
+    public const double OvertakeAllowanceMps = 10.0 / 3.6;
+    /// <summary>The margin a pass asks for when it decides whether it can beat an
+    /// oncoming car to the point where it returns to its own lane: half a second
+    /// of slack on top of the two travel times, so the answer is not a coin toss
+    /// re-decided every substep.</summary>
+    public const double PassFinishMarginS = 0.5;
+    public static double PassSpeedMps(Car c) =>
+        Math.Min(c.EffectiveTopMps, Math.Max(c.CruiseMemoryMps, c.Speed))
+        + OvertakeAllowanceMps;
+    /// <summary>True while a committed pass and the vehicle it passes are actually
+    /// moving APART: the car has asked for the other lane (<c>OvertakeShiftM</c>) and
+    /// its body is already clear of the pair's overlap by three quarters of it, in
+    /// the same direction of travel. This is the gate every pass exemption uses,
+    /// and it is lateral on purpose.
+    /// Gating on the demand alone was tried on this branch and it killed a car: the
+    /// shift stays set while a driver returns from an abandoned pass, so the
+    /// following rule stayed switched off on a pair that was closing again, and the
+    /// car ran into the row's front at 24 km/h (gap 0.3 m, <c>[R2] CRASH</c>).
+    /// While two bodies still share this axis the following rule is the only thing
+    /// between them; once they are visibly apart it is the lane I am leaving, and
+    /// the speed the manoeuvre needs is allowed.</summary>
+    /// <summary>#87 witness, off unless <c>PASSCAP_UID</c> names a car: every cap
+    /// offered to that car below 12 m/s, with the rule that offered it. Needed
+    /// because the tape's cap key cannot tell the following rule (v1) from the
+    /// self-protection rule (R2) - both answer <c>avoid#&lt;uid&gt;</c>.</summary>
+    static readonly int PassWitnessUid =
+        int.TryParse(Environment.GetEnvironmentVariable("PASSCAP_UID"), out var _pu) ? _pu : -1;
+    static readonly bool PassWitness = PassWitnessUid >= 0;
+
+    public static bool PassSeparating(Car a, Car b)
+    {
+        if (a.PassUid < 0 || a.OvertakeShiftM <= 0.5) return false;
+        double hd = Math.Abs(((a.Heading - b.Heading + 540.0) % 360.0) - 180.0);
+        if (hd >= 35.0) return false;      // only a same-direction pair
+        double rad = Math.Radians(a.Heading);
+        double lat = (b.X - a.X) * Math.Cos(rad) + (b.Y - a.Y) * -Math.Sin(rad);
+        return Math.Abs(lat) > (a.WidthM + b.WidthM) * 0.5 * 0.75;
+    }
     /// <summary>One owner for "am I mid-pass?" - read by the corridor bound,
     /// by v1's forward corridor and by R33's intent (docs/RIGHT_OF_WAY_NEGOTIATION.md
     /// §7c: three consumers, one object).
@@ -141,7 +200,9 @@ public static class CarCollisions
     public static bool PassPending(Car c, RoadNetwork net)
     {
         if (c.PassUid < 0 || net is null) return false;
-        if (PassAlongM(c, net) > PassOutM(c, net)) return true;
+        // The manoeuvre is over when the FAR end of what I pass is behind me by the
+        // return length - for a row that is its front vehicle, not the one I named.
+        if (Math.Max(PassAlongM(c, net), PassFarAlongM(c)) > PassOutM(c)) return true;
         // Past the window and still in the OTHER half: the return leg is running.
         // The shift is released at the window's end, so the car comes back AFTER
         // it - and the intent must cover that crossing, or R33 calls the return
@@ -165,26 +226,51 @@ public static class CarCollisions
         double rad = Math.Radians(c.Heading);
         return (c.PassX - c.X) * Math.Sin(rad) + (c.PassY - c.Y) * Math.Cos(rad);
     }
+    /// <summary>Metres ahead of me to the FAR end of what I pass (the row's front
+    /// vehicle), falling back to the named car when the pass is a single one.</summary>
+    private static double PassFarAlongM(Car c)
+    {
+        if (c.PassFrontX == 0.0 && c.PassFrontY == 0.0)
+            return (c.PassX - c.X) * Math.Sin(Math.Radians(c.Heading))
+                 + (c.PassY - c.Y) * Math.Cos(Math.Radians(c.Heading));
+        return (c.PassFrontX - c.X) * Math.Sin(Math.Radians(c.Heading))
+             + (c.PassFrontY - c.Y) * Math.Cos(Math.Radians(c.Heading));
+    }
     /// <summary>Where the borrow ends: the body has cleared the obstruction AND
     /// the car has come back - the return takes the same speed-dependent lane-change
-    /// length as the way out.</summary>
-    private static double PassOutM(Car c, RoadNetwork net)
+    /// length as the way out.
+    /// Both halves speak the PASS speed now (R32, owner decision 2026-11-04): a
+    /// driver returning from a pass does it at the speed the pass was driven at, not
+    /// at the crawl the obstruction imposes. And the clearance is measured to the
+    /// FAR end of the row, because a row is not cleared when its near vehicle is
+    /// beside me (docs §9, "the obstruction is a train").</summary>
+    private static double PassOutM(Car c)
     {
-        double laneM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
+        double passV = Math.Max(c.Speed, PassSpeedMps(c));
+        double laneM = Math.Clamp(passV * BicycleNav.LANE_CHANGE_TIME_S,
                                   BicycleNav.MERGE_LEN_MIN_M,
                                   BicycleNav.MERGE_LEN_MAX_M);
-        return -((c.LengthM + c.PassLengthM) * 0.5 + SideClearM(c.Speed)) - laneM;
+        double farLenM = c.PassFrontLengthM > 0.0 ? c.PassFrontLengthM : c.PassLengthM;
+        return -((c.LengthM + farLenM) * 0.5 + SideClearM(passV)) - laneM;
     }
     public static bool PassCommitted(Car c, RoadNetwork net)
     {
         if (c.PassUid < 0 || net is null) return false;
-        double alongM = PassAlongM(c, net);
-        // IN: the latest point from which the shift can still be completed.
+        // IN: the latest point from which the shift can still be completed; OUT:
+        // the point where the body has cleared the obstruction and come back.
+        // A row is ONE obstruction (docs §9, "the obstruction is a train"), so the
+        // IN bound belongs to its NEAREST vehicle and the OUT bound to its FURTHEST
+        // - whichever of them R32 happened to name. Reading both off the single
+        // stored car killed a commitment 3 m into the borrow: the named tractor was
+        // 24 m ahead, past the IN bound of a 10 km/h car, so "not yet time to leave
+        // my lane" answered a question the car had already passed (fig8_row).
         double laneInM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
                                     BicycleNav.MERGE_LEN_MIN_M,
                                     BicycleNav.MERGE_LEN_MAX_M);
-        if (alongM > laneInM) return false;      // not yet time to leave my lane
-        return alongM > PassOutM(c, net);        // still inside the borrow
+        double nearAlongM = Math.Min(PassAlongM(c, net), PassFarAlongM(c));
+        double farAlongM = Math.Max(PassAlongM(c, net), PassFarAlongM(c));
+        if (nearAlongM > laneInM) return false;   // not yet time to leave my lane
+        return farAlongM > PassOutM(c);           // still inside the borrow
     }
     // Extra margin demanded when the target is STATIONARY: the plain
     // stop formula sqrt(2a*(G - StandstillGapM)) is the exact RECOVERABLE
@@ -560,6 +646,14 @@ public static class CarCollisions
         var reasons = new Dictionary<int, (double Cap, string Key, string Text, int By)>();
         void OfferCap(int uid, double cap, string key, string text, int by = 0)
         {
+            // #87 witness: which RULE caps a car that is mid-pass and out in the
+            // other lane. The tape's cap key cannot tell the two apart - the
+            // following rule (v1) and the self-protection rule (R2) both answer
+            // `avoid#<uid>` - so a measured 0 km/h at 3.17 m of lateral clearance
+            // could not be attributed. Env-gated, prints every offer.
+            if (PassWitness && uid == PassWitnessUid && cap < 12.0)
+                Console.WriteLine($"   [PASSCAP] t={simTime:F2} uid{uid} " +
+                    $"cap={cap * 3.6:F1} km/h key={key} by={by} :: {text}");
             if (reasons.TryGetValue(uid, out var r) && r.Cap <= cap) return;
             reasons[uid] = (cap, key, text, by);
         }
@@ -716,7 +810,7 @@ public static class CarCollisions
                 // term - see the self-protection branch below). Skipping v1
                 // here keeps one cap source per situation (the flutter fix);
                 // once the alert clears, v1 resumes in full.
-                if (c.AlertOtherUid == o.Uid) continue;
+                if (c.AlertOtherUid == o.Uid && !PassSeparating(c, o)) continue;
                 double dxc = o.X - c.X, dyc = o.Y - c.Y;
                 double rayAlong = dxc * fx + dyc * fy;      // ahead at all?
                 if (rayAlong < 0.0) continue;               // beside/behind me
@@ -932,6 +1026,58 @@ public static class CarCollisions
                 if (leadStopping)
                     roomM += vl * vl / (2.0 * o.BrakeMps2);
                 double cap = ApproachCapMps(leadStopping ? 0.0 : vl, roomM);
+                // R32 (owner decision 2026-11-04): a car I am COMMITTED to pass,
+                // driving in the same direction ahead of me, does not hold me at
+                // its speed - going faster than it is the entire point.
+                // The gate is that the BORROW HAS ACTUALLY STARTED
+                // (OvertakeShiftM > 0.5: the car has asked for more than half a
+                // metre of the other lane and is visibly leaving its own). Without
+                // that gate the exemption would let a car that merely sits behind a
+                // braking row floor it into the row's rear - the following rule is
+                // the only thing keeping that gap - and with it the circle is still
+                // broken, because R32 commits on a plan judged at the PASS SPEED and
+                // the same tick sets the shift, so the exemption is live from the
+                // next substep on (measured test 21: borrowed at 3.32 m, 77 km/h).
+                // A gap of 0.25 m still stops the car (above), v2 still caps a
+                // course that would touch, and R26 still owns the pinch.
+                if (passC1 && cap < PassSpeedMps(c))
+                {
+                    if (PassSeparating(c, o))
+                        cap = PassSpeedMps(c);
+                    // #87: the pass is planned and DRIVEN at cruise speed, so a
+                    // committed car that has physically left its lane is passing even
+                    // while it still sits on the obstruction's axis - it has not drawn
+                    // level yet. Measured, test 21: shift 3.32 m, cap still falling
+                    // 28.1 -> 19.0 km/h toward the tractor's 10, because
+                    // `PassSeparating`'s body test needs 1.31 m of separation and the
+                    // car reaches it only after the pass is over (max 2.61 m at t=9.0 s,
+                    // back to 0 by t=13 s). The commitment is what carries this: an
+                    // uncommitted follower keeps the full following rule, so a car that
+                    // merely sits behind a braking row cannot floor it into the row.
+                    else if (c.OvertakeShiftM > 0.5 &&
+                             c.CruiseMemoryMps > o.Speed + OvertakeAllowanceMps)
+                        cap = PassSpeedMps(c);
+                }
+                // #87 witness B: the three quantities the pass exemption is gated on,
+                // for a committed pass that is measurably OUT in the other lane. The
+                // question this answers: at 3.17 m of lateral separation, is the
+                // exemption (a) never reached because this pair never became the
+                // following rule's lead (the `lat > latBandM -> continue` above), or
+                // (b) reached and refused by PassSeparating's own body-sum test?
+                if (PassWitness && c.Uid == PassWitnessUid && c.OvertakeShiftM > 1.0)
+                {
+                    // lat measured ACROSS the leader's axis (the v1 pair's own
+                    // convention) and across the follower's axis (what a body test
+                    // should use). Measured apart in test 21: 3.17 m.
+                    double oradW = Math.Radians(o.Heading);
+                    double dxW = o.X - c.X, dyW = o.Y - c.Y;
+                    double latOwn = dxW * Math.Cos(oradW) + dyW * -Math.Sin(oradW);
+                    Console.WriteLine($"   [PASSTEST] t={simTime:F2} pair {c.Uid}->{o.Uid} " +
+                        $"lat={lat:F2} m band={latBandM:F2} | latOwn={latOwn:F2} " +
+                        $"bodySum={c.WidthM + o.WidthM:F2} | shift={c.OvertakeShiftM:F2} " +
+                        $"passUid={c.PassUid} | separating={PassSeparating(c, o)} " +
+                        $"passC1={passC1} | cap={cap * 3.6:F1} km/h");
+                }
                 if (cap < best) { best = cap; _v1By = o.Uid;
                     _v1Along = along; _v1Lat = lat;
                     _v1Gap = gapM; }   // TEMPORARY
@@ -1014,13 +1160,22 @@ public static class CarCollisions
         // the stretch around the obstruction is a single-file resource, so
         // the claim (R26) decides who may enter and the other waits behind.
         const double OvertakeScanM = 60.0;   // how far ahead a car looks
-        // Why a car is not committing right now, per car, so the reason is
-        // logged ONCE per change of reason and not once per substep (R20).
-        var why32 = new Dictionary<long, string>();
+        // Why a car is not committing lives ON THE CAR (Car.R32Why, Car.R39GuestUid)
+        // and deliberately not in a map built here: this method runs once per
+        // SUBSTEP, so a per-call "log once when the reason changes" state is
+        // forgotten 60 times a second and dedups nothing at all. Measured on
+        // fig8_row: the R38 refusal wrote 712 decision lines in 30 s - one per
+        // substep, each 0.1 m wiser than the last - and flushed the 100-entry
+        // ring the detail window and the reviewer read (R20: a decision is
+        // recorded when it CHANGES).
         foreach (var c in carList)
         {
             if (net is null) continue;
             var segC32 = net.Segments[c.SegIdx];
+            // The pass demand is re-asked from nothing every substep: only the
+            // commitment at the bottom of this loop sets it, so a car that is no
+            // longer passing stops demanding the throttle on that very tick.
+            c.PassDemandMps = 0.0;
             if (segC32.Oneway) continue;      // no oncoming lane to borrow
             double radC32 = Math.Radians(c.Heading);
             double fxC32 = Math.Sin(radC32), fyC32 = Math.Cos(radC32);
@@ -1028,6 +1183,15 @@ public static class CarCollisions
             double wantM = 0.0;
             bool blocked = false;
             int byUid32 = -1;
+            // The speed this pass is planned at, and the side gap that belongs to
+            // it (see PassSpeedMps): a plan judged at the speed a cap happens to
+            // force on the car right now can never be the plan it will drive.
+            double passV32 = PassSpeedMps(c);
+            double side32 = SideClearM(passV32);
+            bool wasOn32 = PassCommitted(c, net);   // mid-pass when this tick began
+            double outM32 = 0.0;              // metres still to run to be back inside
+            double oncomingAlongM32 = 1e9;    // the oncoming car that blocks it,
+            double oncomingV32 = 0.0;         // its distance and its speed
             // R37 (docs §9): the queue leader - the nearest car ahead of me IN MY
             // LANE, whatever it is doing. Whether I may start is that car's flag,
             // not my arithmetic; a driver that does not want to pass (the tractor
@@ -1062,13 +1226,13 @@ public static class CarCollisions
                     continue;
                 double lat = dxc * rxC32 + dyc * ryC32;
                 double touchM = (c.WidthM + o.WidthM) * 0.5;
-                if (Math.Abs(lat) > touchM + SideClearM(c.Speed))
+                if (Math.Abs(lat) > touchM + side32)
                     continue;
                 double hdiff = Math.Abs(((c.Heading - o.Heading + 540.0) % 360.0) - 180.0);
                 bool sameDir = hdiff < 45.0;
                 if (!sameDir)
                     continue;
-                double needM = touchM + SideClearM(c.Speed) - Math.Abs(lat);
+                double needM = touchM + side32 - Math.Abs(lat);
                 // R37: whoever is ahead of me in my lane is my queue leader, even
                 // when passing it would never be worth it. The band is the
                 // CARRIAGEWAY, not my own half: a car that is mid-pass has left
@@ -1157,7 +1321,7 @@ public static class CarCollisions
                                   LookAheadForSpeed(o2.Speed)) continue;
                     double lat2 = dx2 * rxC32 + dy2 * ryC32;
                     // Only a car that would actually use the lane I need.
-                    if (lat2 < -touchM - SideClearM(c.Speed)) continue;
+                    if (lat2 < -touchM - side32) continue;
                     // The claim: a driver that has to borrow the shared lane
                     // (that is what wantM means for me) never owns it against a
                     // driver who can stay in their own. Whoever entered further
@@ -1165,6 +1329,7 @@ public static class CarCollisions
                     if (o2.OvertakeShiftM <= 0.05)
                     {
                         blocked = true; byUid32 = o2.Uid;
+                        oncomingAlongM32 = along2; oncomingV32 = o2.Speed;
                         break;
                     }
                     // Same resource, same auction: the borrow window from
@@ -1186,7 +1351,7 @@ public static class CarCollisions
                         uEndP = Math.Max(uCP,
                                          ((frontX32 - segC32.X1) * axP +
                                           (frontY32 - segC32.Y1) * ayP) / alP +
-                                         0.5 * (frontLen32 + c.LengthM) + SideClearM(c.Speed));
+                                         0.5 * (frontLen32 + c.LengthM) + side32);
                     var resP = new Negotiation.Res(c.SegIdx,
                                                    Math.Min(uCP, uOP) - 4.0,
                                                    Math.Max(uOP, uEndP) + 4.0);
@@ -1197,6 +1362,7 @@ public static class CarCollisions
                                           Math.Max(c.Speed, 2.0)))
                         continue;  // the auction says I hold the window
                     blocked = true; byUid32 = o2.Uid;
+                    oncomingAlongM32 = along2; oncomingV32 = o2.Speed;
                     break;
                 }
                 if (blocked) break;
@@ -1256,6 +1422,38 @@ public static class CarCollisions
                       + $"(it asks for {wantMps:F1} m/s)";
                 c.RecordDecision(simTime, wish);
             }
+            // #87: the decision is re-asked when the leader's speed changes by more
+            // than the driver's own acceptance margin - which is exactly the moment a
+            // refused pass becomes worth trying again. Measured test 21: the car
+            // commits at 65 km/h, R32 refuses 0.3 s later because an oncoming car is
+            // arriving at 99.7 km/h (a correct refusal), and afterwards the pair sits
+            // behind the 10 km/h tractor. The decision had been taken ONCE, at t=5.6 s,
+            // against a leader already at 10 km/h, so `intent` was never computed
+            // again - one `[R37] intent` line in 54 s and no second attempt. A driver
+            // who aborts for oncoming traffic does not stop wanting to pass; they wait
+            // for the road and go. Geometry stays out of this (the comment above: it
+            // made a car answer "no" once and never re-ask); only the speed of the
+            // SAME object may reopen the question, and the margin is the driver's own
+            // so a crawling leader cannot make it flip every tick.
+            else if (c.IntentWithUid == askUid32 && !c.OvertakeIntent &&
+                     askSpeed32 <= LeadWorthMps(c) && c.CruiseMemoryMps > askSpeed32 * 1.25)
+            {
+                // The re-ask must be worth saying. Two guards, both measured:
+                // - it is asked at the speed the PASS would be driven at
+                //   (`CruiseMemoryMps`, what the car had before the obstruction), not
+                //   at `EffectiveTopMps`: the gain line above reads the car's own
+                //   ceiling, so a car stuck at the leader's 10 km/h computes
+                //   "a gain of 0.0 m/s" and answers NO again. Measured #23: 119
+                //   re-asks in 13 s, every one of them declining itself.
+                // - and only when the answer can actually differ, which the 1.25 factor
+                //   decides between the two speeds. Without it the two lines flip on
+                //   consecutive substeps - `re-asking` / `no pass wanted` 60 times a
+                //   second, 119 entries that pushed every other decision out of the tape.
+                c.IntentWithUid = -1;   // re-enters the branch above on this tick
+                c.RecordDecision(simTime,
+                    $"[R37] car {askUid32} ahead is now at {askSpeed32 * 3.6:F0} km/h and I " +
+                    $"would drive {c.CruiseMemoryMps * 3.6:F0} - re-asking my pass decision");
+            }
             // My turn is the leader's: it may not have taken its own yet.
             bool myTurn32 = !leadHolds32;
             // --- R38: the PLACE a pass may use (docs §9) -----------------
@@ -1287,15 +1485,32 @@ public static class CarCollisions
             bool insideZone32 = net.IsJunctionMouth(c.Forward ? segC32.StartNode
                                                               : segC32.EndNode)
                                 && pastNodeM <= pastBoxM;
-            double blendBackM = Math.Clamp(c.Speed * BicycleNav.LANE_CHANGE_TIME_S,
+            // Out and back AT THE PASS SPEED: the blend-back needs the road the
+            // manoeuvre covers at the speed it will have, not at the crawl the
+            // obstruction has forced on the car while it waits (R32, owner 2026-11-04).
+            double blendBackM = Math.Clamp(passV32 * BicycleNav.LANE_CHANGE_TIME_S,
                                            BicycleNav.MERGE_LEN_MIN_M,
                                            BicycleNav.MERGE_LEN_MAX_M);
             double pastRowM = Math.Max(frontAlongM,
                                        passAlong32 < 1e8 ? passAlong32 : 0.0);
             double planEndM = pastRowM + 0.5 * (frontLen32 + c.LengthM) + blendBackM;
+            outM32 = planEndM;
             bool placeOk32 = !insideZone32
                              && (zoneNearM < 0.0
-                                 || planEndM + LookAheadForSpeed(c.Speed) <= zoneNearM);
+                                 || planEndM + LookAheadForSpeed(passV32) <= zoneNearM);
+            // R38's place rule and R37's turn rule answer ONE question: may a pass
+            // BEGIN here. Once the car is physically out of its lane that question is
+            // closed - ending the pass there would demand a return no car can drive
+            // (the 3.9 m borrow has to be unwound, not teleported), and it is exactly
+            // what stopped the fig-8 pass dead beside the tractor it was clearing:
+            // judged at the pass speed the plan needs ~120 m of junction-free road, so
+            // the next mouth cancelled a commitment that was already 3/4 done.
+            // The traffic veto stays in force while out: that is the owner's
+            // "cannot finish it - brake and fall back", decided by time and by the
+            // oncoming car, never by the paint.
+            bool committedOut32 = wasOn32 && c.OvertakeShiftM > 0.5;
+            bool placeOkStart32 = placeOk32 || committedOut32;
+            bool myTurnStart32 = myTurn32 || committedOut32;
 
             // --- the commitment (R32 + R40) ------------------------------
             // wantM exists only while the obstruction is still in my line; the
@@ -1309,14 +1524,18 @@ public static class CarCollisions
             // the figure-8 row: "Ms. Daisy" logged "no pass wanted" and still
             // committed (PassUid of the row's front), which made the car behind
             // see a guest in its lane and take no turn at all.
-            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurn32
-                && placeOk32 && passUid32 >= 0)
+            if (wantM > 0.0 && c.OvertakeIntent && !blocked && myTurnStart32
+                && placeOkStart32 && passUid32 >= 0)
             {
                 c.PassUid = passUid32;
                 c.PassSegIdx = c.SegIdx;
                 c.PassProgress = passProg32;
                 c.PassLengthM = passLen32;
                 c.PassX = passX32; c.PassY = passY32;
+                // The window is the ROW's: remember its far end, so the pass lives
+                // until the body has cleared the front vehicle (see PassOutM).
+                c.PassFrontX = frontX32; c.PassFrontY = frontY32;
+                c.PassFrontLengthM = frontLen32;
                 // A commitment never shrinks mid-pass: the demand is a floor,
                 // not a value that jitters as the geometry changes.
                 c.PassShiftM = Math.Max(c.PassShiftM, wantM);
@@ -1325,6 +1544,7 @@ public static class CarCollisions
             {
                 c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
                 c.PassLengthM = 0.0;
+                c.PassFrontX = 0.0; c.PassFrontY = 0.0; c.PassFrontLengthM = 0.0;
                 c.PassShiftM = 0.0;
             }
             // The lateral frame of the segment, shared by R39's room and by the
@@ -1350,9 +1570,9 @@ public static class CarCollisions
                                          Math.Min(borrowerNeedM,
                                                   Math.Max(0.0, segC32.Width / 2.0 -
                                                             off32 - c.WidthM / 2.0)));
-                if (why32.GetValueOrDefault(c.Uid, "") != $"r39:{borrowerUid32}")
+                if (c.R39GuestUid != borrowerUid32)
                 {
-                    why32[c.Uid] = $"r39:{borrowerUid32}";
+                    c.R39GuestUid = borrowerUid32;
                     c.RecordDecision(simTime,
                         $"[R39] car {borrowerUid32} is passing in my lane - I own it: " +
                         "room on the right, the following rule's brake");
@@ -1363,23 +1583,72 @@ public static class CarCollisions
             // pass, and never a standstill either. No cap belongs here - only
             // R2/R7's brake may hold the car down, and it keeps its place behind
             // the obstruction while edging to the edge of its OWN lane (below).
-            string reason32 = blocked ? $"r32:{byUid32}"
-                                      : (!myTurn32 && wantM > 0.0 ? $"r37:{leaderUid32}"
-                                       : (!placeOk32 && wantM > 0.0 ? "r38:mouth" : ""));
-            if (blocked || (!myTurn32 && wantM > 0.0)
-                || (!placeOk32 && wantM > 0.0))
+            // A pass that is already ON does not end because an oncoming car
+            // appeared - it ends when it can no longer get out before the pair
+            // meets (owner 2026-11-04: discovering oncoming traffic mid-pass means
+            // "kräftig beschleunigen, den Überholvorgang noch rechtzeitig
+            // abschließen", and only when that is no longer possible, "abbremsen
+            // und zurückfallen"). Both travel times are the ones the pass actually
+            // has: mine at the pass speed, theirs at theirs.
+            bool beatIt32 = false;
+            if (wasOn32 && blocked && oncomingV32 > 0.05)
             {
-                c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
-                c.PassLengthM = 0.0;
-                c.PassShiftM = 0.0;
+                double myOutS = outM32 / Math.Max(passV32, 0.1);
+                double theirRoomM = Math.Max(0.0, oncomingAlongM32 - outM32);
+                beatIt32 = oncomingAlongM32 - outM32 > 0.0
+                           && theirRoomM / oncomingV32 >= myOutS + PassFinishMarginS;
             }
-            if (reason32 != why32.GetValueOrDefault(c.Uid, ""))
+            string reason32 = (blocked && !beatIt32)
+                                  ? (wasOn32 ? $"r32:back:{byUid32}" : $"r32:{byUid32}")
+                              : (!myTurn32 && wantM > 0.0 && !committedOut32
+                                     ? $"r37:{leaderUid32}"
+                               : (!placeOk32 && wantM > 0.0 && !committedOut32
+                                      ? "r38:mouth" : ""));
+            if ((blocked && !beatIt32)
+                || (!myTurn32 && wantM > 0.0 && !committedOut32)
+                || (!placeOk32 && wantM > 0.0 && !committedOut32))
             {
-                why32[c.Uid] = reason32;
-                if (reason32 == $"r32:{byUid32}")
-                    c.RecordDecision(simTime,
-                        $"[R32] the pinch belongs to car {byUid32} - " +
-                        "checking, not committed");
+                // #87: a refusal cancels the INTENT, not the fact that this car is
+                // standing in somebody else's lane. Clearing PassUid while the body is
+                // still out (measured test 21: committed at t=5.6 s with a 3.32 m
+                // borrow, refused 0.3 s later for an oncoming car at 100 km/h, and from
+                // that tick `OvertakeShiftM` decayed to 0.05 while the car was still
+                // 3.2 m off its own axis) made every pass exemption read "not passing"
+                // - so R2 called the pair an unexplained head-on conflict and braked it
+                // to 0 km/h AT t=10.6 s, in the oncoming lane, where it sat for the rest
+                // of the scenario behind a 10 km/h tractor.
+                // The commitment now lives until the body is back on its own axis, which
+                // is also what R33 needs: the crossing of the centreline stays explained
+                // for the whole return. Safety is not carried by PassUid - the following
+                // rule (v1) measures the real gap and speed, and v2's head-on caps are
+                // gated on this car being PARALLEL to the obstruction it passes, so an
+                // oncoming car keeps every cap whether or not the pass is remembered.
+                bool backInOwnLane = c.OvertakeShiftM <= 0.25;
+                if (!backInOwnLane && c.PassUid >= 0)
+                {
+                    if (c.R32Why != "r32:hold-return")
+                        c.RecordDecision(simTime,
+                            $"[R32] pass abandoned at {c.OvertakeShiftM:F2} m out - " +
+                            $"commitment to car {c.PassUid} held until I am back in my own " +
+                            "lane (the return is the end of the pass, not a new conflict)");
+                }
+                else
+                {
+                    c.PassUid = -1; c.PassSegIdx = -1; c.PassProgress = -1.0;
+                    c.PassLengthM = 0.0;
+                    c.PassFrontX = 0.0; c.PassFrontY = 0.0; c.PassFrontLengthM = 0.0;
+                    c.PassShiftM = 0.0;
+                }
+            }
+            if (reason32 != c.R32Why)
+            {
+                c.R32Why = reason32;
+                if (reason32.StartsWith("r32:"))
+                    c.RecordDecision(simTime, wasOn32
+                        ? $"[R32] the pass cannot finish before car {byUid32} - " +
+                          "braking, falling back into my own lane"
+                        : $"[R32] the pinch belongs to car {byUid32} - " +
+                          "checking, not committed");
                 else if (reason32 == $"r37:{leaderUid32}")
                     c.RecordDecision(simTime,
                         $"[R37] car {leaderUid32} ahead has the turn - " +
@@ -1391,7 +1660,7 @@ public static class CarCollisions
                               + $"({pastNodeM:F1} m past its mouth) - no pass begins here"
                             : $"[R38] a pass here would end at the junction mouth "
                               + $"{zoneNearM:F1} m ahead - the plan needs "
-                              + $"{planEndM + LookAheadForSpeed(c.Speed):F1} m: not a pass");
+                              + $"{planEndM + LookAheadForSpeed(passV32):F1} m: not a pass");
             }
             // Outside the window the car belongs to its own lane: the shift is
             // RELEASED, not decayed. The nav re-solves the line when the pass
@@ -1437,10 +1706,20 @@ public static class CarCollisions
             wantM = Math.Min(wantM, Math.Max(0.0, Math.Max(roomLeftM, kerbRoomM)));
             double prevShift32 = c.OvertakeShiftM;
             c.OvertakeShiftM = wantM;
-            if (wantM > prevShift32 + 0.05)
+            // R32: the pass is DRIVEN at its planned speed (owner 2026-11-04: the
+            // maximum allowed plus 10 km/h). Set here, where the borrow is real,
+            // and read as a throttle demand by the nav; every cap still runs after
+            // it, so a pass that turns unsafe is braked, never merely undeclared.
+            c.PassDemandMps = passV32;
+            // One line for the borrow, not one per centimetre of it: the shift
+            // ramps from 0 over ~2 s, so the old +0.05 threshold wrote a line every
+            // few centimetres (measured: 0.01, 0.02, 0.03, 0.04, 0.05 m within
+            // 0.15 s). It is announced when the borrow is real and re-announced when
+            // the demand grows by a metre.
+            if ((prevShift32 <= 0.05 && wantM > 0.3) || wantM > prevShift32 + 1.0)
                 c.RecordDecision(simTime,
                     $"[R32] obstruction ahead - borrowing the free lane " +
-                    $"({wantM:F2} m left)");
+                    $"({wantM:F2} m left, driven at {passV32 * 3.6:F0} km/h)");
         }
 
         // An award survives only as long as a contest is about the stretch.
@@ -1767,7 +2046,88 @@ public static class CarCollisions
                 // cars keep the immediate cap (right-before-left / stopped body).
                 bool wakeCase = yieldCar.Speed < 0.5 &&
                     IsParallelPair(yieldCar, oCar2) && OpeningGap(yieldCar, oCar2);
-                if (!wakeCase)
+                // R32 (owner decision 2026-11-04), the same exemption as in v1 and
+                // for the same reason: v2 sweeps every car at max(current, plan)
+                // speed, so a car that is mid-borrow past a slow vehicle is
+                // predicted straight into its rear and capped there - measured on
+                // test 21, where the overtaker re-committed at 75 km/h and was then
+                // held by "[R2] predicted crossing with car 2 in 2.1 s", the very
+                // car it was passing. That cap asks the pass to brake to the speed
+                // the pass exists to leave behind. Same gate as v1: the borrow has
+                // started, and the pair is a PARALLEL, same-direction one - an
+                // oblique or crossing pair keeps every cap v2 has, and so does a car
+                // that has not moved out of its lane yet.
+                bool passCase = PassSeparating(yieldCar, oCar2) ||
+                    // #87: the APPROACH half of a pass. `PassSeparating` needs 1.31 m
+                    // of sideways separation, which an over-taker only reaches once it
+                    // is nearly level - so for the whole closing phase (measured test 21:
+                    // 10.6 s of borrowing, cap 43 -> 11 -> 0 km/h) v2 answered "crossing
+                    // conflict with the car I am passing" and braked the pass to a
+                    // standstill behind it. A committed pass that is physically out of
+                    // its lane and whose meeting point lies BEHIND the obstruction's
+                    // rear cannot hit it from behind; what it must not lose is the gap,
+                    // so this half releases the crossing cap and leaves v1's following
+                    // rule in force (the crash the old demand-only gate caused was a car
+                    // running into the row's FRONT at 24 km/h - that pair meets AHEAD of
+                    // the obstruction, dMeet < gapM, so it stays capped here).
+                    (yieldCar.PassUid == otherUid &&
+                     yieldCar.OvertakeShiftM > 0.5 &&
+                     IsParallelPair(yieldCar, oCar2) &&
+                     dMeet <= Math.Max(yieldCar.LengthM, oCar2.LengthM)) ||
+                    // #87, the third case: the car is still OUT of its own lane with a
+                    // commitment held (the abandoned pass above). Measured t=10.40 s,
+                    // test 21: `passSep=False` (2.93 m < the 3.51 m body sum - returning,
+                    // so it crosses the obstruction's axis last), `gshift=False` (0.37 m,
+                    // it decays on the way back), `gmeet=False` (dMeet 5.3 m > 4.4 m, the
+                    // swept paths cross past the tractor's rear) - every gate false, so
+                    // v2 braked the RETURN to 0.4 km/h with "predicted crossing with car
+                    // 2". A car that has physically left its lane and still names the car
+                    // it passes is mid-manoeuvre; the longitudinal gap stays owned by v1,
+                    // which measures the real gap and speed. An ONCOMING car is untouched
+                    // by this, because of the parallel test.
+                    (yieldCar.PassUid == otherUid &&
+                     yieldCar.OvertakeShiftM > 0.25 &&
+                     IsParallelPair(yieldCar, oCar2));
+                // #87: a pair that can never occupy the same strip has no crossing
+                // conflict to brake for, whatever the swept paths say. The sweep
+                // projects both cars along their courses and calls a meeting; it does
+                // not ask whether the two BODIES could be in that place at the same
+                // time, so an over-taker 3.17 m to the side of the vehicle it passes
+                // - further apart sideways than both widths (1.80 + 2.05 m) - was held
+                // at 0 km/h by `[R2] predicted crossing with car 2 in 1.9 s`, which is
+                // the cap that killed the pass in test 21. Gated on being PARALLEL:
+                // an oblique or crossing pair keeps every cap v2 has, because there
+                // the lateral offset today says nothing about the strip at the meeting
+                // point. `NeverSharesStrip` is measured across the yielding car's own
+                // axis, the one that would have to move out.
+                bool stripCase = IsParallelPair(yieldCar, oCar2) &&
+                                 NeverSharesStrip(yieldCar, oCar2);
+                // #87 witness: the pair v2 actually reached (who yields, how far the
+                // bodies are apart across the yielding car's axis, and whether the new
+                // strip test fired). Needed because the cap text alone cannot say
+                // whether this filter was consulted at all.
+                if (PassWitness &&
+                    (yieldUid == PassWitnessUid || otherUid == PassWitnessUid))
+                {
+                    // The four gates of the pass exemption, each named, plus the two
+                    // numbers the approach half is gated on: how far the meeting point
+                    // is from the yielding car and the body length that bounds it.
+                    bool gPass = PassSeparating(yieldCar, oCar2);
+                    bool gUid = yieldCar.PassUid == otherUid;
+                    bool gShift = yieldCar.OvertakeShiftM > 0.5;
+                    bool gPar = IsParallelPair(yieldCar, oCar2);
+                    bool gMeet = dMeet <= Math.Max(yieldCar.LengthM, oCar2.LengthM);
+                    Console.WriteLine($"   [PASSV2] t={simTime:F2} pair({c.Uid},{o.Uid}) " +
+                        $"yield={yieldUid} other={otherUid} | strip across yielder=" +
+                        $"{NeverSharesStrip(yieldCar, oCar2)} (lat " +
+                        $"{Math.Abs((oCar2.X - yieldCar.X) * Math.Cos(Math.Radians(yieldCar.Heading)) + (oCar2.Y - yieldCar.Y) * -Math.Sin(Math.Radians(yieldCar.Heading))):F2} m, " +
+                        $"bodies {yieldCar.WidthM + oCar2.WidthM:F2} m) | parallel={gPar} " +
+                        $"passSep={gPass} passUid={yieldCar.PassUid}/{otherUid} gid={gUid} " +
+                        $"shift={yieldCar.OvertakeShiftM:F2} gshift={gShift} " +
+                        $"dMeet={dMeet:F1}/{Math.Max(yieldCar.LengthM, oCar2.LengthM):F1} gmeet={gMeet} " +
+                        $"wake={wakeCase} cap={cap * 3.6:F1} km/h");
+                }
+                if (!wakeCase && !passCase && !stripCase)
                 {
                     if (!IsPriorityCar(yieldCar))
                         OfferCap(yieldUid, cap, $"avoid#{otherUid}", v2Text, otherUid);
@@ -1781,6 +2141,14 @@ public static class CarCollisions
                 foreach (var car in new[] { c, o })
                 {
                     if (!IsPriorityCar(car)) continue;
+                    // R32: a vehicle I am mid-pass beside is not a CROSSING
+                    // conflict, however the swept paths meet near the junction
+                    // mouth ahead. Registering it as one put the car AHEAD OF ME IN
+                    // MY OWN LANE on the alert list, and the alert makes v1 skip the
+                    // pair (one brake authority per situation) - which left the
+                    // overtaker at the tractor's speed for 35 s and then braked it by
+                    // the staged machine while it was passing (measured, test 23).
+                    if (PassSeparating(car, car == c ? o : c)) continue;
                     double distP = car == c ? distC : distO;
                     int otherUid2 = car == c ? o.Uid : c.Uid;
                     if (!pConflicts.TryGetValue(car.Uid, out var pc) || stageS < pc.Ttc)
@@ -2858,6 +3226,26 @@ public static class CarCollisions
     /// direction within 35 deg) - i.e. they are a lane pair, not a crossing
     /// pair. Only those may be handed over to v1's corridor when the gap
     /// opens (see the OpeningGap note at the call site).</summary>
+    /// <summary>True while the two bodies can NEVER share the strip their courses
+    /// meet in: their perpendicular separation, measured across the axis of the car
+    /// that has to move out of the way, is greater than both bodies side by side.
+    /// #62/#87: an over-taker sitting 3.17 m to the side of the vehicle it passes
+    /// (measured, test 21) was still held at 0 km/h by `[R2] predicted crossing with
+    /// car 2 in 1.9 s` - the swept paths converge, so the rule called a conflict,
+    /// while the two cars are further apart sideways than the width of both of them
+    /// and no course of either can make them touch. Used to skip a cap, never to
+    /// grant one, and it says nothing about a car that has not moved out: at 0.13 m
+    /// of separation this is false and every rule stays in force.</summary>
+    public static bool NeverSharesStrip(Car a, Car b)
+    {
+        // Measure across a's axis: `lat` is the perpendicular offset of b from a's
+        // heading line. A pair on a curve differs by a few degrees, which is well
+        // inside the margin this leaves (it needs > body sum, ~1.9 m here).
+        double rad = Math.Radians(a.Heading);
+        double lat = (b.X - a.X) * Math.Cos(rad) + (b.Y - a.Y) * -Math.Sin(rad);
+        return Math.Abs(lat) > a.WidthM + b.WidthM;
+    }
+
     private static bool IsParallelPair(Car a, Car b)
     {
         double hdiff = Math.Abs(((a.Heading - b.Heading + 540.0) % 360.0) - 180.0);

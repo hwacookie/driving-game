@@ -69,6 +69,19 @@ KERB_PASS_MAX_M = 0.30
 # derived from it.
 PARK_AVENUE_WIDTH_M = 19.4
 
+# The OVER-TAKE as the pass condition (issue #87, owner's decision 2026-11-03:
+# "test passed" means the obstructions are OVERTAKEN, not that a red flag was
+# reached). A role counts as passed only when it sits this far BEHIND the primary
+# along the primary's own heading - the projection is measured from the role's
+# centre, and a tractor is 8.3 m long, so 12 m past the centre is past its
+# front bumper with a metre of margin: the whole row, not just its tail.
+OVERTAKE_CLEAR_M = 12.0
+# "finished before the crossing": at the moment the last role is cleared, the
+# primary must still be this far from the mouth. A crossing's own box is
+# Config.JUNCTION_WIDENING_M + JUNCTION_CORNER_RADIUS_M = 8 m, so 25 m is
+# "not at the crossing", with the approach margin the paint already shows.
+OVERTAKE_POINT_RADIUS_M = 25.0
+
 
 # Issue 47 (owner decision 2026-11-01): a scenario's 'duration' field is SIM seconds.
 # A back-in bay park was measured STILL closing into the bay - lateral offset 3.12 m
@@ -573,7 +586,7 @@ SCENARIO_FOCUS = {
     # The row test: the camera holds the row and the crossing node xing_c in one
     # frame, so the check, the borrow and the return are all visible.
     'fig8_row':            {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
-    'fig8_row_short':      {"kind": "loc", "segment": "xing_n35\u2192xing_c", "t": 0.5},
+    'fig8_row_short':      {"kind": "loc", "segment": "cross_n\u2192cross_center", "t": 0.6},
     # The pass happens at the parked car / at the crawler's start spot, on the
     # two-lane straight — a place, because the subject never moves (17) or
     # because the box must hold the whole squeeze (20).
@@ -642,7 +655,9 @@ PRIMARY_CAR_ROLE = {
     ('roundabout_from_north', 'right'): 'roundabout_exit_car',
     ('park_6lane_right_lane', 'straight'): 'parking_car',
     ('fig8_row', 'straight'): 'row_passing_car',   # the car that passes a whole row
-    ('fig8_row_short', 'straight'): 'row_passing_car',  # the car that may NOT
+    ('fig8_row_short', 'straight'): 'row_passing_car',  # the car that must pass a
+    # whole row BEFORE a crossing (issue #87: the pass, not a refusal, is the
+    # verdict; the place rule says WHERE it may live)
 }
 
 # docs §9 Case B + C (issue #78): a scenario is graded on the ROW when its
@@ -656,6 +671,10 @@ CHAIN_ROW_ROLES = {'row_front_tractor', 'row_rear_tractor'}
 # says why (R38's own line names the mouth). Roles carry the demand, as above
 # - not the scenario string.
 CHAIN_REFUSE_ROLES = {'row_front_tractor_no_room', 'row_rear_tractor_no_room'}
+# NOTE (issue #87): no scenario carries these roles any more - the row that
+# used them became a COMPLETED pass with a place rule (fig8_row_short). The
+# grading stays, because a row inside the margin is still a legal demand to
+# express, and dropping the machinery would make "refuse" ungradeable again.
 
 # sprite color -> vehicle class, mirroring Config.cs' VEHICLE_CLASS (the suite
 # spawns by sprite color, the class is what the car's dynamics and footprint
@@ -692,6 +711,16 @@ DETERMINISTIC_TESTS = [
     #      The PRIMARY is staged through the same POST /teleport as an extra, so
     #      the engine already parses this field; a row test whose passing car IS
     #      the primary states its own disposition instead of inheriting a default.
+    #  12 must_overtake: the ROLES (names from field 10) that the PRIMARY must
+    #      end up PAST - the over-take itself is the pass condition (owner,
+    #      2026-11-03: "test passed" means 't1+t2 overtaken', not 'a red flag
+    #      was reached'). Graded during the run: every named role must sit at
+    #      least OVERTAKE_CLEAR_M behind the primary along its own heading.
+    #  13 overtake_before: (x, y) in metres - the point the over-take must be
+    #      finished BEFORE (R38: a pass may not live at a crossing). At the
+    #      moment the last role is cleared the primary must still be more than
+    #      OVERTAKE_POINT_RADIUS_M from that point; a pass completed inside or
+    #      past the crossing is NOT a pass.
     # 90-degree corners (the classic reported bug)
     ('corner_right_entry', 'right', 50, 'cornerR_c→cornerR_w', 60.0,
      "Taking a sharp 90° right corner"),
@@ -840,10 +869,21 @@ DETERMINISTIC_TESTS = [
     # expects (user decision 2026-10-21): brake, CRAWL behind the slow car,
     # WAIT for the oncoming car to clear the pinch, and only THEN overtake.
     # Not: stop and stay stopped, not: dive past the crawler head-on.
-    ('slow_pass_priority', 'straight', 50, 'straight_n→straight_m', 60.0,
+    # The END of this run is the OVER-TAKE, not a flag (owner, 2026-11-03):
+    # `must_overtake` names the crawler, so a run that stops behind it FAILS
+    # even when it reaches its flag. That is why the flag moved from 85% of
+    # segment 0 (y=222.5, only 22 m past the crawler's start - measured on the
+    # live run 22:45: the car stopped there at 0 km/h and never left its lane,
+    # so the promised over-take was unreachable) to 60% of the NEXT segment,
+    # 240 m along the 300 m avenue: the avenue's only junction mouth is its far
+    # end, so R38 leaves this stretch open and the whole wait-then-pass fits in
+    # it legally (blend ~35 m, the crawler, blend ~35 m, ending ~60 m before
+    # the mouth).
+    ('slow_pass_priority', 'straight', 50, 'straight_m→straight_s', 90.0,
      "Slow car ahead + oncoming traffic: brake, crawl behind it, wait, then "
-     "overtake (R26 claim, R32, R36)",
-     0.15, False, 0.85, False,
+     "overtake (R26 claim, R32, R36) - the run PASSES only once the crawler "
+     "is behind it (must_overtake)",
+     0.15, False, 0.6, False,
      [{'segment': 'straight_n→straight_m', 'progress': 0.70,
        # 35% of the WHOLE straight, not of this segment: straight_n (y=350)
        # to straight_s (y=50) is 300 m, so 35% is 105 m along - y=245, which
@@ -851,7 +891,11 @@ DETERMINISTIC_TESTS = [
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
        'name': 'slow_car'},
       {'start_point': 'straight_reverse', 'progress': 0.15,
-       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}]),
+       'speed_mps': 50 / 3.6, 'throttle': True, 'name': 'oncoming_car'}],
+     # index 11 stays None (the primary here is an ordinary pushy driver, the
+     # sim's standing default); index 12 (must_overtake) names the crawler - the
+     # over-take, not the flag, is the pass condition (issue #87).
+     None, ['slow_car']),
     # --- The row as ONE obstruction (docs §9 Case B + C, issue #78) ---------
     # Two slow vehicles in a row, a car behind them, traffic in the other lane.
     # What §9 demands: the row is one plan (its window ends past its FRONT),
@@ -893,33 +937,44 @@ DETERMINISTIC_TESTS = [
      # THE PRIMARY's own disposition (index 11, primary_eagerness): the car
      # that passes the whole row IS the primary, so the scenario says what
      # that driver wants instead of inheriting the fleet default. 1.0 = pushy.
-     1.0),
-    # R38 (docs §9 "Where a pass may live at all - a crossing forbids one").
-    # The SAME row on the SAME tile, and the end flag BEFORE the crossing node
-    # xing_c: the row's front stands ~29 m before that mouth, while a pass at
-    # 50 km/h must be FINISHED 40 m before it (LookAheadForSpeed, the driver
-    # model's own look-ahead) and needs ~35 m of blend out, the row and ~35 m
-    # of blend back. So there is no plan, and the only right answer is a
-    # refusal: the driver states its intent (R37), may creep to the edge of its
-    # OWN lane (§9's check act), and never enters the borrowed lane. GRADED as
-    # the refusal - no car of the cast may borrow, and an [R38] line must name
-    # the mouth that refused it.
-    ('fig8_row_short', 'straight', 50, 'xing_n34→xing_n35', 90.0,
-     "Row just before a crossing: the pass cannot be finished in time, "
-     "so nobody may start one (R38's no-overtake zone, R37's order)",
-     0.1, False, 0.9, False,
-     [{'segment': 'xing_n35→xing_c', 'progress': 0.35,
-       # the row's FRONT, 15 m along a 44 m segment = ~29 m before xing_c.
+     # index 12 (must_overtake): the run passes only with BOTH tractors behind
+     # it - the over-take, not the flag, decides it (issue #87).
+     1.0, ['row_front_tractor', 'row_rear_tractor']),
+    # R38 as a COMPLETED pass (docs §9 "Where a pass may live at all - a
+    # crossing forbids one", issue #87). The row and the pass must be legal, so
+    # the stage moves to an approach that is actually 180 m of straight into a
+    # REAL mouth: `cross_n→cross_center` runs (750,900)→(750,720) and ends at the
+    # degree-4 crossroads cross_center - read over /segment/by, the chain behind
+    # that mouth is 180.0 m, and the only wider roads on this map (pkw 19.4 m,
+    # widths 13 m) both END at degree-1 nodes, so they carry no zone and cannot
+    # carry this test. The numbers: a pass at 50 km/h needs blend_out 13.9·2.5 =
+    # 34.75 m, the row, blend_back 34.75 m, and must END LookAheadForSpeed(13.9)
+    # = 40 m before the mouth → the row's FRONT must stand ≥ ~79 m before it; it
+    # is staged 100 m before (y=800), its rear 35 m back (y=835), and the primary
+    # enters 47 m behind the rear at the arm's own end. Index 13 (overtake_before
+    # = the mouth at (750,720)) grades the place rule: at the moment the last
+    # tractor is behind, the primary must still be more than OVERTAKE_POINT_RADIUS_M
+    # (25 m, the crossing's box is 8 m) away. A pass finished AT the crossing is
+    # NOT a pass - that is what replaces the old refusal-only verdict for a row;
+    # a short-room situation still refuses and still logs [R38], it just is not
+    # the verdict any more.
+    ('fig8_row_short', 'straight', 50, 'cross_center→cross_s', 90.0,
+     "Row before a real crossing: the whole pass must be COMPLETED before the "
+     "mouth - the test passes only with both tractors behind, finished before "
+     "cross_center (R38's place rule, R37 order, R32 row window)",
+     0.1, False, 0.5, False,
+     [{'segment': 'cross_n→cross_center', 'progress': 0.556,
+       # 100 m before the mouth (y=800): the minimum the cycle needs, plus room.
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
-       'model': 'tractor', 'name': 'row_front_tractor_no_room'},
-      {'segment': 'xing_n35→xing_c', 'progress': 0.12,
-       # ~10 m behind its front, same carriageway: this is the queue leader.
+       'model': 'tractor', 'name': 'row_front_tractor'},
+      {'segment': 'cross_n→cross_center', 'progress': 0.639,
+       # 35 m behind its front, same carriageway - the queue leader, and again
+       # "Ms. Daisy": this driver does not want the pass, it keeps its lane and
+       # leaves its turn to the car behind it (R40, #78's point).
        'speed_mps': 10 / 3.6, 'throttle': True, 'cruise_kmh': 10,
-       # "Ms. Daisy" again: the row's own rear driver does not want to pass,
-       # so it keeps its lane and leaves its turn to the car behind (#78's
-       # point) - which is the car that must refuse for the PLACE reason.
        'driver_eagerness': 0.0,
-       'model': 'tractor', 'name': 'row_rear_tractor_no_room'}]),
+       'model': 'tractor', 'name': 'row_rear_tractor'}],
+     1.0, ['row_front_tractor', 'row_rear_tractor'], (750.0, 720.0)),
     # Hairpin, entered from the opposite end (reverse direction)
     ('hairpin_exit', 'straight', 50, 'hair_a→hair_corner', 60.0,
      "Driving a hairpin bend (exit side)", 0.5, False, 0.5),
@@ -2737,7 +2792,9 @@ class TurnTester:
                       spawn_speed_kmh: float | None = None,
                       car_name: str | None = None,
                       extra_cars: list[dict] | None = None,
-                      primary_eagerness: float | None = None) -> dict:
+                      primary_eagerness: float | None = None,
+                      must_overtake: list[str] | None = None,
+                      overtake_before: tuple[float, float] | None = None) -> dict:
         """Monitor a turn for violations.
         
         Args:
@@ -3137,6 +3194,21 @@ class TurnTester:
         self._chain_poll = 0
         self._chain_borrowed, self._chain_declined, self._chain_r37 = set(), set(), set()
         self._chain_msgs = {}
+
+        # The OVER-TAKE as the pass condition (issue #87, owner 2026-11-03):
+        # "passed" means the named roles ended up BEHIND the primary, not that
+        # a red flag was reached. The roles come from the cast, so the scenario
+        # says WHICH cars it demands to be past - a row says both of its
+        # tractors, and a lone crawler says its one.
+        want_roles = {s['name']: uid for s, uid in zip(extra_cars or [], extra_uids)
+                      if s.get('name') in (must_overtake or [])}
+        self._otk_roles = want_roles
+        self._otk_missing = set(want_roles)          # roles not cleared yet
+        self._otk_done = False
+        self._otk_t = None
+        self._otk_at = None                         # primary's pose when done
+        self._otk_before = overtake_before
+        self._otk_late = False
         self._chain_uids = tuple({c['car_uid'] for c in self.get_state().get('cars', [])} |
                                  {self.get_state().get('car_uid')}) \
             if chain_here else ()
@@ -3439,6 +3511,73 @@ class TurnTester:
                 if any(cc['car_uid'] == uid and cc.get('segment_name') == exp
                        for cc in state.get('cars') or []):
                     extra_arrival[uid] = state.get('time') or 0.0
+
+            # --- the over-take (issue #87): every named role must sit at least
+            # OVERTAKE_CLEAR_M behind the primary ALONG the primary's own heading
+            # (a projection, so a car that is level with the row, or half a
+            # metre off its side, is NOT past it). One projection per role per
+            # poll - the row is at most a handful of cars, and the metric is the
+            # scenario's own, not a new measurement in the sim.
+            if want_roles and not self._otk_done:
+                px, py = state.get('x'), state.get('y')
+                hd = state.get('heading')
+                if px is not None and py is not None and hd is not None:
+                    # Heading here is the SIM's: degrees, 0 = north, clockwise
+                    # (the same convention the flag code uses: `tdir = (sin, cos)`).
+                    # Using (cos, sin) rotates the axis by 90°, which made a row that
+                    # is clearly AHEAD read as "behind" and finished the scenario on
+                    # the first poll (measured: Start == End, "Frames checked: 1").
+                    ax, ay = math.sin(math.radians(hd)), math.cos(math.radians(hd))
+                    for rname, uid in [(r, u) for r, u in want_roles.items()
+                                       if r in self._otk_missing]:
+                        c = next((cc for cc in state.get('cars') or []
+                                  if cc.get('car_uid') == uid), None)
+                        if c is None:
+                            continue
+                        if (px - c['x']) * ax + (py - c['y']) * ay >= OVERTAKE_CLEAR_M:
+                            self._otk_missing.discard(rname)
+                    if not self._otk_missing:
+                        self._otk_done = True
+                        self._otk_t = state.get('time')
+                        self._otk_at = (px, py)
+                        if self._otk_before is not None:
+                            # "finished BEFORE the crossing": at that moment the
+                            # primary must still be clear of the mouth by more
+                            # than the crossing's own box.
+                            d = math.hypot(px - self._otk_before[0],
+                                           py - self._otk_before[1])
+                            self._otk_late = d < OVERTAKE_POINT_RADIUS_M
+                        # THE FINISH LINE (owner decision 2026-11-04, issue #87):
+                        # in a pass scenario the run is over once the named
+                        # obstructions are BEHIND the car - a crossed pennant is not
+                        # the criterion, and it cannot be: the flag stands where the
+                        # manoeuvre ends, so the car typically passes it still out in
+                        # the other lane, and the flag test asks the body to be IN the
+                        # lane (measured on test 21: the pass completed, the flag saw
+                        # nothing, and the run then failed as "reached the destination
+                        # but never came to a clean stop"). Whether the pass was
+                        # LEGAL at that spot is still graded, from `overtake_before`.
+                        reached_expected_segment = True
+                        primary_arrival_sim = state.get('time') or 0.0
+                        final_pos = (state['x'], state['y'])
+                        stopped_ok = True   # the manoeuvre ends the run, not a stop
+                        print(f"\n   \U0001F3C1 Over-take complete - every named "
+                              f"obstruction is \u2265{OVERTAKE_CLEAR_M:.0f} m behind "
+                              f"(t={state.get('time'):.1f}s, "
+                              f"{state['speed_kmh']:.0f} km/h, "
+                              f"{len(want_roles)} passed)")
+                        print(f"      Start: ({initial_pos[0]:.0f}, "
+                              f"{initial_pos[1]:.0f}) seg {initial_segment} "
+                              f"\u2192 End: ({final_pos[0]:.0f}, "
+                              f"{final_pos[1]:.0f}) seg {state['segment']}")
+                        print(f"      Time: {time.time() - start_time:.2f}s")
+                        print(f"      Max heading change per frame: "
+                              f"{max_heading_change_per_frame:.1f}\u00b0")
+                        try:
+                            self.reset_controls()   # release the throttle latch
+                        except requests.exceptions.RequestException:
+                            pass
+                        break
             
             # Client-side teleport/jump check: an independent, coarser
             # safety net alongside the game's own internal (per-physics-
@@ -4103,6 +4242,36 @@ class TurnTester:
                         if chain_refuse else
                         bool(getattr(self, '_chain_borrowed', set())))
         passed = passed and chain_ok
+
+        # --- the over-take verdict (issue #87, owner 2026-11-03) ---------
+        # For a scenario that NAMES roles, the pass condition is the manœuvre:
+        # every named obstruction must be behind the primary by OVERTAKE_CLEAR_M
+        # along its heading, and when a point was named the whole pass must
+        # already be finished before that point. Reaching the red flag is NOT
+        # the pass condition here - being past the row is.
+        otk_ok = True
+        if want_roles:
+            otk_done = getattr(self, '_otk_done', False)
+            otk_late = getattr(self, '_otk_late', False)
+            otk_missing = sorted(getattr(self, '_otk_missing', set()))
+            print(f"   🏷 over-take (must pass: {', '.join(sorted(want_roles))}) "
+                  f"→ {'✅ PAST ALL OF THEM' if otk_done and not otk_late else '❌ not a completed pass'}")
+            if not otk_done:
+                print(f"      still level with or behind: {', '.join(otk_missing)} "
+                      f"(the run ended with the row not overtaken - "
+                      f"OVERTAKE_CLEAR_M = {OVERTAKE_CLEAR_M:.0f} m past each)")
+            elif otk_late:
+                print(f"      the pass completed AT the named point "
+                      f"({self._otk_at[0]:.1f},{self._otk_at[1]:.1f}) - "
+                      f"R38: a pass may not live at a crossing")
+            else:
+                print(f"      finished at t={self._otk_t:.1f}s, "
+                      f"clear of the named point by "
+                      f"{math.hypot(self._otk_at[0] - self._otk_before[0], self._otk_at[1] - self._otk_before[1]):.1f} m "
+                      if self._otk_before is not None else
+                      f"      finished at t={self._otk_t:.1f}s")
+            otk_ok = otk_done and not otk_late
+        passed = passed and otk_ok
         
         # The run is over: if the whole run never stated a mark, the fallback
         # circle WAS used the entire time - that is a fact worth saying once,
@@ -4166,6 +4335,11 @@ class TurnTester:
             'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
             'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
             'chain_r38_uids': sorted(getattr(self, '_chain_r38', set())),
+            'overtake_roles': sorted(want_roles),
+            'overtake_done': bool(getattr(self, '_otk_done', False)),
+            'overtake_missing': sorted(getattr(self, '_otk_missing', set())),
+            'overtake_late': bool(getattr(self, '_otk_late', False)),
+            'overtake_t': getattr(self, '_otk_t', None),
             'chain_msgs': {u: list(k.values()) for u, k in
                            getattr(self, '_chain_msgs', {}).items()},
             'collision_detected': collision_detected,
@@ -4440,6 +4614,13 @@ class TurnTester:
             # primary is patient or pushy declares it here, because wanting a
             # pass is the driver's, not something a car's speed implies.
             primary_eagerness = test[11] if len(test) > 11 else None
+            # 12/13 the OVER-TAKE as the pass condition (issue #87, owner's
+            # decision 2026-11-03): the named roles must end up behind the
+            # primary, and optionally the whole pass must be finished before a
+            # point (a crossing mouth). Reaching the end flag no longer decides
+            # these scenarios - being past the row does.
+            must_overtake = test[12] if len(test) > 12 else None
+            overtake_before = test[13] if len(test) > 13 else None
             # The primary car's ROLE: keyed by the maneuver (PRIMARY_CAR_ROLE).
             # The NEGATIVE hairpin test drives the SAME maneuver as the
             # positive one and is the car EXPECTED to end up wrong side - the
@@ -4519,7 +4700,9 @@ class TurnTester:
                                            expect_wrong_side=expect_wrong_side,
                                            car_name=car_name,
                                            extra_cars=extra_cars,
-                                           primary_eagerness=primary_eagerness)
+                                           primary_eagerness=primary_eagerness,
+                                           must_overtake=must_overtake,
+                                           overtake_before=overtake_before)
 
             _emit({'type': 'done', 'index': i, 'passed': result['passed'],
                    'aborted': bool(result.get('aborted'))})
