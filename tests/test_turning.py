@@ -1216,7 +1216,7 @@ class TurnTester:
             # nothing while a queued tractor's repeated line came through). The
             # set is this scenario's cast only - a handful of cars, not the
             # fleet - so the cost is a few small GETs per poll, not physics.
-            for u in getattr(self, '_chain_uids', ()):  # every car on the field
+            for u in getattr(self, '_chain_uids', ()):  # this scenario's cast
                     try:
                         rr = requests.get(f"{API_URL}/car/{u}/decisions", timeout=2)
                         rows = (rr.json() or {}).get("decisions", []) if rr.ok else []
@@ -1224,6 +1224,11 @@ class TurnTester:
                         continue
                     for e in rows:
                         m = e.get("msg", "")
+                        # The SPEAKER is the car whose log this came from (`u`).
+                        # A uid inside the text is somebody else: "no pass wanted
+                        # from car 33 ahead" quotes the car AHEAD (CarCollisions
+                        # .cs, askUid32), so printing that number as if it acted
+                        # attributed one driver's decision to another.
                         if m.startswith("[R32] obstruction ahead - borrowing"):
                             getattr(self, '_chain_borrowed', set()).add(u)
                         elif m.startswith("[R38]"):
@@ -3209,8 +3214,13 @@ class TurnTester:
         self._otk_at = None                         # primary's pose when done
         self._otk_before = overtake_before
         self._otk_late = False
-        self._chain_uids = tuple({c['car_uid'] for c in self.get_state().get('cars', [])} |
-                                 {self.get_state().get('car_uid')}) \
+        # The cast this scenario staged, plus the primary - NOT every car on the
+        # field. A row scenario's evidence is what ITS drivers decided; polling
+        # unnamed cars (a leftover from an earlier stage, or a fleet member) and
+        # printing them as "uid 32 (not a named extra)" made the facts block claim
+        # that a car of no name both took the pass and refused it.
+        self._chain_uids = tuple({self.get_state().get('car_uid')} |
+                                 {u for u in extra_uids if u is not None}) \
             if chain_here else ()
 
         if _aborted():
@@ -4350,8 +4360,14 @@ class TurnTester:
             # not uids, are what the diagnosis quotes - a scenario names its
             # cars on purpose (docs/TESTING.md, "Named cars").
             'chain_expected': chain_here,
-            'chain_role_map': {uid: (spec.get('name') or f'#{uid}')
-                               for spec, uid in zip(extra_cars or [], extra_uids)},
+            # The cast INCLUDING the primary: it is a car of this scenario too,
+            # and on a row scenario it IS the passing car (fig8_row names
+            # `must_overtake` as its two tractors while the driver doing the pass
+            # is the primary). A map of the extras only made every primary
+            # decision print as "uid 1 (not a named extra)" - see issue #108.
+            'chain_role_map': {**{uid: (spec.get('name') or f'car #{uid}')
+                                  for spec, uid in zip(extra_cars or [], extra_uids)},
+                               **{(self.get_state().get('car_uid') or 0): 'primary'}},
             'chain_refused': chain_refuse,
             'chain_declined_uids': sorted(getattr(self, '_chain_declined', set())),
             'chain_borrowed_uids': sorted(getattr(self, '_chain_borrowed', set())),
