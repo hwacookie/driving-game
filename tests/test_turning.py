@@ -466,8 +466,8 @@ def describe_failure(result: dict) -> str | None:
         gaps = result.get("kerb_gaps_m")
         if gaps is not None:
             return (f"parked too far from the kerb: right flank "
-                    f"{gaps[1] * 100:.0f} cm front / {gaps[0] * 100:.0f} cm rear "
-                    f"(limit {KERB_PASS_MAX_M * 100:.0f} cm)")
+                    f"{gaps[1] * 100:.1f} cm front / {gaps[0] * 100:.1f} cm rear "
+                    f"(limit {KERB_PASS_MAX_M * 100:.1f} cm)")
     return (f"timed out: never reached expected segment "
             f"{result.get('expected_end_segment')}")
 
@@ -4449,9 +4449,13 @@ class TurnTester:
 
         if kerb_gaps is not None:
             ok = not kerb_failed
-            txt = (f"   Kerb check: right flank {kerb_gaps[1] * 100:.0f} cm "
-                   f"(front) / {kerb_gaps[0] * 100:.0f} cm (rear) from the "
-                   f"kerb (limit {KERB_PASS_MAX_M * 100:.0f} cm)")
+            # One decimal, not none (#109): a gap of 30.4 cm against a limit of
+            # 30.0 cm used to print "30 cm (limit 30 cm)", which reads as an exact
+            # tie and sent a diagnosis chasing a boundary that the comparison
+            # (`max(gaps) > KERB_PASS_MAX_M`, strict) does not have.
+            txt = (f"   Kerb check: right flank {kerb_gaps[1] * 100:.1f} cm "
+                   f"(front) / {kerb_gaps[0] * 100:.1f} cm (rear) from the "
+                   f"kerb (limit {KERB_PASS_MAX_M * 100:.1f} cm)")
             print(green(f"   ✅ {txt}") if ok else red(f"   ❌ {txt}"))
 
         # Colored one-line verdict: green "passed" or red "fail: <reason>".
