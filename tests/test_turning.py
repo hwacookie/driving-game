@@ -3605,6 +3605,16 @@ class TurnTester:
                     elif t_now - stand_sim >= 1.5 and (
                             state.get('state') == 'parked' or t_now - stand_sim >= 6.0):
                         reached_expected_segment = True
+                        if state.get('state') == 'parked':
+                            # This break exits BEFORE the flag-arrival path can run its
+                            # brake-to-stop confirmation, so without this the run failed
+                            # "never came to a clean stop" on a car that sat at <0.4 km/h
+                            # for 1.5 s with the sim declaring it parked. Sustained rest
+                            # plus the sim's own `parked` IS the clean stop, verified by
+                            # this detector instead of _brake_to_stop. The 6 s timeout
+                            # branch stays False: a car that rests without ever parking
+                            # did not stop clean.
+                            stopped_ok = True
                         print(f"\n   \U0001f7e9 [{_wts()}] Standing in the bay at sim "
                               f"t={t_now:.1f} s - the bay rectangle is the goal, so the "
                               "drive is over here")
@@ -4143,6 +4153,17 @@ class TurnTester:
             except requests.exceptions.RequestException:
                 bay = None
         bay_ok = True
+        # The price of the manoeuvre, printed next to the verdict (#62): the road area the
+        # body swept while parking, as m^2 and as a multiple of the car's own standing
+        # footprint. Owner's method 2026-11-06 — push the rectangle along the path like a
+        # piece of chalk. A planned single arc to this bay's depth sweeps 34.40 m^2
+        # (ParkingPatternTests), so the ratio between the two is the executor's own cost.
+        if kerb_check and park_box is not None:
+            swept = float(park_box.get('sweptAreaM2') or 0.0)
+            ratio = float(park_box.get('sweptFootprintRatio') or 0.0)
+            if swept > 0.0:
+                print(f"      ⬛  swept road: {swept:.2f} m^2 = {ratio:.2f} x the car's own "
+                      f"footprint (a single planned arc at this depth needs ~34.4 m^2)")
         if bay is not None:
             bay_ok = bay[0] > 0.0 and bay[1] > 0.0
             print(f"      "

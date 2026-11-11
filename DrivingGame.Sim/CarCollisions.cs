@@ -558,6 +558,7 @@ public static class CarCollisions
 
     // TEMPORARY debug hook (remove after use)
     public static List<string> DebugLog = new();
+    private static DateTime PinWitnessT;   // TEMP #62
 
     // Decision-log debounce: pending threat replacements per car uid and how
     // many CONSECUTIVE substeps they have won the cap (see the final pass in
@@ -1749,7 +1750,16 @@ public static class CarCollisions
             // Filled for every car with a parking job, not only a running tuck: the
             // planner must see the neighbours BEFORE it commits (#36) — waiting for
             // the tuck to be armed asked the question one step too late.
-            if (c.BicycleNav is not { ParkJobActive: true })
+            // §1d (2026-11-03): the ask opens the window, not the locked style.
+            // ParkJobActive is `ReverseParkActive || ParkPhase != "none" ||
+            // _parkStyleLocked` — a car that has a DESTINATION but refuses to pick
+            // a style yet (§1d: no style before it is beside a mouth) would ask for
+            // neighbours that the query never fills, and the row would stay unseen
+            // forever: measured as five cars planning a reverse-in at the MARK with
+            // `park_target: null`. The window is still only opened for cars that are
+            // meant to park, the scope the comment above keeps.
+            if (c.BicycleNav is null ||
+                (c.BicycleNav is not { ParkJobActive: true } && !c.BicycleNav.HasDestination()))
             {
                 c.ParkingNeighbours = null;
                 continue;
@@ -3323,6 +3333,13 @@ public static class CarCollisions
                 {
                     var p = prevPose[k];
                     var car = k == c.Uid ? c : o;
+                    // TEMP #62: who is pinning the parking car?
+                    if (k == 1)
+                    {
+                        var now = DateTime.Now;
+                        if ((now - PinWitnessT).TotalSeconds > 0.5) { PinWitnessT = now;
+                            Console.WriteLine($"   [PIN] car#1 rolled back vs #{o.Uid} at ({car.X:F2},{car.Y:F2}) h={car.Heading:F1}"); }
+                    }
                     car.X = p.X; car.Y = p.Y; car.Heading = p.Heading;
                     car.Speed = 0.0;
                     contacted.Add(k);

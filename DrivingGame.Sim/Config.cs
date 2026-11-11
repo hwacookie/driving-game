@@ -358,6 +358,30 @@ public static class Config
     /// reverse-in tuck grows past what _reverse_park_ok allows and the style
     /// falls back to a forward park ~0.6 m out.</summary>
     public const double PARK_KERB_CLEARANCE_M = 0.16;
+    /// <summary>How FAR from the kerb a parked flank may sit and still count as
+    /// properly parked (m) - wider than PARK_KERB_CLEARANCE_M, which is the ideal.
+    /// The e2e kerb check uses this same number (tests/test_turning.py
+    /// KEB_PASS_MAX_M). A claimed bay whose box only intersects the band
+    /// [cleared, max] must rest in that sliver to satisfy BOTH the owner's box
+    /// rule and the kerb rule at once (#62).</summary>
+    public const double PARK_KERB_MAX_GAP_M = 0.30;
+
+    // The largest yaw a reverse path may cross the goal axle at and still be trimmed
+    // there (a resting car swung harder than this is not parked, it is wedged).
+    // The search rejects such candidates outright (#62: bay 24's dv 3.32 winner
+    // crossed at -12.7°, the trim refused, and the endpoint rested 2 m past the box),
+    // so this one number owns both the planner's constraint and the executor's trim.
+    // Why 2° and not the old 12°: on the parking avenue a resting yaw spreads the two
+    // wheel stations' kerb gaps by sin(psi) x ~3 m - measured in bay 24, a -4.7° rest
+    // read 47 cm front / 23 cm rear against the 30 cm limit (the box itself passed at
+    // +0 cm). Only a near-parallel rest keeps BOTH stations inside the limit while the
+    // body sits on the rest-line sliver [8.50, 8.65]; at 2° the spread is ~10 cm.
+    // #25: was 12.0 - a candidate crossing the goal axle at -11.9° squeaked through,
+    // got trimmed there with the yaw still open, and nothing in the tight gap could
+    // close it (forward shimmy pinned by the front neighbour, backward continuation
+    // drifts out of the box toward the rear neighbour). Refusing crossings wider than
+    // 8° forces the RE-SET UP re-stage instead of arming an unfinishable line.
+    public const double PARK_TRIM_MAX_CROSS_DEG = 8.0;
     /// <summary>Parking lanes END this far (m) before any junction — you cannot
     /// park right in front of one (user decision: at least 5 m, visually).</summary>
     public const double PARK_LANE_END_GAP_M = 5.0;
