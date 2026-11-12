@@ -173,7 +173,7 @@ public class ModelSpawnTests
     const double Dt = SimEngine.DtFixed;
 
     static SimEngine NewEngine() =>
-        new SimEngine(TestMaps.BuildTestMap("basic"), new ObstacleManager("basic"), "basic");
+        new SimEngine(TestMaps.BuildTestMap("basic"), "basic");
 
     static Car Spawn(SimEngine engine, string model, bool add)
     {

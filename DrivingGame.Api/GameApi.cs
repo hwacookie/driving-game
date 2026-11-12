@@ -1029,51 +1029,16 @@ public static class GameApi
             }
         });
 
-        // --- obstacles ---------------------------------------------------------------------
+        // --- obstacles: retired (issue #27) -------------------------------------------
+        //
+        // GET/POST/DELETE /obstacles are gone. A body that does not move is a Car with
+        // `Parked = true` (/teleport + /park): it appears in /state, on the tape and in a
+        // replay, which an Obstacle never did - so every verdict, the reviewer and the
+        // detail window could finally see it. Nothing in this repo ever placed one (no UI,
+        // no scenario, no layout file: data/obstacles/ does not exist), and car-car
+        // contact is owned by CarCollisions. `ObstacleGeometry` STAYS: it is the sim's
+        // box-geometry library, used by every car-car overlap test.
 
-        app.MapGet("/obstacles", () => Results.Json(
-            engine.Obstacles.SnapshotDicts().Select(d => (object)new Dictionary<string, object?>(d)).ToList()));
-
-        app.MapPost("/obstacles", async (HttpRequest req) =>
-        {
-            var data = await ReadJsonBody(req);
-            try
-            {
-                string type = data.TryGetProperty("type", out var t) ? t.GetString()! : "car";
-                string color = data.TryGetProperty("color", out var c) ? c.GetString()! : "";
-                // Which vehicle is parked here (#22) — its model decides the
-                // metres of road the obstruction owns. Absent = the sedan every
-                // layout before this field described.
-                string model = data.TryGetProperty("model", out var mo) &&
-                               mo.ValueKind == System.Text.Json.JsonValueKind.String &&
-                               !string.IsNullOrEmpty(mo.GetString())
-                               ? mo.GetString()! : "mercedes_c220";
-                double x = data.GetProperty("x").GetDouble();
-                double y = data.GetProperty("y").GetDouble();
-                var ob = engine.Obstacles.Place(engine.Network, type, color, x, y, model);
-                return Json(ob.ToDict(), 201);
-            }
-            catch (KeyNotFoundException e)
-            {
-                return Json(new Dictionary<string, object?> { ["error"] = $"invalid request: {e.Message}" }, 400);
-            }
-            catch (FormatException e)
-            {
-                return Json(new Dictionary<string, object?> { ["error"] = $"invalid request: {e.Message}" }, 400);
-            }
-            catch (PlacementError e)
-            {
-                return Json(new Dictionary<string, object?> { ["error"] = e.Message }, 400);
-            }
-        });
-
-        app.MapDelete("/obstacles/{obId:int}", (int obId) =>
-        {
-            if (!engine.Obstacles.Remove(obId))
-                return Json(new Dictionary<string, object?>
-                    { ["error"] = $"no obstacle with id {obId}" }, 404);
-            return Results.Json(new Dictionary<string, object?> { ["ok"] = true, ["id"] = obId });
-        });
     }
 
     // --- helpers ---------------------------------------------------------------------------

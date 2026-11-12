@@ -17,8 +17,7 @@ public class CollisionTests
     static (SimEngine Engine, RoadNetwork Net) NewEngine()
     {
         var net = TestMaps.BuildTestMap("basic");
-        var obs = new ObstacleManager("basic");
-        return (new SimEngine(net, obs), net);
+        return (new SimEngine(net), net);
     }
 
     /// <summary>Spawns a car at a named start point (Add=true - alongside any

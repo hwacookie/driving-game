@@ -22,7 +22,6 @@ public partial class MapRenderer : Node2D
     const string MapUrl = "http://127.0.0.1:5001/map";
     const string StateUrl = "http://127.0.0.1:5001/state";
     const string RunTestUrl = "http://127.0.0.1:5001/run_test";
-    const string ObstaclesUrl = "http://127.0.0.1:5001/obstacles";
     // /state carries METRES (same unit as /map and as this node's own
     // world coordinates), so there is no pixels-per-meter factor here.
 
@@ -285,17 +284,6 @@ public partial class MapRenderer : Node2D
     /// metres, painted through the same body-mask shader the live cars use (never
     /// a second recolouring route, so glass and tyres stay glass and tyres).
     ///
-    /// The list is the host's truth, not the nodes': a placement or a removal in
-    /// the world shows up here on the next poll, and a despawned obstacle loses
-    /// its node — a scenery that outlives its data is the bug class this file has
-    /// already been bitten by (the disposed courtesy cones).</summary>
-    private readonly Dictionary<long, (string Model, string Color, double X, double Y, double Heading)>
-        _obstacles = new();
-    private readonly Dictionary<long, Node2D> _obstacleNodes = new();
-    private HttpRequest _obstacleHttp;
-    private Node2D _obstacleLayer;
-    private bool _obstacleBusy;
-    private double _obstacleNextAt;          // seconds; the poll is throttled
     private long? _followUid;      // camera bound to this car (null = free)
     /// <summary>Crash camera: the first car that reports a contact this run
     /// pins the view on it. A 50-car crossing run is unreadable at the map's
@@ -1110,7 +1098,6 @@ public partial class MapRenderer : Node2D
             // Scenery rides the same host: parked cars belong to the world this
             // window shows, and there is only a world to ask when there is an
             // API to ask it through (#24).
-            ArmObstaclePoll();
             var title = GetTree().Root.Title;
             if (title.Length == 0) title = "DrivingGame";
             GetTree().Root.Title = $"{title} :{port}";
@@ -1133,8 +1120,6 @@ public partial class MapRenderer : Node2D
         // parked mixer renders in front of it no matter WHICH of the two nodes
         // was created first. Tree order alone would have made that a race — the
         // obstacles arrive on a poll, the cars on the first /state sample.
-        _obstacleLayer = new Node2D { Name = "Obstacles", ZIndex = 4 };
-        _world.AddChild(_obstacleLayer);
         _http.RequestCompleted += OnMapResponse;
         if (embedded && _simHost != null)
         {
@@ -1906,107 +1891,18 @@ public partial class MapRenderer : Node2D
     /// freshness. Never started in a review window: its world is the TAPE's, and
     /// the live host's parked cars are not part of the run under review (#4 was
     /// exactly that leak, with cars instead of scenery).</summary>
-    void ArmObstaclePoll()
-    {
-        // Only a FILE review skips the scenery: its world is the tape's, and a
-        // live host's parked cars beside it are not part of the run under review
-        // (#4). A live window shows the same parked scenery as always - the
-        // tape source changed its PICTURE, not its world.
-        if (_review) return;
-        if (_obstacleHttp == null)
-        {
-            _obstacleHttp = new HttpRequest { UseThreads = true, Timeout = 2.0 };
-            AddChild(_obstacleHttp);
-            _obstacleHttp.RequestCompleted += OnObstaclesResponse;
-        }
-        GetTree().CreateTimer(1.5).Timeout += RequestObstacles;
-    }
+    
 
-    void RequestObstacles()
-    {
-        if (_obstacleBusy || _obstacleHttp == null) return;
-        _obstacleBusy = true;
-        _obstacleHttp.Request($"http://127.0.0.1:{_apiPort}/obstacles");
-        GetTree().CreateTimer(1.5).Timeout += RequestObstacles;   // re-arm
-    }
+    
 
-    void OnObstaclesResponse(long requestId, long code, string[] headers, byte[] bodyBytes)
-    {
-        _obstacleBusy = false;
-        // Scenery must never break the view: a non-200 or a malformed body leaves
-        // what is already drawn standing and says so once, instead of throwing
-        // every poll for the rest of the session.
-        if (code != 200)
-        {
-            if (_obstacles.Count == 0) GD.Print($"GET /obstacles → HTTP {code} (no scenery)");
-            return;
-        }
-        try
-        {
-            using var doc = JsonDocument.Parse(bodyBytes);
-            var seen = new HashSet<long>();
-            foreach (var el in doc.RootElement.EnumerateArray())
-            {
-                long id = el.GetProperty("id").GetInt64();
-                string model = el.TryGetProperty("model", out var mo) &&
-                               mo.ValueKind == JsonValueKind.String ? mo.GetString()! : "mercedes_c220";
-                string paint = el.TryGetProperty("color", out var pc) &&
-                               pc.ValueKind == JsonValueKind.String ? pc.GetString()! : "blue";
-                _obstacles[id] = (model, paint, el.GetProperty("x").GetDouble(),
-                                  el.GetProperty("y").GetDouble(), el.GetProperty("heading").GetDouble());
-                seen.Add(id);
-            }
-            // A removal is a fact too: an obstacle that left the world loses its
-            // node (a ghost parked car that outlives its data is the dangling-node
-            // class this file has already been bitten by once).
-            foreach (var gone in _obstacleNodes.Keys.Where(k => !seen.Contains(k)).ToList())
-            {
-                _obstacleNodes[gone].QueueFree();
-                _obstacleNodes.Remove(gone);
-                _obstacles.Remove(gone);
-            }
-            int built = 0;
-            foreach (var kv in _obstacles)
-                if (!_obstacleNodes.ContainsKey(kv.Key)) { AddObstacleNode(kv.Key, kv.Value); built++; }
-            if (built > 0) GD.Print($"OBSTACLES drew {built} parked vehicle(s) · {seen.Count} in the world");
-            ObstacleMarksChanged = true;
-        }
-        catch (System.Exception e)
-        {
-            GD.PrintErr($"GET /obstacles unreadable: {e.GetType().Name}: {e.Message}");
-        }
-    }
+    
 
     /// <summary>One parked vehicle: its MODEL's photo, stretched to the MODEL's
     /// metres — the same rule #22 gave the collision box, so what the eye measures
     /// is what the sim collides with. The palette colour is a paint and therefore
     /// goes through the body-mask shader like any livery: sheet metal takes it,
     /// glass and tyres do not.</summary>
-    void AddObstacleNode(long id,
-        (string Model, string Color, double X, double Y, double Heading) ob)
-    {
-        var tex = CarTexture(ob.Model);
-        var (w, l) = CarSizeOf(ob.Model);
-        if (tex == null) return;
-        var ts = tex.GetSize();
-        if (ts.X <= 0 || ts.Y <= 0) return;
-        // /obstacles x,y is the CENTRE of the box (ObstacleGeometry.BoxCorners is
-        // centred), whereas a car's pose is its REAR AXLE — hence no
-        // RearAxleOffsetM here, and the sprite sits on its node.
-        var root = new Node2D { Name = $"obstacle_{id}" };
-        var spr = new Sprite2D
-        {
-            Texture = tex,
-            Scale = new Vector2(w / ts.X, l / ts.Y),
-        };
-        string hex = ObstacleHex(ob.Color);
-        if (hex != null) spr.Material = PaintMaterial(ob.Model, hex);
-        root.AddChild(spr);
-        root.Position = W((float)ob.X, (float)ob.Y);
-        root.RotationDegrees = (float)ob.Heading;
-        _obstacleLayer.AddChild(root);
-        _obstacleNodes[id] = root;
-    }
+    
 
     /// <summary>The string a property holds, or null when the key is absent or is not a
     /// string (a declared paint is answered as JSON null when unauthored).
@@ -2028,13 +1924,7 @@ public partial class MapRenderer : Node2D
     /// <summary>The obstacle palette is an RGB triple per name (which is why
     /// #17's rename was refused: it really is a colour). The mask shader wants
     /// `#rrggbb`, so this is the one conversion — no second recolouring path.</summary>
-    static string ObstacleHex(string color) =>
-        DrivingGame.Sim.ObstacleGeometry.ObstacleColors.TryGetValue(color ?? "", out var rgb)
-            ? $"#{rgb.R:x2}{rgb.G:x2}{rgb.B:x2}" : null;
 
-    /// <summary>Set when the obstacle set changed, so the minimap redraws for
-    /// scenery rather than every frame.</summary>
-    private bool ObstacleMarksChanged;
 
 
     private void OnMapResponse(long requestId, long responseCode, string[] headers, byte[] body)
@@ -2062,15 +1952,8 @@ public partial class MapRenderer : Node2D
         // Free the static geometry, but keep the marking layer alive (its
         // meshes are rebuilt by RebuildMarkings, not re-created here).
         foreach (var child in _world.GetChildren())
-            if (child != _markLayer && child != _obstacleLayer)
+            if (child != _markLayer)
                 child.QueueFree();
-        // A rebuilt world holds no scenery: the obstacle nodes come back from the
-        // host's list on the next poll. Dropping the cache is what makes that true
-        // — keeping handles to freed nodes is the disposed-node class this file has
-        // already been bitten by (#1, the courtesy cones). Measured here: with the
-        // layer swept like ordinary geometry, every poll died with
-        // ObjectDisposedException on 'Godot.Node2D' and nothing was ever drawn.
-        _obstacleNodes.Clear();
         _markings.Clear();
         _crossingDots.Clear();
         // The child sweep above also kills the track lines and flag nodes that
@@ -4810,15 +4693,6 @@ public partial class MapRenderer : Node2D
         if (_minimap != null)
         {
             _minimap.Cars.Clear();
-            // Parked scenery gets a mark too: a small grey SQUARE, deliberately not
-            // a circle, so a dot can never be read as a car that might move (#24).
-            if (ObstacleMarksChanged)
-            {
-                _minimap.Obstacles = _obstacles.Select(kv =>
-                    W((float)kv.Value.X, (float)kv.Value.Y)).ToList();
-                ObstacleMarksChanged = false;
-                _minimap.QueueRedraw();
-            }
             // The dots are the cars the DATA speaks about, not whatever nodes
             // happen to exist: a car absent from the frame has nothing to
             // say about this moment, and its dot used to be painted from the
@@ -6325,9 +6199,6 @@ public partial class MinimapNode : Control
     // camera is bound to (drawn with a yellow ring); the color is the
     // car's own display color (multi-car).
     public List<(Vector2 Pos, bool Followed, Color Col)> Cars = new();
-    /// <summary>Parked obstacles (#24): positions only, drawn as small grey
-    /// squares — a different shape from a car's dot on purpose.</summary>
-    public List<Vector2> Obstacles = new();
 
     public void Setup(List<(Vector2 A, Vector2 B, float W)> segs,
                       Rect2 bounds, Color road, Camera2D cam)
@@ -6442,16 +6313,6 @@ public partial class MinimapNode : Control
                 DrawCircle(cp, 6.5f, new Color(1f, 1f, 0f), false, 2f);
         }
 
-        // Parked obstacles (#24): grey squares, 3 px, no ring — the shape is the
-        // difference that matters, because a grey CIRCLE at a fixed spot reads as
-        // "a car that is not moving" and the minimap has no other way to say
-        // "this one cannot".
-        foreach (var o in Obstacles)
-        {
-            var op = Mm(o);
-            DrawRect(new Rect2(op - new Vector2(1.5f, 1.5f), new Vector2(3f, 3f)),
-                     new Color(0.72f, 0.72f, 0.72f));
-        }
 
         // Yellow viewport rectangle (2 px outline). No clip API in C#, so
         // clamp it to the box — at low zoom it alone can exceed the minimap.

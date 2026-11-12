@@ -97,189 +97,31 @@ public class SafetySystemsTests
         return minOverlap;
     }
 
-    // --- obstacle placement + auto-alignment ---------------------------------
+    // --- obstacle placement, auto-alignment and layout persistence ------------
+    // Retired with the obstacle entity (#27). These asserted ObstacleManager's own
+    // rules - a placed body auto-aligning to the flow of the half-road it stands in,
+    // off-road positions refused, type/colour validated, and Save/Load/ListLayouts
+    // round-tripping `data/obstacles/<map>/<name>.json`. None of it survives: nothing
+    // in this repo places an obstacle (no UI, no scenario, no layout file), and a
+    // parked CAR is placed by /teleport with an explicit heading, so there is no
+    // auto-alignment rule to keep and no layout format to persist.
 
-    [Fact]
-    public void Place_TwoWayRightHalf_FacesAlongFlow()
-    {
-        var net = BasicNet();
-        var car = SpawnStraight(net);
-        Assert.False(net.Segments[car.SegIdx].Oneway, "test needs a two-way segment");
-        var mgr = new ObstacleManager("basic", TempDir());
+    // --- stop on contact ---------------------------------------------------
+    // Retired with the obstacle entity (#27). `ObstacleManager.ApplyContactStop` was
+    // the only caller of that code path; a body that does not move is a parked Car now,
+    // and "brake to a true rest against it, without sinking in" is already asserted on
+    // the car path by CollisionTests.StationaryLeadCar_FollowerBrakesAndStopsBehind and
+    // on the model-length side by ParkedBlockerContactTests.
 
-        var (mx, my) = StraightMidpoint(net, car);
-        var (rx, ry) = StraightRight(net, car);
-        var ob = mgr.Place(net, "car", "blue", mx + rx * 1.5, my + ry * 1.5);
 
-        var seg = net.Segments[car.SegIdx];
-        double expected = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
-        Assert.True(AngleDiffDeg(ob.Heading, expected) < 5.0,
-            $"right-half obstacle faces {ob.Heading:F1}°, expected ~{expected:F1}° (along flow)");
-    }
-
-    [Fact]
-    public void Place_TwoWayLeftHalf_FacesAgainstFlow()
-    {
-        var net = BasicNet();
-        var car = SpawnStraight(net);
-        var mgr = new ObstacleManager("basic", TempDir());
-
-        var (mx, my) = StraightMidpoint(net, car);
-        var (rx, ry) = StraightRight(net, car);
-        var ob = mgr.Place(net, "car", "blue", mx - rx * 1.5, my - ry * 1.5);
-
-        var seg = net.Segments[car.SegIdx];
-        double alongFlow = PosMod(Math.Degrees(Math.Atan2(seg.X2 - seg.X1, seg.Y2 - seg.Y1)), 360.0);
-        Assert.True(AngleDiffDeg(ob.Heading, PosMod(alongFlow + 180.0, 360.0)) < 5.0,
-            $"left-half obstacle faces {ob.Heading:F1}°, expected ~{PosMod(alongFlow + 180.0, 360.0):F1}° (against flow)");
-    }
-
-    [Fact]
-    public void Place_OffRoad_ThrowsPlacementError()
-    {
-        var net = BasicNet();
-        var mgr = new ObstacleManager("basic", TempDir());
-        Assert.Throws<PlacementError>(() => mgr.Place(net, "car", "blue", -5000, -5000));
-    }
-
-    [Fact]
-    public void Place_UnknownTypeOrColor_Throws()
-    {
-        var net = BasicNet();
-        var car = SpawnStraight(net);
-        var mgr = new ObstacleManager("basic", TempDir());
-        var (mx, my) = StraightMidpoint(net, car);
-        Assert.Throws<PlacementError>(() => mgr.Place(net, "truck", "blue", mx, my));
-        Assert.Throws<PlacementError>(() => mgr.Place(net, "car", "red", mx, my));
-    }
-
-    // --- stop on contact ------------------------------------------------------
-
-    [Fact]
-    public void ContactStop_CarBrakesAndRestsAgainstObstacle()
-    {
-        var net = BasicNet();
-        var car = SpawnStraight(net);
-        ShiftRight(car, Config.LaneBaseOffsetM(net.Segments[car.SegIdx].Width)); // normal driving position
-        Advance(car, 10.0);                                                      // clear of the spawn node
-
-        var mgr = new ObstacleManager("basic", TempDir());
-        var (bx, by) = car.BodyCenter();
-        double rad = Math.Radians(car.Heading);
-        // Parked car 12 m ahead in the same lane.
-        var ob = mgr.Place(net, "car", "blue",
-            bx + Math.Sin(rad) * 12.0, by + Math.Cos(rad) * 12.0);
-
-        var driver = new KeyboardDriver();
-        var keys = new Dictionary<string, bool> { [Config.KEY_W] = true };
-        bool everContact = false;
-        for (int i = 0; i < 60 * 15; i++)   // up to 15 s at 60 Hz
-        {
-            double preX = car.X, preY = car.Y, preH = car.Heading;
-            var control = driver.GetControl(car, net, Dt, keys);
-            car.Update(Dt, net, control);
-            everContact |= mgr.ApplyContactStop(car, Dt, preX, preY, preH);
-        }
-
-        Assert.True(everContact, "the car never registered contact with the obstacle");
-        Assert.Equal(0.0, car.Speed);   // braked to a true rest (deadband)
-
-        // No interpenetration: body box may touch, but not sink in.
-        double pen = PenetrationM(ObstacleGeometry.PlayerBodyCorners(car),
-                                   ObstacleGeometry.ObstacleFootprint(ob));
-        Assert.True(pen < 1.0, $"body penetrates obstacle by {pen:F3} m");
-
-        // The car stopped in front of (or at) the obstacle, not through it.
-        // The obstacle is auto-aligned to the same flow direction as the car,
-        // so both faces project onto the travel axis:
-        var (cbx, cby) = car.BodyCenter();
-        double alongX = Math.Sin(rad), alongY = Math.Cos(rad);
-        double carFront = cbx * alongX + cby * alongY + Config.CAR_LENGTH_M / 2.0;
-        double obRear = ob.X * alongX + ob.Y * alongY - Config.CAR_LENGTH_M / 2.0;
-        Assert.True(carFront <= obRear + 0.05,
-            $"car front passed the obstacle's rear face by {(carFront - obRear):F3} m");
-    }
 
     // --- layout save / load ----------------------------------------------------
 
-    [Fact]
-    public void SaveLoad_RoundTrip()
-    {
-        var dir = TempDir();
-        try
-        {
-            var net = BasicNet();
-            var car = SpawnStraight(net);
-            var mgr = new ObstacleManager("basic", dir);
-            var (mx, my) = StraightMidpoint(net, car);
-            var (rx, ry) = StraightRight(net, car);
-            for (double off = -1.5; off <= 1.5; off += 1.5)
-                mgr.Place(net, "car", "blue", mx + rx * off, my + ry * off);
-
-            string path = mgr.Save("a/b:c");   // sanitizes to a_b_c
-            Assert.EndsWith(Path.Combine("obstacles", "basic", "a_b_c.json"), path);
-            Assert.Contains("a_b_c", mgr.ListLayouts());
-
-            var ids = mgr.Snapshot().Select(o => o.Id).OrderBy(i => i).ToArray();
-            Assert.Equal(3, ids.Length);
-            foreach (var id in ids) Assert.True(mgr.Remove(id));
-            Assert.Empty(mgr.Snapshot());
-
-            var (loaded, skipped) = mgr.Load("a/b:c", net);
-            Assert.Equal(3, loaded);
-            Assert.Equal(0, skipped);
-            Assert.Equal(ids, mgr.Snapshot().Select(o => o.Id).OrderBy(i => i).ToArray());
-
-            // Ids continue after the reloaded max.
-            var next = mgr.Place(net, "car", "blue", mx, my);
-            Assert.Equal(ids.Max() + 1, next.Id);
-        }
-        finally { Directory.Delete(dir, true); }
-    }
-
-    [Fact]
-    public void Load_SkipsMalformedOffRoadAndUnknownEntries()
-    {
-        var dir = TempDir();
-        try
-        {
-            var net = BasicNet();
-            var car = SpawnStraight(net);
-            var mgr = new ObstacleManager("basic", dir);
-            var (mx, my) = StraightMidpoint(net, car);
-
-            string layoutDir = Path.Combine(dir, "obstacles", "basic");
-            Directory.CreateDirectory(layoutDir);
-            string json = $$"""
-                {
-                  "map": "basic",
-                  "name": "handmade",
-                  "saved_at": "2026-01-01T00:00:00+00:00",
-                  "obstacles": [
-                    {"id": 7, "type": "car", "color": "blue",   "x": {{mx}}, "y": {{my}}, "heading": 180.0},
-                    {"id": 8, "type": "car", "color": "blue",   "y": {{my}}, "heading": 180.0},
-                    {"id": 9, "type": "car", "color": "blue",   "x": -5000, "y": -5000, "heading": 0.0},
-                    {"id": 10, "type": "car", "color": "purple","x": {{mx}}, "y": {{my}}, "heading": 90.0}
-                  ]
-                }
-                """;
-            File.WriteAllText(Path.Combine(layoutDir, "handmade.json"), json);
-
-            var (loaded, skipped) = mgr.Load("handmade", net);
-            Assert.Equal(1, loaded);
-            Assert.Equal(3, skipped);
-            Assert.NotNull(mgr.Get(7));
-            Assert.Null(mgr.Get(8));
-            Assert.Null(mgr.Get(9));
-            Assert.Null(mgr.Get(10));
-
-            // A layout whose 'map' field doesn't match is rejected outright.
-            File.WriteAllText(Path.Combine(layoutDir, "foreign.json"),
-                json.Replace("\"map\": \"basic\"", "\"map\": \"osm\""));
-            Assert.Throws<PlacementError>(() => mgr.Load("foreign", net));
-        }
-        finally { Directory.Delete(dir, true); }
-    }
+    // --- layout persistence (Save / Load / ListLayouts) ----------------------
+    // Retired with the obstacle entity (#27): `data/obstacles/<map>/<name>.json` had
+    // neither a REST endpoint nor a UI, so only these tests exercised it. A parked car
+    // needs no layout file - it is placed by /teleport and lives in the world, on the
+    // tape and in /state like any other car.
 
     // --- lane guard -------------------------------------------------------------
 

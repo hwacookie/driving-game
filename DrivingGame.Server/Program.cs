@@ -118,7 +118,6 @@ else
 // --- Obstacles (docs/OBSTACLES.md): layouts save per map name -------------------
 
 string mapLabel = mapName ?? "kleinmachnow";
-var obstacleMgr = new ObstacleManager(mapLabel);
 
 // --- Capacity benchmark (--bench): the sim's own throughput measure -------------
 // This measures the SIM, not the client, so it lives on the C# side: no REST
@@ -202,7 +201,7 @@ if (benchMode)
         Console.WriteLine($"--- {n} moving + {parkedN} parked");
         // A fresh engine per phase: no leftovers, and the raceline cache starts
         // cold like a real run does.
-        var eng = new SimEngine(network, obstacleMgr, mapLabel) { CollisionsEnabled = collisionsEnabled };
+        var eng = new SimEngine(network, mapLabel) { CollisionsEnabled = collisionsEnabled };
         for (int i = 0; i < n; i++)
         {
             int seg = loop[(int)System.Math.Round(i * (double)loop.Count / n) % loop.Count];
@@ -287,7 +286,7 @@ if (benchMode)
 
 // --- Engine + initial car(s) ------------------------------------------------------
 
-var engine = new SimEngine(network, obstacleMgr, mapLabel) { CollisionsEnabled = collisionsEnabled };
+var engine = new SimEngine(network, mapLabel) { CollisionsEnabled = collisionsEnabled };
 
 Car? initialCar = null;
 if (mapName is not null)
