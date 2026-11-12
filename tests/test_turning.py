@@ -453,14 +453,17 @@ def describe_failure(result: dict) -> str | None:
     if result.get("bay_clearances_m") is not None and not result.get("bay_ok", True):
         r, f = result["bay_clearances_m"]
         side = "the car behind it" if r <= f else "the car in front"
-        return (f"did not fit the bay: axial clearance to the neighbours "
-                f"rear {r:+.2f} m / front {f:+.2f} m - it is too close to "
+        return (f"did not fit the bay: fore/aft gap ALONG THE ROAD AXIS to the "
+                f"neighbours rear {r:+.2f} m / front {f:+.2f} m - it is too close to "
                 f"{side} (owner criterion #31: park between two already-parked "
-                f"cars without touching either). NOTE: this gap is measured along "
-                f"the road axis only, so a NEGATIVE value here does not prove "
-                f"contact - a car left in the driving lane straddles its neighbour "
-                f"fore/aft while being laterally clear (issue 40); read the perp "
-                f"value in the stop verdict before blaming the neighbour.")
+                f"cars without touching either). WHAT THIS NUMBER IS AND IS NOT "
+                f"(#40): the extent of each body along the axis accounts for its "
+                f"HEADING (a crooked car reaches further fore/aft: L/2|cos| + W/2|sin|), "
+                f"so a NEGATIVE value does not by itself prove contact - and the number "
+                f"says NOTHING about the lateral axis, so it cannot prove contact either "
+                f"way. A car left in the driving lane straddles its neighbour fore/aft "
+                f"while being laterally clear; read the perp value in the stop verdict "
+                f"before blaming the neighbour.")
     if result.get("kerb_check") and result.get("reached_expected_segment") \
             and result.get("stopped_at_end"):
         gaps = result.get("kerb_gaps_m")
@@ -1281,8 +1284,22 @@ class TurnTester:
 
     def bay_clearances_m(self, state: dict, seg_idx: int, primary_uid: int,
                          flank_uids: list[int]):
-        """Does the parking car fit BETWEEN its two neighbours, and how much room
-        is left at each end (#31)?
+        """Fore/aft gaps ALONG THE ROAD AXIS between the parking car and its two
+        neighbours (#31) - one axis only, by name.
+
+        The name says what is measured, because the number does not answer "do these
+        bodies touch":
+          - HEADING is folded in (#40, commit 5a55c99): each body's reach along the axis
+            is L/2|cos psi| + W/2|sin psi|, so a car yawed 30 deg owns more of the axis
+            than a parallel one. Ignoring that invented overlap for a crooked car while
+            hiding real overlap for a straight one.
+          - The LATERAL axis is not measured at all. Two bodies can show a positive
+            fore/aft gap and still be clear of each other sideways, or the reverse; this
+            function cannot tell, and no verdict may read it as contact.
+        Contact itself belongs to the sim (CarCollisions), and it DOES fire between two
+        parked cars - measured: two fiat_500 1.00 m apart centre-to-centre both report
+        CrashEpisodes=1. So a negative value here is a measurement of the pose, not a
+        collision report.
 
         Returns (clearance_to_rear_neighbour_m, clearance_to_front_neighbour_m) or
         None when the scene is incomplete. Positions are projected onto the
