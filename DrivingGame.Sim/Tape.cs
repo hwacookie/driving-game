@@ -712,6 +712,18 @@ public static class RunTape
         lock (Lock)
         {
             _recording = true;
+            // #110: a new run starts from an EMPTY tape, whatever the previous run left
+            // behind. `RunTape` is a process static shared by every test class (and by both
+            // hosts), and `Start()` used to reset everything EXCEPT the frames and events -
+            // only `Clear()` touched those. A fixture that cleaned up only in Dispose(), or
+            // not at all, therefore handed its frames to the next class. Proven with two
+            // throwaway classes: A records step 500 and never clears; B calls Start() and
+            // `FrameAt(500)` still answers non-null - another run's frame inside this run's
+            // tape. That is the intermittent TapeMapDescriptionTests failure (~1 run in 3).
+            // Clearing here makes "one test cannot influence another" a property of the API
+            // instead of a convention each fixture has to remember.
+            _frames.Clear();
+            _events.Clear();
             _names.Clear();          // a new run is a new cast
             _carOpts.Clear();        // ...and a new set of view options
             _carOptEvents.Clear();   // ...and no changes yet
