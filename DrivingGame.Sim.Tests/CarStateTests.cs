@@ -24,7 +24,7 @@ public class CarStateTests
     const double Dt = SimEngine.DtFixed;
 
     static SimEngine Engine() =>
-        new SimEngine(TestMaps.BuildTestMap("basic"), new ObstacleManager("basic"), "basic");
+        new SimEngine(TestMaps.BuildTestMap("basic"), "basic");
 
     static Car Spawn(SimEngine eng, string model, double progress, double speed, bool add)
     {

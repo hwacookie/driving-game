@@ -40,7 +40,7 @@ public class BayReverseInTests
     {
         var net = TestMaps.BuildTestMap("basic");
         int seg = net.SegmentByName[Avenue];
-        return (new SimEngine(net, new ObstacleManager("basic"), "basic"), seg);
+        return (new SimEngine(net, "basic"), seg);
     }
 
     static Car ParkNeighbour(SimEngine eng, int seg, double offsetM, string name)

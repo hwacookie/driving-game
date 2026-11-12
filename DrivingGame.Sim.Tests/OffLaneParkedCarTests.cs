@@ -34,7 +34,7 @@ public class OffLaneParkedCarTests
     {
         var net = TestMaps.BuildTestMap("basic");
         segIdx = net.SegmentByName[Avenue];
-        return new SimEngine(net, new ObstacleManager("basic"), "basic");
+        return new SimEngine(net, "basic");
     }
 
     /// <summary>Park one car at a lateral offset, then send a driver down the

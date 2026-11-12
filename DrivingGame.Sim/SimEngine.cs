@@ -197,7 +197,6 @@ public sealed class SimEngine
     /// it starts, so a review can rebuild the ground the cars were recorded on
     /// (#11). "engine boot" for a network nobody named.</summary>
     public string MapName { get; }
-    public ObstacleManager Obstacles { get; }
     public PhysicsValidator Validator { get; }
     public LaneGuard LaneGuard { get; }
 
@@ -345,10 +344,9 @@ public sealed class SimEngine
     }
     public IReadOnlyDictionary<int, Car> Cars => _cars;
 
-    public SimEngine(RoadNetwork network, ObstacleManager obstacles, string mapName = "")
+    public SimEngine(RoadNetwork network, string mapName = "")
     {
         Network = network;
-        Obstacles = obstacles;
         // The name the tape will carry. A host knows which map it was started
         // with; a hand-built network in a unit test does not, and for that the
         // old label stays honest (issue #11: "engine boot" was never a map name,
@@ -1109,12 +1107,10 @@ public sealed class SimEngine
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-UPD uid{c.Uid} v={c.Speed:F4}");
 
-                        // Stop-on-contact with obstacles (ALL modes): brake at
-                        // full braking and clamp so the body box never
-                        // interpenetrates an obstacle - the car rests against it.
-                        long tContact0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
-                        Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
-                        if (StepCost.Enabled) StepCost.Add(StepCost.Contact, tContact0, 1);
+                        // Stop-on-contact: retired with the obstacle entity (#27). A body
+                        // that does not move is a PARKED Car now, and car-car contact is
+                        // already owned by CarCollisions - this call only ever ran against
+                        // an empty obstacle list (nothing in this repo places one).
                         if (c.Uid is 37 or 38 && Frame is >= 845 and <= 852)   // TEMPORARY bisection
                             Console.WriteLine($"POST-CONTACT uid{c.Uid} v={c.Speed:F4}");
 
@@ -1222,12 +1218,10 @@ public sealed class SimEngine
                         c.Update(DtFixed, Network, carControl.GetValueOrDefault(c.Uid, ControlInput.Empty));
                         if (StepCost.Enabled) StepCost.Add(StepCost.Upd, tUpd0, 1);
 
-                        // Stop-on-contact with obstacles (ALL modes): brake at
-                        // full braking and clamp so the body box never
-                        // interpenetrates an obstacle - the car rests against it.
-                        long tContact0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
-                        bool inContact = Obstacles.ApplyContactStop(c, DtFixed, preX, preY, preH, Network);
-                        if (StepCost.Enabled) StepCost.Add(StepCost.Contact, tContact0, 1);
+                        // Stop-on-contact: retired with the obstacle entity (#27), see
+                        // above. No live contact path remains here, so the flag is false
+                        // and the validator below keeps its existing behaviour.
+                        bool inContact = false;
                         long tValidate0 = StepCost.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 
                         // Physics validation (independent check). While in contact

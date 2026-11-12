@@ -51,7 +51,7 @@ public class TapeMapNameTests : IDisposable
     public void Engine_StampsTheMapNameItWasGiven()
     {
         var net = TestMaps.BuildTestMap("basic");
-        var eng = new SimEngine(net, new ObstacleManager("basic"), "basic");
+        var eng = new SimEngine(net, "basic");
         Assert.Equal("basic", eng.MapName);
 
         var path = RunTape.Save(Path.Combine(_dir, "named.txt"));
@@ -68,7 +68,7 @@ public class TapeMapNameTests : IDisposable
         // A hand-built network in a test has no map name; the old label is honest
         // there — but it must reach the header in a shape the reader can parse.
         var net = TestMaps.BuildTestMap("basic");
-        var eng = new SimEngine(net, new ObstacleManager("basic"));
+        var eng = new SimEngine(net);
         Assert.Equal("engine boot", eng.MapName);
 
         var path = RunTape.Save(Path.Combine(_dir, "unnamed.txt"));
@@ -94,7 +94,7 @@ public class TapeMapNameTests : IDisposable
     public void NamedTape_LoadsAndKeepsItsMap()
     {
         var net = TestMaps.BuildTestMap("basic");
-        var eng = new SimEngine(net, new ObstacleManager("basic"), "basic");
+        var eng = new SimEngine(net, "basic");
         // One recorded substep: a tape with no frames is refused by Load (by
         // design - an empty file is not a run), so the round trip needs a car.
         var car = new Car(100.0, 200.0, 90.0, 0, new BicycleDriver()) { Model = "blue" };
